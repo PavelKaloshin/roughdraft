@@ -1,10 +1,18 @@
 import { describe, expect, it } from "vitest";
+import type { CriticComment } from "../src/critic-markup";
 import {
+  buildCommentThreadRailItems,
   getCommentAnchorMeasurements,
+  getRootThreadIdForCommentId,
   groupCommentAnchorMeasurements,
   normalizeCommentMeasurement,
   resolveCommentRailLayouts,
+  resolveCommentThreadRailLayouts,
 } from "../src/document-comments";
+
+function createCommentsMap(comments: CriticComment[]) {
+  return new Map(comments.map((comment) => [comment.id, comment]));
+}
 
 describe("document comment layout helpers", () => {
   it("maps DOM anchor boxes to positions relative to the editor", () => {
@@ -145,6 +153,261 @@ describe("document comment layout helpers", () => {
         key: "cmt-7",
         railTop: 242,
         railBottom: 322,
+      },
+    ]);
+  });
+
+  it("expands a shared anchor into one rail item per root thread", () => {
+    const comments = createCommentsMap([
+      {
+        id: "c1",
+        content: "First root",
+        createdAt: "2026-04-24T00:00:00.000Z",
+      },
+      {
+        id: "c2",
+        content: "Second root",
+        createdAt: "2026-04-24T00:00:01.000Z",
+      },
+      {
+        id: "c3",
+        content: "Reply",
+        createdAt: "2026-04-24T00:00:02.000Z",
+        parentCommentId: "c2",
+      },
+    ]);
+
+    const items = buildCommentThreadRailItems(
+      [
+        {
+          key: "c1::c2::c3",
+          commentIds: ["c1", "c2", "c3"],
+          anchorTop: 200,
+          anchorBottom: 214,
+        },
+      ],
+      comments,
+    );
+
+    expect(items).toEqual([
+      {
+        key: "c1",
+        anchorGroupKey: "c1::c2::c3",
+        rootCommentId: "c1",
+        commentIds: ["c1"],
+        anchorTop: 200,
+        anchorBottom: 214,
+      },
+      {
+        key: "c2",
+        anchorGroupKey: "c1::c2::c3",
+        rootCommentId: "c2",
+        commentIds: ["c2", "c3"],
+        anchorTop: 200,
+        anchorBottom: 214,
+      },
+    ]);
+  });
+
+  it("aligns the selected secondary root thread to the shared anchor", () => {
+    const layouts = resolveCommentThreadRailLayouts(
+      [
+        {
+          key: "c1",
+          anchorGroupKey: "shared",
+          rootCommentId: "c1",
+          commentIds: ["c1"],
+          anchorTop: 200,
+          anchorBottom: 214,
+        },
+        {
+          key: "c2",
+          anchorGroupKey: "shared",
+          rootCommentId: "c2",
+          commentIds: ["c2"],
+          anchorTop: 200,
+          anchorBottom: 214,
+        },
+      ],
+      {
+        c1: 90,
+        c2: 120,
+      },
+      "c2",
+      16,
+    );
+
+    expect(
+      layouts.map(({ key, railTop, railBottom }) => ({
+        key,
+        railTop,
+        railBottom,
+      })),
+    ).toEqual([
+      {
+        key: "c1",
+        railTop: 94,
+        railBottom: 184,
+      },
+      {
+        key: "c2",
+        railTop: 200,
+        railBottom: 320,
+      },
+    ]);
+  });
+
+  it("resolves reply selection to the parent root thread", () => {
+    const comments = createCommentsMap([
+      {
+        id: "c1",
+        content: "First root",
+        createdAt: "2026-04-24T00:00:00.000Z",
+      },
+      {
+        id: "c2",
+        content: "Second root",
+        createdAt: "2026-04-24T00:00:01.000Z",
+      },
+      {
+        id: "c3",
+        content: "Reply",
+        createdAt: "2026-04-24T00:00:02.000Z",
+        parentCommentId: "c2",
+      },
+    ]);
+
+    expect(getRootThreadIdForCommentId("c3", comments)).toBe("c2");
+
+    const layouts = resolveCommentThreadRailLayouts(
+      buildCommentThreadRailItems(
+        [
+          {
+            key: "c1::c2::c3",
+            commentIds: ["c1", "c2", "c3"],
+            anchorTop: 200,
+            anchorBottom: 214,
+          },
+        ],
+        comments,
+      ),
+      {
+        c1: 90,
+        c2: 120,
+      },
+      getRootThreadIdForCommentId("c3", comments),
+      16,
+    );
+
+    expect(layouts.find((layout) => layout.key === "c2")?.railTop).toBe(200);
+  });
+
+  it("pushes neighboring threads outward from the active thread with the requested gap", () => {
+    const layouts = resolveCommentThreadRailLayouts(
+      [
+        {
+          key: "c1",
+          anchorGroupKey: "g1",
+          rootCommentId: "c1",
+          commentIds: ["c1"],
+          anchorTop: 120,
+          anchorBottom: 134,
+        },
+        {
+          key: "c2",
+          anchorGroupKey: "g2",
+          rootCommentId: "c2",
+          commentIds: ["c2"],
+          anchorTop: 180,
+          anchorBottom: 194,
+        },
+        {
+          key: "c3",
+          anchorGroupKey: "g3",
+          rootCommentId: "c3",
+          commentIds: ["c3"],
+          anchorTop: 220,
+          anchorBottom: 234,
+        },
+      ],
+      {
+        c1: 70,
+        c2: 110,
+        c3: 80,
+      },
+      "c2",
+      24,
+    );
+
+    expect(
+      layouts.map(({ key, railTop, railBottom }) => ({
+        key,
+        railTop,
+        railBottom,
+      })),
+    ).toEqual([
+      {
+        key: "c1",
+        railTop: 86,
+        railBottom: 156,
+      },
+      {
+        key: "c2",
+        railTop: 180,
+        railBottom: 290,
+      },
+      {
+        key: "c3",
+        railTop: 314,
+        railBottom: 394,
+      },
+    ]);
+  });
+
+  it("keeps the selected thread aligned even when earlier threads go negative", () => {
+    const layouts = resolveCommentThreadRailLayouts(
+      [
+        {
+          key: "c1",
+          anchorGroupKey: "shared",
+          rootCommentId: "c1",
+          commentIds: ["c1"],
+          anchorTop: 80,
+          anchorBottom: 94,
+        },
+        {
+          key: "c2",
+          anchorGroupKey: "shared",
+          rootCommentId: "c2",
+          commentIds: ["c2"],
+          anchorTop: 80,
+          anchorBottom: 94,
+        },
+      ],
+      {
+        c1: 100,
+        c2: 120,
+      },
+      "c2",
+      16,
+    );
+
+    expect(
+      layouts.map(({ key, railTop, railBottom }) => ({
+        key,
+        railTop,
+        railBottom,
+      })),
+    ).toEqual([
+      {
+        key: "c1",
+        railTop: -36,
+        railBottom: 64,
+      },
+      {
+        key: "c2",
+        railTop: 80,
+        railBottom: 200,
       },
     ]);
   });

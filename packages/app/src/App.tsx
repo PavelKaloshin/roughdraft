@@ -1,255 +1,40 @@
 import { useEffect, useState, useCallback, useRef } from "react";
-import { ChevronLeft, Menu } from "lucide-react";
 import type { StorageBackend, Page, ProjectLayout } from "./storage";
 import { detectBackend } from "./detect-backend";
-import { Canvas } from "./Canvas";
+import { AppSidebar } from "./AppSidebar";
+import { CanvasWorkspace } from "./CanvasWorkspace";
+import { DocumentWorkspace } from "./DocumentWorkspace";
 import { HomeScreen } from "./HomeScreen";
-import { PageCard } from "./PageCard";
-import { PathSwitcher } from "./PathSwitcher";
-import { ProjectTreeSidebar } from "./ProjectTreeSidebar";
 import { UpdateNotice } from "./UpdateNotice";
+import {
+  CANVAS_FRAME_WIDTH,
+  type DocumentEditorViewMode,
+  type RequestedPathState,
+  type ViewMode,
+  buildLocationForDocumentEditorViewMode,
+  buildLocationForPath,
+  buildLocationForViewMode,
+  formatWorkspacePathForDisplay,
+  getCanvasFrameWidth,
+  getCanvasPageId,
+  getDocumentEditorViewModeFromLocation,
+  getDocumentNavigationState,
+  getPathLeaf,
+  getRequestedPathState,
+  getViewModeFromLocation,
+  getWorkspaceName,
+  getWorkspacePath,
+  joinPath,
+  syncProjectPathInUrl,
+  syncRequestedPathInUrl,
+} from "./app-navigation";
 import { LocalStorageBackend } from "./local-storage-backend";
 import { recordRecentOpen } from "./recent-items";
 import { fetchUpdateStatus, type UpdateStatus } from "./update-status";
-import { Button } from "./components/ui/button";
-
-interface RequestedPathState {
-  rawPath: string | null;
-  projectPath: string | null;
-  documentPath: string | null;
-}
 
 interface CanvasRevealRequest {
   pageId: string;
   key: string;
-}
-
-type ViewMode = "canvas" | "document";
-
-const CANVAS_FRAME_WIDTH = 680;
-const CANVAS_FRAME_WIDTH_WITH_RAIL = 960;
-
-function normalizePathSeparators(value: string) {
-  return value.replace(/\\/g, "/");
-}
-
-function getRawPathFromLocation(): string | null {
-  const searchParams = new URLSearchParams(window.location.search);
-  const queryPath = searchParams.get("path")?.trim();
-  if (queryPath) return queryPath;
-
-  const normalizedPathname = normalizePathSeparators(window.location.pathname);
-  if (normalizedPathname !== "/" && !normalizedPathname.startsWith("/api")) {
-    const decodedPathname = decodeURIComponent(normalizedPathname);
-    return decodedPathname.startsWith("/")
-      ? decodedPathname
-      : `/${decodedPathname}`;
-  }
-
-  return null;
-}
-
-function getViewModeFromLocation(fallbackMode: ViewMode): ViewMode {
-  const searchParams = new URLSearchParams(window.location.search);
-  const requestedMode = searchParams.get("mode");
-  if (requestedMode === "canvas" || requestedMode === "document") {
-    return requestedMode;
-  }
-  return fallbackMode;
-}
-
-function getRequestedPathState(): RequestedPathState {
-  const rawPath = getRawPathFromLocation();
-  if (!rawPath) {
-    return { rawPath: null, projectPath: null, documentPath: null };
-  }
-
-  const normalizedPath = normalizePathSeparators(rawPath);
-  if (!normalizedPath.toLowerCase().endsWith(".md")) {
-    return { rawPath, projectPath: rawPath, documentPath: null };
-  }
-
-  const lastSlashIndex = Math.max(
-    normalizedPath.lastIndexOf("/"),
-    normalizedPath.lastIndexOf("\\"),
-  );
-  const projectPath =
-    lastSlashIndex >= 0 ? rawPath.slice(0, lastSlashIndex) || "/" : ".";
-  const documentPath = rawPath.slice(lastSlashIndex + 1);
-
-  return { rawPath, projectPath, documentPath };
-}
-
-function getWorkspacePath(path?: string) {
-  return path?.trim() || null;
-}
-
-function formatWorkspacePathForDisplay(path?: string | null) {
-  const value = path?.trim();
-  if (!value) return null;
-
-  const normalizedPath = normalizePathSeparators(value);
-  const collapsedHomePath = normalizedPath.replace(
-    /^\/Users\/[^/]+(?=\/|$)/,
-    "~",
-  );
-  return value.includes("\\")
-    ? collapsedHomePath.replace(/\//g, "\\")
-    : collapsedHomePath;
-}
-
-function getWorkspaceName(path?: string) {
-  const workspacePath = getWorkspacePath(path);
-  if (!workspacePath) return "Browser drafts";
-
-  const segments = workspacePath.split(/[\\/]/).filter(Boolean);
-  return segments.at(-1) || workspacePath;
-}
-
-function getPathLeaf(path?: string | null) {
-  const value = path?.trim();
-  if (!value) return null;
-
-  const segments = value.split(/[\\/]/).filter(Boolean);
-  return segments.at(-1) || value;
-}
-
-function hasCriticMarkupComments(content: string) {
-  return content.includes("{>>");
-}
-
-function getCanvasFrameWidth(
-  page: Page | null | undefined,
-  fallbackWidth: number,
-) {
-  if (!page) return fallbackWidth;
-  return hasCriticMarkupComments(page.content)
-    ? CANVAS_FRAME_WIDTH_WITH_RAIL
-    : fallbackWidth;
-}
-
-function getSaveStateLabel(saveState: "idle" | "saving" | "error") {
-  switch (saveState) {
-    case "saving":
-      return "Saving…";
-    case "error":
-      return "Save failed";
-    default:
-      return "Saved";
-  }
-}
-
-function joinPath(basePath: string, relativePath: string) {
-  const separator = basePath.includes("\\") ? "\\" : "/";
-  const normalizedBasePath = basePath.endsWith(separator)
-    ? basePath.slice(0, -1)
-    : basePath;
-
-  return relativePath
-    .split("/")
-    .filter(Boolean)
-    .reduce(
-      (result, segment) => `${result}${separator}${segment}`,
-      normalizedBasePath,
-    );
-}
-
-function getCanvasPageId(relativePath: string) {
-  const normalizedPath = normalizePathSeparators(relativePath);
-  if (normalizedPath.includes("/")) return null;
-  return normalizedPath.replace(/\.md$/i, "");
-}
-
-function getContainingPath(pathValue: string) {
-  const trimmedPath = pathValue.trim();
-  if (!trimmedPath) return trimmedPath;
-
-  const normalizedPath = trimmedPath.replace(/[\\/]+$/, "");
-  if (!normalizedPath) return trimmedPath.startsWith("\\") ? "\\" : "/";
-
-  const lastSeparatorIndex = Math.max(
-    normalizedPath.lastIndexOf("/"),
-    normalizedPath.lastIndexOf("\\"),
-  );
-
-  if (lastSeparatorIndex < 0) return ".";
-  if (lastSeparatorIndex === 0) return normalizedPath[0] === "\\" ? "\\" : "/";
-  return normalizedPath.slice(0, lastSeparatorIndex);
-}
-
-function getOpenedFolderPath(pathValue: string) {
-  const trimmedPath = pathValue.trim();
-  if (!trimmedPath) return trimmedPath;
-
-  return normalizePathSeparators(trimmedPath).toLowerCase().endsWith(".md")
-    ? getContainingPath(trimmedPath)
-    : trimmedPath.replace(/[\\/]+$/, "") || trimmedPath;
-}
-
-function getDocumentNavigationState(
-  projectPath: string,
-  relativePath: string,
-  currentRawPath: string | null,
-): RequestedPathState {
-  const relativeFolderPath = getContainingPath(relativePath);
-  const nextFolderPath =
-    relativeFolderPath === "."
-      ? projectPath
-      : joinPath(projectPath, relativeFolderPath);
-  const shouldPreserveUrl =
-    !!currentRawPath &&
-    normalizePathSeparators(getOpenedFolderPath(currentRawPath)) ===
-      normalizePathSeparators(nextFolderPath);
-
-  return {
-    rawPath: shouldPreserveUrl
-      ? currentRawPath
-      : joinPath(projectPath, relativePath),
-    projectPath,
-    documentPath: relativePath,
-  };
-}
-
-function buildLocationForPath(path?: string | null) {
-  const nextPath = path?.trim() || null;
-  const url = new URL(window.location.href);
-
-  if (nextPath) {
-    if (!nextPath.includes("\\")) {
-      url.pathname = nextPath.startsWith("/") ? nextPath : `/${nextPath}`;
-      url.searchParams.delete("path");
-    } else {
-      url.pathname = "/";
-      url.searchParams.set("path", nextPath);
-    }
-  } else {
-    url.searchParams.delete("path");
-    url.pathname = "/";
-  }
-
-  return `${url.pathname}${url.search}${url.hash}`;
-}
-
-function buildLocationForViewMode(mode: ViewMode) {
-  const url = new URL(window.location.href);
-  url.searchParams.set("mode", mode);
-  return `${url.pathname}${url.search}${url.hash}`;
-}
-
-function syncProjectPathInUrl(projectPath?: string) {
-  const nextLocation = buildLocationForPath(getWorkspacePath(projectPath));
-  const currentLocation = `${window.location.pathname}${window.location.search}${window.location.hash}`;
-  if (nextLocation !== currentLocation) {
-    window.history.replaceState(null, "", nextLocation);
-  }
-}
-
-function syncRequestedPathInUrl(path?: string | null) {
-  const nextLocation = buildLocationForPath(path);
-  const currentLocation = `${window.location.pathname}${window.location.search}${window.location.hash}`;
-  if (nextLocation !== currentLocation) {
-    window.history.replaceState(null, "", nextLocation);
-  }
 }
 
 export function App() {
@@ -273,11 +58,11 @@ export function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [canvasRevealRequest, setCanvasRevealRequest] =
     useState<CanvasRevealRequest | null>(null);
-  const [documentSaveState, setDocumentSaveState] = useState<
-    "idle" | "saving" | "error"
-  >("idle");
-  const [documentToolbarHost, setDocumentToolbarHost] =
-    useState<HTMLDivElement | null>(null);
+  const [, setDocumentSaveState] = useState<"idle" | "saving" | "error">(
+    "idle",
+  );
+  const documentEditorViewMode =
+    getDocumentEditorViewModeFromLocation("rich-text");
   const [projectTreeVersion, setProjectTreeVersion] = useState(0);
   const [loading, setLoading] = useState(true);
   const [demoModeEnabled, setDemoModeEnabled] = useState(false);
@@ -692,8 +477,16 @@ export function App() {
     [viewMode],
   );
 
+  const handleDocumentEditorViewModeChange = useCallback(
+    (nextMode: DocumentEditorViewMode) => {
+      if (nextMode === documentEditorViewMode) return;
+      window.location.assign(buildLocationForDocumentEditorViewMode(nextMode));
+    },
+    [documentEditorViewMode],
+  );
+
   if (loading) {
-    return <div className="h-screen bg-white" aria-hidden="true" />;
+    return <div className="h-screen bg-[#FCFCFC]" aria-hidden="true" />;
   }
 
   const shouldShowHomepage = !requestedPathState.rawPath && !demoModeEnabled;
@@ -768,241 +561,76 @@ export function App() {
         }
       : null;
   const projectLabel = getPathLeaf(backend?.info.projectPath) ?? workspaceName;
-  const documentSaveStateClass =
-    documentSaveState === "error"
-      ? "text-rose-600"
-      : documentSaveState === "saving"
-        ? "text-amber-600"
-        : "text-slate-400";
+  const documentFilenameLabel =
+    getPathLeaf(activeDocumentPath) ?? "Untitled.md";
   const sidebarToggleLabel = sidebarVisible ? "Hide sidebar" : "Show sidebar";
 
   return (
-    <div className="flex h-screen overflow-hidden bg-white text-slate-950">
+    <div className="flex h-screen overflow-hidden bg-[#FCFCFC] text-slate-950">
       {sidebarVisible ? (
-        <aside
-          className={`flex h-full w-[320px] max-w-[34vw] min-w-[280px] shrink-0 flex-col border-r ${
-            isDocumentMode
-              ? "border-slate-200 bg-white"
-              : "border-slate-200/80 bg-white"
-          }`}
-        >
-          <div
-            className={`border-b px-4 pt-5 pb-4 ${isDocumentMode ? "border-slate-200" : "border-slate-200/80"}`}
-          >
-            {!isDocumentMode ? (
-              <div className="mb-3 flex justify-end">
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="rounded-[10px] text-slate-600 hover:bg-slate-100 hover:text-slate-900"
-                  onClick={() => setSidebarVisible(false)}
-                  aria-label={sidebarToggleLabel}
-                  title={sidebarToggleLabel}
-                >
-                  <ChevronLeft className="size-4" />
-                </Button>
-              </div>
-            ) : null}
-
-            {backend ? (
-              <PathSwitcher
-                backend={backend}
-                currentLabel={projectLabel}
-                currentPath={displayPath ?? null}
-                projectPath={backend.info.projectPath ?? null}
-                buildLocationForPath={buildLocationForPath}
-                dismissCount={pathSwitcherDismissCount}
-                description={workspacePathLabel}
-              />
-            ) : (
-              <div className="rounded-[14px] border border-slate-200/80 bg-white/80 px-4 py-3 shadow-[0_8px_24px_rgba(15,23,42,0.06)]">
-                <div className="truncate text-[0.95rem] font-semibold tracking-[-0.02em] text-slate-950">
-                  {projectLabel}
-                </div>
-                <div className="mt-1 truncate text-[0.74rem] text-slate-500">
-                  {workspacePathLabel}
-                </div>
-              </div>
-            )}
-
-            <div className="mt-4">
-              <div className="grid h-9 grid-cols-2 rounded-[10px] border border-slate-200/80 bg-white/75 p-1 shadow-[0_6px_18px_rgba(15,23,42,0.04)]">
-                <button
-                  type="button"
-                  className={`rounded-[8px] px-3 text-[0.82rem] font-semibold transition ${
-                    viewMode === "canvas"
-                      ? "bg-slate-900 text-white shadow-[0_6px_14px_rgba(15,23,42,0.18)]"
-                      : "text-slate-600 hover:bg-slate-100/80"
-                  }`}
-                  onClick={() => void handleViewModeChange("canvas")}
-                >
-                  Canvas
-                </button>
-                <button
-                  type="button"
-                  className={`rounded-[8px] px-3 text-[0.82rem] font-semibold transition ${
-                    isDocumentMode
-                      ? "bg-slate-900 text-white shadow-[0_6px_14px_rgba(15,23,42,0.18)]"
-                      : "text-slate-600 hover:bg-slate-100/80"
-                  }`}
-                  onClick={() => void handleViewModeChange("document")}
-                >
-                  Document
-                </button>
-              </div>
-            </div>
-
-            <div className="mt-3">
-              <Button
-                type="button"
-                variant={isDocumentMode ? "outline" : "default"}
-                className={`h-10 w-full justify-center rounded-[10px] border text-[0.84rem] font-semibold shadow-none ${
-                  isDocumentMode
-                    ? "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
-                    : "border-slate-900 bg-slate-900 text-white hover:bg-slate-800"
-                }`}
-                onClick={() => void handleCreatePage()}
-                title={isDocumentMode ? "New document" : "New page"}
-              >
-                {isDocumentMode ? "+ New document" : "+ New page"}
-              </Button>
-            </div>
-          </div>
-
-          <div className="min-h-0 flex-1">
-            {backend ? (
-              <ProjectTreeSidebar
-                backend={backend}
-                projectPath={backend.info.projectPath ?? null}
-                currentPath={treeCurrentPath ?? null}
-                buildLocationForPath={buildLocationForPath}
-                layout="embedded"
-                refreshKey={projectTreeVersion}
-                onOpenMarkdownPage={handleOpenMarkdownPage}
-              />
-            ) : null}
-          </div>
-        </aside>
+        <AppSidebar
+          isDocumentMode={isDocumentMode}
+          sidebarToggleLabel={sidebarToggleLabel}
+          backend={backend}
+          projectLabel={projectLabel}
+          displayPath={displayPath ?? null}
+          workspacePathLabel={workspacePathLabel}
+          buildLocationForPath={buildLocationForPath}
+          pathSwitcherDismissCount={pathSwitcherDismissCount}
+          viewMode={viewMode}
+          onViewModeChange={handleViewModeChange}
+          onCreatePage={() => void handleCreatePage()}
+          onHideSidebar={() => setSidebarVisible(false)}
+          treeCurrentPath={treeCurrentPath ?? null}
+          projectTreeVersion={projectTreeVersion}
+          onOpenMarkdownPage={handleOpenMarkdownPage}
+        />
       ) : null}
 
       <main className="relative min-w-0 flex-1 overflow-hidden">
         {updateStatus ? (
-          <div
-            className={`pointer-events-none absolute right-4 z-40 max-w-sm ${
-              isDocumentMode ? "top-16" : "top-4"
-            }`}
-          >
+          <div className="pointer-events-none absolute top-4 right-4 z-40 max-w-sm">
             <div className="pointer-events-auto">
               <UpdateNotice updateStatus={updateStatus} />
             </div>
           </div>
         ) : null}
-        {!sidebarVisible && !isDocumentMode ? (
-          <div className="absolute top-4 left-4 z-30">
-            <Button
-              type="button"
-              variant="outline"
-              size="icon"
-              className="size-9 rounded-[10px] border-slate-200 bg-white/94 text-slate-700 shadow-[0_10px_24px_rgba(15,23,42,0.08)] backdrop-blur hover:bg-white"
-              onClick={() => setSidebarVisible(true)}
-              aria-label={sidebarToggleLabel}
-              title={sidebarToggleLabel}
-            >
-              <Menu className="size-4" />
-            </Button>
-          </div>
-        ) : null}
-        <div className="flex h-full flex-col overflow-hidden bg-white">
+        <div className="flex h-full flex-col overflow-hidden bg-[#FCFCFC]">
           {isDocumentMode ? (
-            <>
-              <div className="border-b border-slate-200 bg-white/92 px-5 py-2 backdrop-blur sm:px-8">
-                <div className="flex w-full items-center gap-2">
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon-sm"
-                    className="shrink-0 rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-900"
-                    onClick={() => setSidebarVisible((visible) => !visible)}
-                    aria-label={sidebarToggleLabel}
-                    title={sidebarToggleLabel}
-                  >
-                    {sidebarVisible ? (
-                      <ChevronLeft className="size-4" />
-                    ) : (
-                      <Menu className="size-4" />
-                    )}
-                  </Button>
-                  <div
-                    ref={setDocumentToolbarHost}
-                    className="min-w-0 flex-1 overflow-x-auto"
-                  />
-                  <div
-                    className={`shrink-0 text-[0.68rem] font-medium ${documentSaveStateClass}`}
-                    title={getSaveStateLabel(documentSaveState)}
-                  >
-                    {getSaveStateLabel(documentSaveState)}
-                  </div>
-                </div>
-              </div>
-              <div className="min-h-0 flex-1 overflow-y-auto px-8 py-8 sm:px-12">
-                <div className="mx-auto min-h-full max-w-[1080px]">
-                  {documentPage ? (
-                    backend ? (
-                      <PageCard
-                        key={`${documentPage.id}:${activeDocumentPath ?? ""}`}
-                        page={documentPage}
-                        mode="document"
-                        selected
-                        canDelete={false}
-                        onSave={handleSaveDocument}
-                        onSaveStateChange={setDocumentSaveState}
-                        documentToolbarHost={documentToolbarHost}
-                        backend={backend}
-                      />
-                    ) : null
-                  ) : (
-                    <div className="flex min-h-[50vh] items-center justify-center text-sm text-slate-500">
-                      Select a markdown file from the sidebar.
-                    </div>
-                  )}
-                </div>
-              </div>
-            </>
+            <DocumentWorkspace
+              sidebarVisible={sidebarVisible}
+              sidebarToggleLabel={sidebarToggleLabel}
+              onToggleSidebar={() => setSidebarVisible((visible) => !visible)}
+              documentPage={documentPage}
+              activeDocumentPath={activeDocumentPath}
+              documentFilenameLabel={documentFilenameLabel}
+              documentEditorViewMode={documentEditorViewMode}
+              onDocumentEditorViewModeChange={
+                handleDocumentEditorViewModeChange
+              }
+              onSaveDocument={handleSaveDocument}
+              onDocumentSaveStateChange={setDocumentSaveState}
+              backend={backend}
+            />
           ) : (
-            <Canvas
-              onPointerDownOnCanvas={handleCanvasPointerDown}
+            <CanvasWorkspace
+              sidebarVisible={sidebarVisible}
+              sidebarToggleLabel={sidebarToggleLabel}
+              onShowSidebar={() => setSidebarVisible(true)}
+              pages={pages}
+              layout={layout}
+              backend={backend}
+              selectedId={selectedId}
+              canvasRevealRequest={canvasRevealRequest}
               initialWorldCenter={initialWorldCenter}
               initialWorldCenterKey={initialWorldCenterKey}
-              focusedWorldFrame={revealedPageFrame}
-              focusedWorldFrameKey={canvasRevealRequest?.key}
-            >
-              {pages.map((page) => {
-                const pos = layout.pages[page.id] || { x: 0, y: 0 };
-                if (!backend) return null;
-
-                return (
-                  <PageCard
-                    key={page.id}
-                    page={page}
-                    x={pos.x}
-                    y={pos.y}
-                    selected={selectedId === page.id}
-                    focusRequestKey={
-                      canvasRevealRequest?.pageId === page.id
-                        ? canvasRevealRequest.key
-                        : null
-                    }
-                    canDelete
-                    onSelect={setSelectedId}
-                    onSave={handleSavePage}
-                    onReposition={handleReposition}
-                    onDelete={handleDeletePage}
-                    backend={backend}
-                  />
-                );
-              })}
-            </Canvas>
+              revealedPageFrame={revealedPageFrame}
+              onCanvasPointerDown={handleCanvasPointerDown}
+              onSelectPage={setSelectedId}
+              onSavePage={handleSavePage}
+              onReposition={handleReposition}
+              onDeletePage={handleDeletePage}
+            />
           )}
         </div>
       </main>

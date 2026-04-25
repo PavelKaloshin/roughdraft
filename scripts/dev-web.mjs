@@ -15,29 +15,16 @@ function spawnPnpm(args, extraEnv = {}) {
 const appPort = await findAvailableLoopbackPort(
   parseInt(process.env.APP_PORT || "3000", 10),
 );
-let apiPort = await findAvailableLoopbackPort(
-  parseInt(process.env.API_PORT || "3001", 10),
-);
-
-if (apiPort === appPort) {
-  apiPort = await findAvailableLoopbackPort(apiPort + 1);
-}
 
 console.log(`Using app port ${appPort}.`);
-console.log(`Using API port ${apiPort}.`);
-console.log(`Open Roughdraft in dev at http://localhost:${appPort}`);
+console.log(`Open Roughdraft web preview at http://localhost:${appPort}`);
 console.log(
   `Open files directly with http://localhost:${appPort}/absolute/path/to/file.md`,
 );
-console.log(
-  `API port ${apiPort} is internal; don't use it as the browser URL.`,
-);
+console.log("This preview uses local storage and does not read local files.");
 
-writeDevFrontendState({ appPort, apiPort, mode: "full-dev" });
+writeDevFrontendState({ appPort, mode: "preview-web" });
 
-const server = spawnPnpm(["--filter", "@roughdraft/server", "dev"], {
-  API_PORT: String(apiPort),
-});
 const app = spawnPnpm(
   [
     "--filter",
@@ -51,7 +38,7 @@ const app = spawnPnpm(
     "--strictPort",
   ],
   {
-    API_PORT: String(apiPort),
+    VITE_PREVIEW_WEB: "1",
   },
 );
 
@@ -63,28 +50,18 @@ function shutdown(signal) {
   removeDevFrontendState();
 
   if (signal) {
-    console.log(`\nStopping dev servers (${signal}).`);
+    console.log(`\nStopping web preview (${signal}).`);
   }
 
-  server.kill("SIGTERM");
   app.kill("SIGTERM");
 }
 
 process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 
-server.on("exit", (code) => {
-  removeDevFrontendState();
-  if (!shuttingDown) {
-    app.kill("SIGTERM");
-    process.exit(code ?? 0);
-  }
-});
-
 app.on("exit", (code) => {
   removeDevFrontendState();
   if (!shuttingDown) {
-    server.kill("SIGTERM");
     process.exit(code ?? 0);
   }
 });

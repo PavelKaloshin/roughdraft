@@ -62,16 +62,27 @@ function printHelp(log = console.log) {
   log("");
   log("Environment:");
   log("  ROUGHDRAFT_DEV_BIN_DIR   Override the wrapper install directory.");
+  log(
+    "  ROUGHDRAFT_DEV_STATE_BASE_DIR   Override the per-wrapper state directory root.",
+  );
 }
 
 function getDefaultBinDir(env = process.env) {
   return env.ROUGHDRAFT_DEV_BIN_DIR || path.join(os.homedir(), ".local", "bin");
 }
 
-function buildWrapperContent({ repoRoot, cliEntryPath }) {
+function buildDefaultStateDir(commandName, env = process.env) {
+  const baseDir =
+    env.ROUGHDRAFT_DEV_STATE_BASE_DIR ||
+    path.join(os.homedir(), ".roughdraft", "dev");
+  return path.join(baseDir, commandName);
+}
+
+function buildWrapperContent({ repoRoot, cliEntryPath, stateDir }) {
   return [
     "#!/usr/bin/env bash",
     `# roughdraft-dev-repo-root=${repoRoot}`,
+    `if [[ -z "\${ROUGHDRAFT_STATE_DIR:-}" ]]; then export ROUGHDRAFT_STATE_DIR=${shellDoubleQuote(stateDir)}; fi`,
     `exec node ${shellDoubleQuote(cliEntryPath)} "$@"`,
     "",
   ].join("\n");
@@ -101,8 +112,13 @@ export function installDevCli(options = {}) {
     "roughdraft.mjs",
   );
   const commandName = `roughdraft-dev-${suffix}`;
+  const stateDir = options.stateDir ?? buildDefaultStateDir(commandName, env);
   const wrapperPath = path.join(binDir, commandName);
-  const wrapperContent = buildWrapperContent({ repoRoot, cliEntryPath });
+  const wrapperContent = buildWrapperContent({
+    repoRoot,
+    cliEntryPath,
+    stateDir,
+  });
   const log = options.log ?? console.log;
   const warn = options.warn ?? console.warn;
 
@@ -135,6 +151,7 @@ export function installDevCli(options = {}) {
     binDir,
     commandName,
     repoRoot,
+    stateDir,
     suffix,
     wrapperPath,
   };

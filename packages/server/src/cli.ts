@@ -29,7 +29,17 @@ export interface RoughdraftServerState {
 interface StatusPayload {
   backend?: string;
   projectDir?: string;
+  serverRoot?: string;
   port?: number;
+}
+
+interface DevFrontendState {
+  apiPort: number | null;
+  appPort: number;
+  mode?: "full-dev" | "preview-web";
+  repoRoot: string;
+  startedAt: string;
+  url: string;
 }
 
 export interface SpawnedServer {
@@ -79,6 +89,10 @@ interface ReusableServer {
   pid: number | null;
   startedAt: string | null;
 }
+
+const currentServerRoot = path.resolve(
+  fileURLToPath(new URL("../../..", import.meta.url)),
+);
 
 function hasChromeAppMode() {
   if (process.platform !== "darwin") return false;
@@ -303,13 +317,24 @@ function buildPublicBaseUrl(port: number): string {
   return `http://${ROUGHDRAFT_PUBLIC_HOST}:${port}`;
 }
 
+function getDevFrontendStateFilePath(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const explicitFile = env.ROUGHDRAFT_DEV_FRONTEND_STATE_FILE?.trim();
+  if (explicitFile) {
+    return path.resolve(explicitFile);
+  }
+
+  return path.join(currentServerRoot, ".context", "dev-frontend.json");
+}
+
 function buildLoopbackUrl(host: string, port: number, pathname = "/"): URL {
   const baseHost = host.includes(":") ? `[${host}]` : host;
   return new URL(`http://${baseHost}:${port}${pathname}`);
 }
 
-function buildTargetUrl(port: number, openPath: string): string {
-  const url = new URL(buildPublicBaseUrl(port));
+function buildTargetUrl(baseUrl: string, openPath: string): string {
+  const url = new URL(baseUrl);
 
   if (openPath.includes("\\")) {
     url.searchParams.set("path", openPath);
@@ -396,6 +421,28 @@ function isValidServerState(value: unknown): value is RoughdraftServerState {
   );
 }
 
+function isValidDevFrontendState(value: unknown): value is DevFrontendState {
+  if (!value || typeof value !== "object") return false;
+
+  const candidate = value as Partial<DevFrontendState>;
+  return (
+    (candidate.apiPort === null ||
+      (typeof candidate.apiPort === "number" &&
+        Number.isFinite(candidate.apiPort))) &&
+    typeof candidate.appPort === "number" &&
+    Number.isFinite(candidate.appPort) &&
+    (candidate.mode === undefined ||
+      candidate.mode === "full-dev" ||
+      candidate.mode === "preview-web") &&
+    typeof candidate.repoRoot === "string" &&
+    candidate.repoRoot.length > 0 &&
+    typeof candidate.startedAt === "string" &&
+    candidate.startedAt.length > 0 &&
+    typeof candidate.url === "string" &&
+    candidate.url.length > 0
+  );
+}
+
 function readServerStateFromDisk(
   stateFilePath: string,
 ): RoughdraftServerState | null {
@@ -410,6 +457,20 @@ function readServerStateFromDisk(
   if (fs.existsSync(stateFilePath)) {
     removeServerStateFile(stateFilePath);
   }
+
+  return null;
+}
+
+function readDevFrontendStateFromDisk(
+  stateFilePath: string,
+): DevFrontendState | null {
+  try {
+    const raw = fs.readFileSync(stateFilePath, "utf8");
+    const parsed = JSON.parse(raw) as unknown;
+    if (isValidDevFrontendState(parsed)) {
+      return parsed;
+    }
+  } catch {}
 
   return null;
 }
@@ -483,6 +544,73 @@ async function waitForServerToStop(
   return false;
 }
 
+async function resolveLiveDevFrontendBaseUrl(
+  deps: CliDependencies,
+): Promise<string | null> {
+  const state = readDevFrontendStateFromDisk(
+    getDevFrontendStateFilePath(deps.env),
+  );
+  if (!state) {
+    return null;
+  }
+
+  if (path.resolve(state.repoRoot) !== currentServerRoot) {
+    return null;
+  }
+
+  try {
+    const frontendUrl = new URL(state.url);
+    const mode =
+      state.mode ?? (state.apiPort === null ? "preview-web" : "full-dev");
+
+    if (mode === "preview-web") {
+      const response = await deps.fetchImpl(frontendUrl, {
+        signal: AbortSignal.timeout(STATUS_TIMEOUT_MS),
+      });
+
+      if (!response.ok) {
+        return null;
+      }
+    } else {
+      const statusUrl = new URL("/api/status", frontendUrl);
+      const response = await deps.fetchImpl(statusUrl, {
+        signal: AbortSignal.timeout(STATUS_TIMEOUT_MS),
+      });
+
+      if (!response.ok) {
+        return null;
+      }
+
+      const payload = (await response.json()) as StatusPayload;
+      if (payload.backend !== "local-files") {
+        return null;
+      }
+
+      if (
+        !payload.serverRoot ||
+        path.resolve(payload.serverRoot) !== currentServerRoot
+      ) {
+        return null;
+      }
+
+      if (
+        typeof payload.port === "number" &&
+        state.apiPort !== null &&
+        payload.port !== state.apiPort
+      ) {
+        return null;
+      }
+    }
+
+    frontendUrl.pathname = "/";
+    frontendUrl.search = "";
+    frontendUrl.hash = "";
+    return frontendUrl.toString();
+  } catch {
+    return null;
+  }
+}
+
 async function normalizeTrackedState(
   persistedState: RoughdraftServerState,
   stateFilePath: string,
@@ -501,16 +629,25 @@ async function normalizeTrackedState(
 
 async function findReusableServer(
   deps: CliDependencies,
+  options: { serverRoot?: string } = {},
 ): Promise<ReusableServer | null> {
   const stateFilePath = getServerStateFilePath(deps.env);
   const persistedState = readServerStateFromDisk(stateFilePath);
   const preferredPort = parsePort(deps.env.PORT);
+  const expectedServerRoot = path.resolve(
+    options.serverRoot ?? currentServerRoot,
+  );
+
+  const matchesServerRoot = (payload: StatusPayload | null) =>
+    payload?.serverRoot
+      ? path.resolve(payload.serverRoot) === expectedServerRoot
+      : false;
 
   if (persistedState) {
     const pidRunning = deps.isProcessRunning(persistedState.pid);
     const statusPayload = await getStatusPayload(persistedState.port, deps);
 
-    if (pidRunning && statusPayload) {
+    if (pidRunning && statusPayload && matchesServerRoot(statusPayload)) {
       const normalizedState = await normalizeTrackedState(
         persistedState,
         stateFilePath,
@@ -526,7 +663,7 @@ async function findReusableServer(
 
     removeServerStateFile(stateFilePath);
 
-    if (statusPayload) {
+    if (statusPayload && matchesServerRoot(statusPayload)) {
       return {
         port: persistedState.port,
         url: buildPublicBaseUrl(persistedState.port),
@@ -538,7 +675,7 @@ async function findReusableServer(
   }
 
   const preferredStatus = await getStatusPayload(preferredPort, deps);
-  if (!preferredStatus) {
+  if (!preferredStatus || !matchesServerRoot(preferredStatus)) {
     return null;
   }
 
@@ -554,7 +691,9 @@ async function findReusableServer(
 export async function readRunningServerState(
   deps: CliDependencies,
 ): Promise<RoughdraftServerState | null> {
-  const reusableServer = await findReusableServer(deps);
+  const reusableServer = await findReusableServer(deps, {
+    serverRoot: currentServerRoot,
+  });
   if (
     !reusableServer?.tracked ||
     reusableServer.pid === null ||
@@ -575,7 +714,9 @@ export async function ensureServerRunning(
   deps: CliDependencies,
   options: { projectDir?: string } = {},
 ): Promise<EnsureRunningResult> {
-  const reusableServer = await findReusableServer(deps);
+  const reusableServer = await findReusableServer(deps, {
+    serverRoot: currentServerRoot,
+  });
   if (reusableServer) {
     return { server: reusableServer, reused: true, portChanged: false };
   }
@@ -755,11 +896,21 @@ export async function runCli(
     }
 
     const { projectDir, openPath } = resolvedTarget;
-    const result = await ensureServerRunning(deps, { projectDir });
-    const targetUrl = buildTargetUrl(result.server.port, openPath);
+    const liveDevFrontendUrl = await resolveLiveDevFrontendBaseUrl(deps);
+    let result: EnsureRunningResult | null = null;
+    let baseUrl: string;
+
+    if (liveDevFrontendUrl) {
+      baseUrl = liveDevFrontendUrl;
+    } else {
+      result = await ensureServerRunning(deps, { projectDir });
+      baseUrl = buildPublicBaseUrl(result.server.port);
+    }
+
+    const targetUrl = buildTargetUrl(baseUrl, openPath);
     const openMode = deps.openUrl(targetUrl);
 
-    if (result.portChanged) {
+    if (result?.portChanged) {
       deps.log(
         `Preferred port ${parsePort(deps.env.PORT)} is busy, using ${result.server.port}.`,
       );

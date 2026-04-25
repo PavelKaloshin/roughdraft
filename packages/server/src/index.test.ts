@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import request from "supertest";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "./index";
@@ -8,6 +9,9 @@ import { createApp } from "./index";
 describe("createApp", () => {
   let projectDir: string;
   let homeDir: string;
+  const serverRoot = path.resolve(
+    fileURLToPath(new URL("../../..", import.meta.url)),
+  );
 
   beforeEach(() => {
     projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "roughdraft-server-"));
@@ -128,6 +132,7 @@ describe("createApp", () => {
     expect(response.body).toEqual({
       backend: "local-files",
       port: 4312,
+      serverRoot,
       stateless: true,
       capabilities: {
         projectPathRequired: true,

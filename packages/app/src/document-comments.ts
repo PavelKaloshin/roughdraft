@@ -1,3 +1,9 @@
+import {
+  buildCommentThreads,
+  type CriticComment,
+  flattenCommentThreads,
+} from "./critic-markup";
+
 export interface CommentAnchorMeasurement {
   commentIds: string[];
   anchorTop: number;
@@ -12,6 +18,21 @@ export interface CommentGroupAnchor {
 }
 
 export interface CommentRailLayout extends CommentGroupAnchor {
+  railTop: number;
+  railBottom: number;
+  height: number;
+}
+
+export interface CommentThreadRailItem {
+  key: string;
+  anchorGroupKey: string;
+  rootCommentId: string;
+  commentIds: string[];
+  anchorTop: number;
+  anchorBottom: number;
+}
+
+export interface CommentThreadRailLayout extends CommentThreadRailItem {
   railTop: number;
   railBottom: number;
   height: number;
@@ -67,6 +88,37 @@ export function getPreferredCommentId(
   }
 
   return commentIds[0] ?? null;
+}
+
+export function getRootThreadIdForCommentId(
+  commentId: string | null,
+  comments: ReadonlyMap<string, CriticComment>,
+): string | null {
+  if (!commentId) return null;
+
+  const visited = new Set<string>();
+  let currentComment = comments.get(commentId);
+
+  while (currentComment) {
+    if (visited.has(currentComment.id)) {
+      break;
+    }
+
+    visited.add(currentComment.id);
+    const parentCommentId = currentComment.parentCommentId;
+
+    if (
+      !parentCommentId ||
+      parentCommentId === currentComment.id ||
+      !comments.has(parentCommentId)
+    ) {
+      return currentComment.id;
+    }
+
+    currentComment = comments.get(parentCommentId);
+  }
+
+  return comments.has(commentId) ? commentId : null;
 }
 
 export function getCommentAnchorMeasurements(
@@ -128,6 +180,38 @@ export function groupCommentAnchorMeasurements(
   );
 }
 
+export function buildCommentThreadRailItems(
+  groups: CommentGroupAnchor[],
+  comments: ReadonlyMap<string, CriticComment>,
+): CommentThreadRailItem[] {
+  const items: CommentThreadRailItem[] = [];
+
+  for (const group of groups) {
+    const visibleComments = group.commentIds
+      .map((commentId) => comments.get(commentId))
+      .filter((comment): comment is CriticComment => Boolean(comment));
+
+    if (visibleComments.length === 0) continue;
+
+    for (const thread of buildCommentThreads(visibleComments)) {
+      const threadComments = flattenCommentThreads([thread]);
+
+      if (threadComments.length === 0) continue;
+
+      items.push({
+        key: thread.comment.id,
+        anchorGroupKey: group.key,
+        rootCommentId: thread.comment.id,
+        commentIds: threadComments.map((comment) => comment.id),
+        anchorTop: group.anchorTop,
+        anchorBottom: group.anchorBottom,
+      });
+    }
+  }
+
+  return items;
+}
+
 export function resolveCommentRailLayouts(
   groups: CommentGroupAnchor[],
   heights: Record<string, number>,
@@ -151,4 +235,70 @@ export function resolveCommentRailLayouts(
       height,
     };
   });
+}
+
+export function resolveCommentThreadRailLayouts(
+  items: CommentThreadRailItem[],
+  heights: Record<string, number>,
+  selectedRootThreadId: string | null,
+  gap = 16,
+): CommentThreadRailLayout[] {
+  if (items.length === 0) return [];
+
+  const activeIndex = Math.max(
+    0,
+    selectedRootThreadId
+      ? items.findIndex((item) => item.rootCommentId === selectedRootThreadId)
+      : 0,
+  );
+
+  const resolved = new Array<CommentThreadRailLayout>(items.length);
+  const getHeight = (item: CommentThreadRailItem) => heights[item.key] ?? 120;
+
+  const activeItem = items[activeIndex] ?? items[0];
+  if (!activeItem) return [];
+
+  const activeHeight = getHeight(activeItem);
+  resolved[activeIndex] = {
+    ...activeItem,
+    railTop: activeItem.anchorTop,
+    railBottom: activeItem.anchorTop + activeHeight,
+    height: activeHeight,
+  };
+
+  for (let index = activeIndex - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    const nextLayout = resolved[index + 1];
+
+    if (!item || !nextLayout) continue;
+
+    const height = getHeight(item);
+    const railTop = Math.min(item.anchorTop, nextLayout.railTop - gap - height);
+
+    resolved[index] = {
+      ...item,
+      railTop,
+      railBottom: railTop + height,
+      height,
+    };
+  }
+
+  for (let index = activeIndex + 1; index < items.length; index += 1) {
+    const item = items[index];
+    const previousLayout = resolved[index - 1];
+
+    if (!item || !previousLayout) continue;
+
+    const height = getHeight(item);
+    const railTop = Math.max(item.anchorTop, previousLayout.railBottom + gap);
+
+    resolved[index] = {
+      ...item,
+      railTop,
+      railBottom: railTop + height,
+      height,
+    };
+  }
+
+  return resolved;
 }

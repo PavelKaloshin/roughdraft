@@ -1,13 +1,16 @@
 import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useCanvasScale } from "./Canvas";
+import { CommentEditorList } from "./CommentEditorList";
 import type { CriticComment } from "./critic-markup";
 import {
-  getPreferredCommentId,
-  normalizeCommentMeasurement,
-  resolveCommentRailLayouts,
+  buildCommentThreadRailItems,
   type CommentGroupAnchor,
+  type CommentThreadRailItem,
+  getPreferredCommentId,
+  getRootThreadIdForCommentId,
+  normalizeCommentMeasurement,
+  resolveCommentThreadRailLayouts,
 } from "./document-comments";
-import { CommentEditorList } from "./CommentEditorList";
 import { cn } from "./lib/utils";
 
 interface DocumentCommentRailProps {
@@ -43,68 +46,75 @@ export function DocumentCommentRail({
   pendingFocusCommentId = null,
   onAutoFocusComment,
 }: DocumentCommentRailProps) {
-  const groupRefs = useRef(new Map<string, HTMLDivElement>());
+  const threadRefs = useRef(new Map<string, HTMLDivElement>());
   const scale = useCanvasScale();
-  const [groupHeights, setGroupHeights] = useState<Record<string, number>>({});
+  const [threadHeights, setThreadHeights] = useState<Record<string, number>>(
+    {},
+  );
 
-  const visibleGroups = useMemo(
+  const activeRootThreadId = useMemo(
+    () => getRootThreadIdForCommentId(selectedCommentId, comments),
+    [comments, selectedCommentId],
+  );
+
+  const visibleThreads = useMemo(
     () =>
-      commentGroups
-        .map((group) => {
-          const visibleComments = group.commentIds
+      buildCommentThreadRailItems(commentGroups, comments)
+        .map((item) => {
+          const visibleComments = item.commentIds
             .map((commentId) => comments.get(commentId))
             .filter((comment): comment is CriticComment => Boolean(comment));
 
           if (visibleComments.length === 0) return null;
 
           return {
-            ...group,
+            ...item,
             visibleComments,
           };
         })
         .filter(
           (
-            group,
-          ): group is CommentGroupAnchor & {
+            item,
+          ): item is CommentThreadRailItem & {
             visibleComments: CriticComment[];
-          } => Boolean(group),
+          } => Boolean(item),
         ),
     [commentGroups, comments],
   );
 
-  const setGroupRef = useCallback(
+  const setThreadRef = useCallback(
     (key: string, node: HTMLDivElement | null) => {
       if (node) {
-        groupRefs.current.set(key, node);
+        threadRefs.current.set(key, node);
       } else {
-        groupRefs.current.delete(key);
+        threadRefs.current.delete(key);
       }
     },
     [],
   );
 
   useLayoutEffect(() => {
-    if (visibleGroups.length === 0) {
-      setGroupHeights({});
+    if (visibleThreads.length === 0) {
+      setThreadHeights({});
       return;
     }
 
     const updateHeights = () => {
-      setGroupHeights((current) => {
+      setThreadHeights((current) => {
         const next: Record<string, number> = {};
         let changed = false;
 
-        for (const group of visibleGroups) {
-          const element = groupRefs.current.get(group.key);
+        for (const thread of visibleThreads) {
+          const element = threadRefs.current.get(thread.key);
           const measuredHeight = Math.ceil(
             element?.getBoundingClientRect().height ?? 0,
           );
           const height =
             measuredHeight > 0
               ? Math.ceil(normalizeCommentMeasurement(measuredHeight, scale))
-              : (current[group.key] ?? 0);
-          next[group.key] = height;
-          if (current[group.key] !== height) {
+              : (current[thread.key] ?? 0);
+          next[thread.key] = height;
+          if (current[thread.key] !== height) {
             changed = true;
           }
         }
@@ -126,8 +136,8 @@ export function DocumentCommentRail({
       updateHeights();
     });
 
-    for (const group of visibleGroups) {
-      const element = groupRefs.current.get(group.key);
+    for (const thread of visibleThreads) {
+      const element = threadRefs.current.get(thread.key);
       if (element) {
         resizeObserver.observe(element);
       }
@@ -136,23 +146,27 @@ export function DocumentCommentRail({
     return () => {
       resizeObserver.disconnect();
     };
-  }, [scale, visibleGroups]);
+  }, [scale, visibleThreads]);
 
   const layouts = useMemo(() => {
-    const baseLayouts = resolveCommentRailLayouts(visibleGroups, groupHeights);
+    const baseLayouts = resolveCommentThreadRailLayouts(
+      visibleThreads,
+      threadHeights,
+      activeRootThreadId,
+    );
 
     return baseLayouts.map((layout) => ({
       ...layout,
       visibleComments:
-        visibleGroups.find((group) => group.key === layout.key)
+        visibleThreads.find((thread) => thread.key === layout.key)
           ?.visibleComments ?? [],
     }));
-  }, [groupHeights, visibleGroups]);
+  }, [activeRootThreadId, threadHeights, visibleThreads]);
 
   const railHeight =
     Math.max(contentHeight, layouts.at(-1)?.railBottom ?? 0) + 24;
 
-  if (visibleGroups.length === 0) {
+  if (visibleThreads.length === 0) {
     return <aside className={cn("min-w-0", className)} aria-hidden="true" />;
   }
 
@@ -161,10 +175,7 @@ export function DocumentCommentRail({
       <div className="relative" style={{ minHeight: railHeight }}>
         {layouts.map((layout) => {
           const isSelected =
-            !!selectedCommentId &&
-            layout.commentIds.includes(selectedCommentId);
-          const isHovered =
-            !!hoveredCommentId && layout.commentIds.includes(hoveredCommentId);
+            !!activeRootThreadId && layout.rootCommentId === activeRootThreadId;
           const isExpanded = isSelected;
           const primaryCommentId =
             getPreferredCommentId(layout.commentIds, selectedCommentId) ??
@@ -173,15 +184,14 @@ export function DocumentCommentRail({
           return (
             <div
               key={layout.key}
-              ref={(node) => setGroupRef(layout.key, node)}
+              ref={(node) => setThreadRef(layout.key, node)}
               data-comment-thread-container="true"
               className={cn(
-                "absolute left-0 right-0 rounded-2xl border bg-white/95 transition-all duration-200 ease-out will-change-transform",
+                "absolute left-0 right-0 rounded-xl border border-transparent bg-transparent shadow-none transition-all duration-200 ease-out will-change-transform",
                 isSelected
-                  ? "-translate-x-2 border-slate-300 shadow-[0_22px_48px_rgba(15,23,42,0.18)]"
-                  : isHovered
-                    ? "border-slate-300/80"
-                    : "border-slate-200/90",
+                  ? "border-[#DFDFDC] bg-white shadow-[0_20px_48px_rgba(57,47,38,0.14)]"
+                  : "",
+                isSelected && "-translate-x-2",
                 isExpanded ? "cursor-default" : "cursor-pointer",
               )}
               style={{ top: layout.railTop }}

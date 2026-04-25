@@ -1,7 +1,19 @@
 import type { Editor } from "@tiptap/react";
+import { useEditorState } from "@tiptap/react";
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ExternalLink, MessageSquarePlus, Trash2 } from "lucide-react";
+import {
+  Bold,
+  Code2,
+  ExternalLink,
+  Italic,
+  Link2,
+  List,
+  ListOrdered,
+  MessageSquarePlus,
+  Quote,
+  Trash2,
+} from "lucide-react";
 import {
   getAddCommentShortcutLabel,
   matchesAddCommentShortcut,
@@ -68,6 +80,26 @@ function getElementFromDomNode(node: Node | null) {
   return node instanceof Element ? node : node.parentElement;
 }
 
+function getContainedSelectionRange(container: HTMLElement) {
+  const selection = window.getSelection();
+
+  if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
+    return null;
+  }
+
+  const range = selection.getRangeAt(0);
+  const ancestor =
+    range.commonAncestorContainer instanceof Element
+      ? range.commonAncestorContainer
+      : range.commonAncestorContainer.parentElement;
+
+  if (!ancestor || !container.contains(ancestor)) {
+    return null;
+  }
+
+  return range;
+}
+
 function findActiveLinkAnchor(
   editor: Editor,
   container: HTMLElement,
@@ -103,6 +135,42 @@ function findActiveLinkAnchor(
   return null;
 }
 
+function SelectionMenuButton({
+  label,
+  icon,
+  active = false,
+  disabled = false,
+  onClick,
+}: {
+  label: string;
+  icon: ReactNode;
+  active?: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={`inline-flex size-9 items-center justify-center rounded-xl border text-slate-600 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-300 ${
+        active
+          ? "border-slate-900 bg-slate-900 text-white shadow-[0_8px_18px_rgba(15,23,42,0.18)]"
+          : "border-transparent hover:bg-slate-100 hover:text-slate-900"
+      } disabled:cursor-not-allowed disabled:opacity-40`}
+      onMouseDown={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      }}
+      onClick={onClick}
+      disabled={disabled}
+      aria-label={label}
+      aria-pressed={active}
+      title={label}
+    >
+      {icon}
+    </button>
+  );
+}
+
 export function EditorContextMenu({
   editor,
   backend,
@@ -120,6 +188,44 @@ export function EditorContextMenu({
   const linkPopoverRef = useRef<HTMLDivElement>(null);
   const linkInputRef = useRef<HTMLInputElement>(null);
   const shortcutLabel = getAddCommentShortcutLabel(getNavigatorPlatform());
+  const selectionMenuState = useEditorState({
+    editor,
+    selector: ({ editor: currentEditor }) => ({
+      isBoldActive: currentEditor?.isActive("bold") ?? false,
+      isItalicActive: currentEditor?.isActive("italic") ?? false,
+      isCodeActive: currentEditor?.isActive("code") ?? false,
+      isBulletListActive: currentEditor?.isActive("bulletList") ?? false,
+      isOrderedListActive: currentEditor?.isActive("orderedList") ?? false,
+      isBlockquoteActive: currentEditor?.isActive("blockquote") ?? false,
+      isLinkActive: currentEditor?.isActive("link") ?? false,
+      canToggleBold:
+        currentEditor?.can().chain().focus().toggleBold().run() ?? false,
+      canToggleItalic:
+        currentEditor?.can().chain().focus().toggleItalic().run() ?? false,
+      canToggleCode:
+        currentEditor?.can().chain().focus().toggleCode().run() ?? false,
+      canToggleBulletList:
+        currentEditor?.can().chain().focus().toggleBulletList().run() ?? false,
+      canToggleOrderedList:
+        currentEditor?.can().chain().focus().toggleOrderedList().run() ?? false,
+      canToggleBlockquote:
+        currentEditor?.can().chain().focus().toggleBlockquote().run() ?? false,
+    }),
+  }) ?? {
+    isBoldActive: false,
+    isItalicActive: false,
+    isCodeActive: false,
+    isBulletListActive: false,
+    isOrderedListActive: false,
+    isBlockquoteActive: false,
+    isLinkActive: false,
+    canToggleBold: false,
+    canToggleItalic: false,
+    canToggleCode: false,
+    canToggleBulletList: false,
+    canToggleOrderedList: false,
+    canToggleBlockquote: false,
+  };
 
   const close = useCallback(() => {
     setPosition(null);
@@ -141,25 +247,14 @@ export function EditorContextMenu({
     }
 
     const container = containerRef.current;
-    const selection = window.getSelection();
-
-    if (
-      !container ||
-      !selection ||
-      selection.rangeCount === 0 ||
-      selection.isCollapsed
-    ) {
+    if (!container) {
       setSelectionActionPosition(null);
       return;
     }
 
-    const range = selection.getRangeAt(0);
-    const ancestor =
-      range.commonAncestorContainer instanceof Element
-        ? range.commonAncestorContainer
-        : range.commonAncestorContainer.parentElement;
+    const range = getContainedSelectionRange(container);
 
-    if (!ancestor || !container.contains(ancestor)) {
+    if (!range) {
       setSelectionActionPosition(null);
       return;
     }
@@ -213,6 +308,50 @@ export function EditorContextMenu({
 
     setLinkPopoverState({
       href,
+      rawHref,
+      left: rect.left + rect.width / 2,
+      top: rect.top - 12,
+    });
+  }, [backend, editor]);
+
+  const openLinkPopover = useCallback(() => {
+    if (!editor || !containerRef.current) return;
+
+    const anchor = findActiveLinkAnchor(editor, containerRef.current);
+
+    if (anchor) {
+      const rect = anchor.getBoundingClientRect();
+      const rawHref =
+        (editor.getAttributes("link").dataMarkdownSrc as string | null) ||
+        anchor.getAttribute("data-markdown-src") ||
+        anchor.getAttribute("href") ||
+        "";
+      const href = resolveEditableLinkTarget(
+        rawHref,
+        backend,
+        (editor.getAttributes("link").href as string | null) || anchor.href,
+      );
+
+      setLinkPopoverState({
+        href,
+        rawHref,
+        left: rect.left + rect.width / 2,
+        top: rect.top - 12,
+      });
+      return;
+    }
+
+    const range = getContainedSelectionRange(containerRef.current);
+    if (!range) return;
+
+    const rect = range.getBoundingClientRect();
+    if (rect.width === 0 && rect.height === 0) return;
+
+    const rawHref =
+      (editor.getAttributes("link").dataMarkdownSrc as string | null) || "";
+
+    setLinkPopoverState({
+      href: resolveEditableLinkTarget(rawHref, backend, rawHref || "https://"),
       rawHref,
       left: rect.left + rect.width / 2,
       top: rect.top - 12,
@@ -403,9 +542,8 @@ export function EditorContextMenu({
     >
       {children}
       {selectionActionPosition && !linkPopoverState ? (
-        <button
-          type="button"
-          className="absolute z-30 inline-flex -translate-x-1/2 -translate-y-full items-center gap-2.5 rounded-full border border-slate-950 bg-slate-950 px-4 py-2 text-sm font-semibold text-white shadow-[0_18px_40px_rgba(15,23,42,0.28)] transition hover:border-slate-800 hover:bg-slate-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 focus-visible:ring-offset-2"
+        <div
+          className="absolute z-30 w-max max-w-[calc(100vw-2rem)] -translate-x-1/2 -translate-y-full rounded-[22px] border border-slate-200/90 bg-white/95 p-2 shadow-[0_18px_48px_rgba(15,23,42,0.16)] backdrop-blur-xl"
           style={{
             left: selectionActionPosition.left,
             top: selectionActionPosition.top,
@@ -414,17 +552,79 @@ export function EditorContextMenu({
             event.preventDefault();
             event.stopPropagation();
           }}
-          onClick={() => {
-            onAddComment?.();
-            setSelectionActionPosition(null);
-          }}
         >
-          <MessageSquarePlus className="size-4.5" />
-          <span>Add comment</span>
-          <span className="rounded-full border border-white/12 bg-white/12 px-2.5 py-1 text-[12px] font-semibold tracking-[0.01em] text-slate-100">
-            {shortcutLabel}
-          </span>
-        </button>
+          <div className="flex flex-wrap items-center gap-1">
+            <SelectionMenuButton
+              label="Bold"
+              icon={<Bold className="size-4" />}
+              active={selectionMenuState.isBoldActive}
+              disabled={!selectionMenuState.canToggleBold}
+              onClick={() => editor?.chain().focus().toggleBold().run()}
+            />
+            <SelectionMenuButton
+              label="Italic"
+              icon={<Italic className="size-4" />}
+              active={selectionMenuState.isItalicActive}
+              disabled={!selectionMenuState.canToggleItalic}
+              onClick={() => editor?.chain().focus().toggleItalic().run()}
+            />
+            <SelectionMenuButton
+              label="Inline code"
+              icon={<Code2 className="size-4" />}
+              active={selectionMenuState.isCodeActive}
+              disabled={!selectionMenuState.canToggleCode}
+              onClick={() => editor?.chain().focus().toggleCode().run()}
+            />
+            <SelectionMenuButton
+              label="Blockquote"
+              icon={<Quote className="size-4" />}
+              active={selectionMenuState.isBlockquoteActive}
+              disabled={!selectionMenuState.canToggleBlockquote}
+              onClick={() => editor?.chain().focus().toggleBlockquote().run()}
+            />
+            <SelectionMenuButton
+              label="Bulleted list"
+              icon={<List className="size-4" />}
+              active={selectionMenuState.isBulletListActive}
+              disabled={!selectionMenuState.canToggleBulletList}
+              onClick={() => editor?.chain().focus().toggleBulletList().run()}
+            />
+            <SelectionMenuButton
+              label="Numbered list"
+              icon={<ListOrdered className="size-4" />}
+              active={selectionMenuState.isOrderedListActive}
+              disabled={!selectionMenuState.canToggleOrderedList}
+              onClick={() => editor?.chain().focus().toggleOrderedList().run()}
+            />
+            <SelectionMenuButton
+              label="Link"
+              icon={<Link2 className="size-4" />}
+              active={selectionMenuState.isLinkActive}
+              onClick={openLinkPopover}
+            />
+          </div>
+          <div className="my-2 h-px bg-slate-200/80" aria-hidden="true" />
+          <button
+            type="button"
+            className="flex w-full items-center justify-between gap-3 rounded-xl px-3 py-2 text-left text-sm font-medium text-slate-700 transition hover:bg-slate-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-300"
+            onMouseDown={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+            }}
+            onClick={() => {
+              onAddComment?.();
+              setSelectionActionPosition(null);
+            }}
+          >
+            <span className="inline-flex items-center gap-2">
+              <MessageSquarePlus className="size-4.5" />
+              <span>Comment</span>
+            </span>
+            <span className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-[11px] font-semibold tracking-[0.01em] text-slate-500">
+              {shortcutLabel}
+            </span>
+          </button>
+        </div>
       ) : null}
       {linkPopoverState ? (
         <div

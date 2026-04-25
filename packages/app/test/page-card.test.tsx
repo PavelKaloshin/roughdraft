@@ -171,6 +171,7 @@ function getToolbarButton(container: HTMLElement, label: string) {
 type PageCardTestOptions = Partial<{
   page: Page;
   mode: "canvas" | "document";
+  editorViewMode: "rich-text" | "code";
   selected: boolean;
   focusRequestKey: string | null;
 }>;
@@ -211,12 +212,12 @@ async function renderPageCard(
     focusRequestKey: options.focusRequestKey ?? null,
     canDelete: true,
     mode: options.mode ?? "document",
+    editorViewMode: options.editorViewMode ?? "rich-text",
     onSelect: vi.fn(),
     onSave,
     onReposition,
     onDelete: vi.fn(),
     onSaveStateChange,
-    documentToolbarHost: null,
     backend,
     onEditorReady: (nextEditor: Editor | null) => {
       editor = nextEditor;
@@ -404,6 +405,74 @@ describe("PageCard editor integration", () => {
     expect(rendered.onSaveStateChange.mock.calls.at(-1)?.[0]).toBe("idle");
   });
 
+  it("document code mode shows raw markdown and hides rich text chrome", async () => {
+    const rendered = await renderPageCard({
+      page: {
+        id: "doc-code-1",
+        title: "Doc Code 1",
+        content: "{==alpha==}{>>Comment body<<}\n\n# Heading\n\n`inline`",
+      },
+      mode: "document",
+      editorViewMode: "code",
+      selected: true,
+    });
+
+    expect(rendered.container.textContent).toContain("{==alpha==}");
+    expect(rendered.container.textContent).toContain("{>>Comment body<<}");
+    expect(
+      rendered.container.querySelector('[aria-label="Block type"]'),
+    ).toBeNull();
+    expect(
+      rendered.container
+        .querySelector(".document-comment-rail")
+        ?.classList.contains("invisible"),
+    ).toBe(true);
+  });
+
+  it("document code mode keeps rail space when comments exist", async () => {
+    const rendered = await renderPageCard({
+      page: {
+        id: "doc-code-2",
+        title: "Doc Code 2",
+        content: "{==alpha==}{>>Comment body<<}\n\nParagraph",
+      },
+      mode: "document",
+      editorViewMode: "code",
+      selected: true,
+    });
+
+    expect(
+      rendered.container
+        .querySelector(".document-page-shell")
+        ?.classList.contains("document-page-shell-no-comments"),
+    ).toBe(false);
+    expect(
+      rendered.container.querySelector(".document-comment-rail"),
+    ).not.toBeNull();
+  });
+
+  it("document code mode shows line numbers without the default dotted focus outline", async () => {
+    const rendered = await renderPageCard({
+      page: {
+        id: "doc-code-3",
+        title: "Doc Code 3",
+        content: "# Heading\n\nParagraph",
+      },
+      mode: "document",
+      editorViewMode: "code",
+      selected: true,
+    });
+
+    const editor = rendered.container.querySelector(".cm-editor");
+    expect(editor).not.toBeNull();
+
+    const gutters = rendered.container.querySelector(".cm-gutters");
+    expect(gutters).not.toBeNull();
+    expect(gutters?.textContent).toContain("1");
+    expect(getComputedStyle(gutters as Element).display).not.toBe("none");
+    expect(getComputedStyle(editor as Element).outlineStyle).not.toBe("dotted");
+  });
+
   it("selection updates toolbar state", async () => {
     const rendered = await renderPageCard({
       page: {
@@ -418,11 +487,11 @@ describe("PageCard editor integration", () => {
     const editor = rendered.getEditor();
 
     await selectText(editor, "Heading");
-    expect(getBlockTypeTrigger(rendered.container).textContent).toContain(
-      "Heading 1",
-    );
+    await flushAnimationFrame();
+    expect(rendered.container.textContent).toContain("Comment");
 
     await selectText(editor, "bold");
+    await flushAnimationFrame();
     expect(
       getToolbarButton(rendered.container, "Bold").getAttribute("aria-pressed"),
     ).toBe("true");
@@ -518,6 +587,39 @@ describe("PageCard editor integration", () => {
       rendered.container.querySelector(".document-comment-fallback")
         ?.textContent,
     ).toContain("Comment body");
+    expect(rendered.container.textContent).toContain("Me");
+  });
+
+  it("centers document layout when there are no comments", async () => {
+    const rendered = await renderPageCard({
+      page: {
+        id: "doc-6",
+        title: "Doc 6",
+        content: "Just text",
+      },
+      mode: "document",
+      selected: true,
+    });
+
+    expect(
+      rendered.container
+        .querySelector(".document-page-shell")
+        ?.classList.contains("document-page-shell-no-comments"),
+    ).toBe(true);
+
+    await rendered.rerender({
+      page: {
+        id: "doc-6",
+        title: "Doc 6",
+        content: "{==alpha==}{>>Comment body<<}\n\nJust text",
+      },
+    });
+
+    expect(
+      rendered.container
+        .querySelector(".document-page-shell")
+        ?.classList.contains("document-page-shell-no-comments"),
+    ).toBe(false);
   });
 
   it("canvas props churn does not lose editor content or selection", async () => {

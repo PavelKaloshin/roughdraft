@@ -47,13 +47,13 @@ roughdraft start
 Open a specific project folder:
 
 ```bash
-roughdraft open /absolute/path/to/my-essay
+roughdraft open ./path/to/my-essay
 ```
 
 Open a specific markdown file directly:
 
 ```bash
-roughdraft open /absolute/path/to/my-essay/draft.md
+roughdraft open ./path/to/my-essay/draft.md
 ```
 
 Check or stop the background server:
@@ -101,6 +101,8 @@ The two scripts coordinate through a lock file, so it's safe to start `./scripts
 If you prefer package scripts, the same commands are available as `pnpm setup` and `pnpm start`.
 
 Running `pnpm setup` also installs a per-worktree dev CLI wrapper into `~/.local/bin` by default, using the current worktree directory name. For example, this checkout might install `roughdraft-dev-lyon-v2`, which points at this worktree's local code while leaving the published global `roughdraft` command untouched.
+
+Each dev wrapper keeps its own server state under `~/.roughdraft/dev/<wrapper-name>` by default, so opening a file from one worktree will not accidentally reuse a backend started from another worktree. `roughdraft-dev-<worktree> open ...` can start its own background server as needed; you do not need to run `pnpm dev` first just to open files in Roughdraft.
 
 You can refresh that wrapper manually with:
 

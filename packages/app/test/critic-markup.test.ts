@@ -66,6 +66,34 @@ describe("CriticMarkup comments", () => {
     expect(output).toContain("*   First item");
   });
 
+  it("does not import a trailing blank line into fenced code blocks", () => {
+    const input = `\`\`\`text
+Use Roughdraft when I want to open, review, comment on, or compare markdown files.
+
+Start it with \`roughdraft start\` if needed.
+Open files or folders with \`roughdraft open "/absolute/path/to/file.md"\`.
+After I finish reviewing in Roughdraft, continue by reading the markdown files from disk and making the requested changes there.
+Use CriticMarkup for inline review feedback in markdown.
+\`\`\`
+`;
+
+    const { doc } = criticMarkdownToEditorState(input);
+    const codeBlock = doc.content?.[0];
+    const textNode = codeBlock?.content?.[0];
+
+    expect(codeBlock?.type).toBe("codeBlock");
+    expect(textNode).toMatchObject({
+      type: "text",
+      text: `Use Roughdraft when I want to open, review, comment on, or compare markdown files.
+
+Start it with \`roughdraft start\` if needed.
+Open files or folders with \`roughdraft open "/absolute/path/to/file.md"\`.
+After I finish reviewing in Roughdraft, continue by reading the markdown files from disk and making the requested changes there.
+Use CriticMarkup for inline review feedback in markdown.`,
+    });
+    expect(editorStateToCriticMarkdown(doc, new Map())).toBe(input);
+  });
+
   it("round-trips an anchored reply thread", () => {
     const input =
       "Please revisit {==this sentence==}{>>Needs a source<<}{@id:c1;by:user;at:2024-01-15T10:30:00.000Z@}{>>I can add one from the intro.<<}{@id:c2;by:AI;at:2024-01-15T10:31:00.000Z;re:c1@}.\n";

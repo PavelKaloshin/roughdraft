@@ -4,7 +4,6 @@ import { EditorContent, useEditor, useEditorState } from "@tiptap/react";
 import { TextSelection } from "@tiptap/pm/state";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
-import { createPortal } from "react-dom";
 import { useCanvasScale } from "./Canvas";
 import { CommentEditorList } from "./CommentEditorList";
 import { DocumentCommentRail } from "./DocumentCommentRail";
@@ -22,6 +21,8 @@ import {
   createEditorExtensions,
 } from "./editor-extensions";
 import { EditorToolbar } from "./EditorToolbar";
+import { cn } from "./lib/utils";
+import { MarkdownCodeEditor } from "./MarkdownCodeEditor";
 import { toHtml } from "./markdown";
 import type { Page, StorageBackend } from "./storage";
 import { useCommentAnchorLayout } from "./useCommentAnchorLayout";
@@ -34,6 +35,7 @@ const CANVAS_RAIL_WIDTH = 420;
 const CANVAS_RAIL_GAP = 24;
 
 type SaveState = "idle" | "saving" | "error";
+type EditorViewMode = "rich-text" | "code";
 
 interface PageCardProps {
   page: Page;
@@ -48,9 +50,10 @@ interface PageCardProps {
   onReposition?: (id: string, x: number, y: number) => void;
   onDelete?: (id: string) => void;
   onSaveStateChange?: (state: SaveState) => void;
-  documentToolbarHost?: HTMLElement | null;
+  editorViewMode?: EditorViewMode;
   backend: StorageBackend;
   onEditorReady?: (editor: Editor | null) => void;
+  onCommentRailPresenceChange?: (hasCommentRailSpace: boolean) => void;
 }
 
 interface PageCardEditorSurfaceProps {
@@ -61,9 +64,31 @@ interface PageCardEditorSurfaceProps {
   onSelect?: (id: string) => void;
   onSave: (id: string, content: string) => Promise<void>;
   onSaveStateChange: (state: SaveState) => void;
-  documentToolbarHost: HTMLElement | null;
+  editorViewMode: EditorViewMode;
   backend: StorageBackend;
   onEditorReady?: (editor: Editor | null) => void;
+  onCommentRailPresenceChange?: (hasCommentRailSpace: boolean) => void;
+}
+
+interface RichTextEditorSurfaceProps {
+  page: Page;
+  selected: boolean;
+  focusRequestKey: string | null;
+  mode: "canvas" | "document";
+  sourceMarkdown: string;
+  onSelect?: (id: string) => void;
+  onMarkdownChange: (markdown: string) => void;
+  backend: StorageBackend;
+  onEditorReady?: (editor: Editor | null) => void;
+  onCommentRailPresenceChange?: (hasCommentRailSpace: boolean) => void;
+}
+
+interface CodeEditorSurfaceProps {
+  page: Page;
+  markdown: string;
+  hasCommentRailSpace: boolean;
+  onSelect?: (id: string) => void;
+  onMarkdownChange: (markdown: string) => void;
 }
 
 function getCanvasFilenameLabel(pageId: string) {
@@ -241,20 +266,18 @@ export function shouldDismissCommentThread(target: EventTarget | null) {
   );
 }
 
-const PageCardEditorSurface = memo(function PageCardEditorSurface({
+const RichTextEditorSurface = memo(function RichTextEditorSurface({
   page,
   selected,
   focusRequestKey,
   mode,
+  sourceMarkdown,
   onSelect,
-  onSave,
-  onSaveStateChange,
-  documentToolbarHost,
+  onMarkdownChange,
   backend,
   onEditorReady,
-}: PageCardEditorSurfaceProps) {
-  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const recentMarkdownRef = useRef<Set<string>>(new Set());
+  onCommentRailPresenceChange,
+}: RichTextEditorSurfaceProps) {
   const editorRef = useRef<Editor | null>(null);
   const commentsRef = useRef<Map<string, CriticComment>>(new Map());
   const lastFocusRequestKeyRef = useRef<string | null>(null);
@@ -274,10 +297,10 @@ const PageCardEditorSurface = memo(function PageCardEditorSurface({
 
   const parsedContent = useMemo(
     () =>
-      criticMarkdownToEditorState(page.content, {
+      criticMarkdownToEditorState(sourceMarkdown, {
         resolveFileUrl,
       }),
-    [page.content, resolveFileUrl],
+    [resolveFileUrl, sourceMarkdown],
   );
   const [comments, setComments] = useState<Map<string, CriticComment>>(
     () => parsedContent.comments,
@@ -287,37 +310,24 @@ const PageCardEditorSurface = memo(function PageCardEditorSurface({
     commentsRef.current = comments;
   }, [comments]);
 
-  const scheduleSave = useCallback(
+  useEffect(() => {
+    onCommentRailPresenceChange?.(comments.size > 0);
+  }, [comments.size, onCommentRailPresenceChange]);
+
+  const emitMarkdownChange = useCallback(
     (doc?: JSONContent, nextComments?: Map<string, CriticComment>) => {
       const currentEditor = editorRef.current;
       const currentDoc = doc ?? currentEditor?.getJSON();
-
       if (!currentDoc) return;
 
-      const markdown = editorStateToCriticMarkdown(
-        currentDoc,
-        nextComments ?? commentsRef.current,
+      onMarkdownChange(
+        editorStateToCriticMarkdown(
+          currentDoc,
+          nextComments ?? commentsRef.current,
+        ),
       );
-
-      recentMarkdownRef.current.add(markdown);
-      if (recentMarkdownRef.current.size > 10) {
-        const iterator = recentMarkdownRef.current.values();
-        recentMarkdownRef.current.delete(iterator.next().value as string);
-      }
-
-      if (saveTimer.current) clearTimeout(saveTimer.current);
-      onSaveStateChange("saving");
-      saveTimer.current = setTimeout(async () => {
-        try {
-          await onSave(page.id, markdown);
-          onSaveStateChange("idle");
-        } catch (error) {
-          console.error("Failed to save page:", error);
-          onSaveStateChange("error");
-        }
-      }, 500);
     },
-    [onSave, onSaveStateChange, page.id],
+    [onMarkdownChange],
   );
 
   const insertFiles = useCallback(
@@ -361,8 +371,8 @@ const PageCardEditorSurface = memo(function PageCardEditorSurface({
         attributes: {
           class:
             mode === "canvas"
-              ? "tiptap min-h-[120px] text-[1.05rem] leading-8 text-slate-800 outline-none selection:bg-sky-100"
-              : "tiptap min-h-[70vh] text-[1.08rem] leading-8 text-slate-800 outline-none selection:bg-sky-100",
+              ? "tiptap min-h-[120px] selection:bg-sky-100"
+              : "tiptap min-h-[70vh] selection:bg-sky-100",
         },
         handleDrop: (_view, event) => {
           const files = Array.from(event.dataTransfer?.files ?? []);
@@ -380,7 +390,7 @@ const PageCardEditorSurface = memo(function PageCardEditorSurface({
         },
       },
       onUpdate: ({ editor: currentEditor }) => {
-        scheduleSave(currentEditor.getJSON());
+        emitMarkdownChange(currentEditor.getJSON());
       },
     },
     [page.id],
@@ -417,10 +427,6 @@ const PageCardEditorSurface = memo(function PageCardEditorSurface({
   useEffect(() => {
     if (!editor) return;
     if (editor.isFocused) return;
-    if (recentMarkdownRef.current.has(page.content)) {
-      recentMarkdownRef.current.delete(page.content);
-      return;
-    }
 
     commentsRef.current = parsedContent.comments;
     setComments(parsedContent.comments);
@@ -432,15 +438,7 @@ const PageCardEditorSurface = memo(function PageCardEditorSurface({
     if (JSON.stringify(editor.getJSON()) !== JSON.stringify(nextDoc)) {
       editor.commands.setContent(nextDoc, { emitUpdate: false });
     }
-  }, [editor, page.content, parsedContent]);
-
-  useEffect(() => {
-    return () => {
-      if (saveTimer.current) {
-        clearTimeout(saveTimer.current);
-      }
-    };
-  }, []);
+  }, [editor, parsedContent]);
 
   useEffect(() => {
     if (!editor || !selected || !focusRequestKey) return;
@@ -555,7 +553,6 @@ const PageCardEditorSurface = memo(function PageCardEditorSurface({
 
   const handleAddComment = useCallback(() => {
     const currentEditor = editorRef.current;
-
     if (!currentEditor || currentEditor.state.selection.empty) return;
 
     const existingIds = getSelectionCommentIds(currentEditor);
@@ -575,25 +572,24 @@ const PageCardEditorSurface = memo(function PageCardEditorSurface({
 
     setSelectedCommentId(comment.id);
     setPendingFocusCommentId(comment.id);
-    scheduleSave(currentEditor.getJSON(), nextComments);
+    emitMarkdownChange(currentEditor.getJSON(), nextComments);
     requestAnimationFrame(() => {
       measureLayout();
     });
-  }, [measureLayout, scheduleSave]);
+  }, [emitMarkdownChange, measureLayout]);
 
   const updateComment = useCallback(
     (commentId: string, updater: (comment: CriticComment) => CriticComment) => {
       const existingComment = commentsRef.current.get(commentId);
-
       if (!existingComment) return;
 
       const nextComments = new Map(commentsRef.current);
       nextComments.set(commentId, updater(existingComment));
       commentsRef.current = nextComments;
       setComments(nextComments);
-      scheduleSave(undefined, nextComments);
+      emitMarkdownChange(undefined, nextComments);
     },
-    [scheduleSave],
+    [emitMarkdownChange],
   );
 
   const replyToComment = useCallback(
@@ -623,12 +619,12 @@ const PageCardEditorSurface = memo(function PageCardEditorSurface({
       setSelectedCommentId(comment.id);
       setHoveredCommentId(null);
       setPendingFocusCommentId(comment.id);
-      scheduleSave(currentEditor.getJSON(), nextComments);
+      emitMarkdownChange(currentEditor.getJSON(), nextComments);
       requestAnimationFrame(() => {
         measureLayout();
       });
     },
-    [measureLayout, scheduleSave],
+    [emitMarkdownChange, measureLayout],
   );
 
   const deleteComment = useCallback(
@@ -663,12 +659,12 @@ const PageCardEditorSurface = memo(function PageCardEditorSurface({
       setPendingFocusCommentId((current) =>
         current && deletedIds.has(current) ? null : current,
       );
-      scheduleSave(currentEditor.getJSON(), nextComments);
+      emitMarkdownChange(currentEditor.getJSON(), nextComments);
       requestAnimationFrame(() => {
         measureLayout();
       });
     },
-    [measureLayout, scheduleSave],
+    [emitMarkdownChange, measureLayout],
   );
 
   const selectComment = useCallback((commentId: string) => {
@@ -711,32 +707,33 @@ const PageCardEditorSurface = memo(function PageCardEditorSurface({
 
   const isCanvasMode = mode === "canvas";
   const showCanvasRail = isCanvasMode && comments.size > 0;
+  const hasComments = comments.size > 0;
   const activeComments = activeCommentIds
     .map((commentId) => comments.get(commentId))
     .filter((comment): comment is CriticComment => Boolean(comment));
-  const toolbar = (
-    <EditorToolbar
-      editor={editor}
-      onPickFiles={insertFiles}
-      variant={isCanvasMode ? "canvas" : "document"}
-    />
-  );
+  const toolbar = isCanvasMode ? (
+    <EditorToolbar editor={editor} onPickFiles={insertFiles} variant="canvas" />
+  ) : null;
+  const contentCardClass =
+    "rounded-[0.75rem] border border-[#E9E9E8] bg-white shadow-[0_18px_44px_rgba(57,47,38,0.08)]";
 
   if (isCanvasMode) {
     return (
       <div
-        className="cursor-text rounded-b-3xl bg-white px-5 pt-4 pb-6"
+        className="cursor-text rounded-b-2xl bg-[#FCFCFC] px-5 pt-4 pb-6"
         onPointerDown={handleBodyPointerDown}
       >
         {toolbar}
         <div className="relative">
-          <EditorContextMenu
-            editor={editor}
-            backend={backend}
-            onAddComment={handleAddComment}
-          >
-            <EditorContent editor={editor} />
-          </EditorContextMenu>
+          <div className={cn(contentCardClass, "px-8 py-5")}>
+            <EditorContextMenu
+              editor={editor}
+              backend={backend}
+              onAddComment={handleAddComment}
+            >
+              <EditorContent editor={editor} />
+            </EditorContextMenu>
+          </div>
           {showCanvasRail ? (
             <div
               className="absolute top-0"
@@ -784,10 +781,13 @@ const PageCardEditorSurface = memo(function PageCardEditorSurface({
       className="cursor-text bg-transparent"
       onPointerDown={handleBodyPointerDown}
     >
-      {!documentToolbarHost
-        ? toolbar
-        : createPortal(toolbar, documentToolbarHost)}
-      <div className="document-page-shell">
+      {toolbar}
+      <div
+        className={cn(
+          "document-page-shell",
+          !hasComments && "document-page-shell-no-comments",
+        )}
+      >
         <div className="document-page-main min-w-0">
           {activeComments.length > 0 ? (
             <CommentEditorList
@@ -814,13 +814,17 @@ const PageCardEditorSurface = memo(function PageCardEditorSurface({
             />
           ) : null}
           <div className="pb-24">
-            <EditorContextMenu
-              editor={editor}
-              backend={backend}
-              onAddComment={handleAddComment}
+            <div
+              className={cn(contentCardClass, "px-10 py-10 sm:px-14 sm:py-14")}
             >
-              <EditorContent editor={editor} />
-            </EditorContextMenu>
+              <EditorContextMenu
+                editor={editor}
+                backend={backend}
+                onAddComment={handleAddComment}
+              >
+                <EditorContent editor={editor} />
+              </EditorContextMenu>
+            </div>
           </div>
         </div>
         <DocumentCommentRail
@@ -853,6 +857,178 @@ const PageCardEditorSurface = memo(function PageCardEditorSurface({
   );
 });
 
+const CodeEditorSurface = memo(function CodeEditorSurface({
+  page,
+  markdown,
+  hasCommentRailSpace,
+  onSelect,
+  onMarkdownChange,
+}: CodeEditorSurfaceProps) {
+  const handleBodyPointerDown = useCallback(
+    (event: ReactPointerEvent) => {
+      event.stopPropagation();
+      onSelect?.(page.id);
+    },
+    [onSelect, page.id],
+  );
+
+  return (
+    <div
+      className="cursor-text bg-transparent"
+      onPointerDown={handleBodyPointerDown}
+    >
+      <div
+        className={cn(
+          "document-page-shell",
+          !hasCommentRailSpace && "document-page-shell-no-comments",
+        )}
+      >
+        <div className="document-page-main min-w-0">
+          <div className="pb-24">
+            <div className="markdown-code-shell rounded-[0.75rem] border border-[#E9E9E8] bg-white pl-5 pr-6 py-10 shadow-[0_18px_44px_rgba(57,47,38,0.08)] sm:pl-8 sm:pr-10 sm:py-14">
+              <MarkdownCodeEditor
+                value={markdown}
+                onChange={onMarkdownChange}
+                autoFocus
+              />
+            </div>
+          </div>
+        </div>
+        {hasCommentRailSpace ? (
+          <div
+            className="document-comment-rail pointer-events-none invisible"
+            aria-hidden="true"
+          />
+        ) : null}
+      </div>
+    </div>
+  );
+});
+
+const PageCardEditorSurface = memo(function PageCardEditorSurface({
+  page,
+  selected,
+  focusRequestKey,
+  mode,
+  onSelect,
+  onSave,
+  onSaveStateChange,
+  editorViewMode,
+  backend,
+  onEditorReady,
+  onCommentRailPresenceChange,
+}: PageCardEditorSurfaceProps) {
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const recentMarkdownRef = useRef<Set<string>>(new Set());
+  const previousEditorViewModeRef = useRef<EditorViewMode>(editorViewMode);
+  const [markdown, setMarkdown] = useState(page.content);
+  const [richTextSourceMarkdown, setRichTextSourceMarkdown] = useState(
+    page.content,
+  );
+  const [richTextSourceVersion, setRichTextSourceVersion] = useState(0);
+
+  const scheduleSave = useCallback(
+    (nextMarkdown: string) => {
+      recentMarkdownRef.current.add(nextMarkdown);
+      if (recentMarkdownRef.current.size > 10) {
+        const iterator = recentMarkdownRef.current.values();
+        recentMarkdownRef.current.delete(iterator.next().value as string);
+      }
+
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+      onSaveStateChange("saving");
+      saveTimer.current = setTimeout(async () => {
+        try {
+          await onSave(page.id, nextMarkdown);
+          onSaveStateChange("idle");
+        } catch (error) {
+          console.error("Failed to save page:", error);
+          onSaveStateChange("error");
+        }
+      }, 500);
+    },
+    [onSave, onSaveStateChange, page.id],
+  );
+
+  const handleMarkdownChange = useCallback(
+    (nextMarkdown: string) => {
+      setMarkdown(nextMarkdown);
+      scheduleSave(nextMarkdown);
+    },
+    [scheduleSave],
+  );
+
+  useEffect(() => {
+    if (recentMarkdownRef.current.has(page.content)) {
+      recentMarkdownRef.current.delete(page.content);
+      return;
+    }
+
+    setMarkdown(page.content);
+    setRichTextSourceMarkdown(page.content);
+    setRichTextSourceVersion((current) => current + 1);
+  }, [page.content]);
+
+  useEffect(() => {
+    const previousEditorViewMode = previousEditorViewModeRef.current;
+    previousEditorViewModeRef.current = editorViewMode;
+
+    if (
+      mode !== "document" ||
+      previousEditorViewMode !== "code" ||
+      editorViewMode !== "rich-text"
+    ) {
+      return;
+    }
+
+    setRichTextSourceMarkdown(markdown);
+    setRichTextSourceVersion((current) => current + 1);
+  }, [editorViewMode, markdown, mode]);
+
+  useEffect(() => {
+    return () => {
+      if (saveTimer.current) {
+        clearTimeout(saveTimer.current);
+      }
+    };
+  }, []);
+
+  const hasCommentRailSpace = markdown.includes("{>>");
+
+  useEffect(() => {
+    if (editorViewMode !== "code") return;
+    onCommentRailPresenceChange?.(hasCommentRailSpace);
+  }, [editorViewMode, hasCommentRailSpace, onCommentRailPresenceChange]);
+
+  if (mode === "document" && editorViewMode === "code") {
+    return (
+      <CodeEditorSurface
+        page={page}
+        markdown={markdown}
+        hasCommentRailSpace={hasCommentRailSpace}
+        onSelect={onSelect}
+        onMarkdownChange={handleMarkdownChange}
+      />
+    );
+  }
+
+  return (
+    <RichTextEditorSurface
+      key={`${page.id}:${richTextSourceVersion}`}
+      page={page}
+      selected={selected}
+      focusRequestKey={focusRequestKey}
+      mode={mode}
+      sourceMarkdown={richTextSourceMarkdown}
+      onSelect={onSelect}
+      onMarkdownChange={handleMarkdownChange}
+      onCommentRailPresenceChange={onCommentRailPresenceChange}
+      backend={backend}
+      onEditorReady={onEditorReady}
+    />
+  );
+});
+
 export function PageCard({
   page,
   x = 0,
@@ -866,9 +1042,10 @@ export function PageCard({
   onReposition,
   onDelete,
   onSaveStateChange,
-  documentToolbarHost = null,
+  editorViewMode = "rich-text",
   backend,
   onEditorReady,
+  onCommentRailPresenceChange,
 }: PageCardProps) {
   const isDragging = useRef(false);
   const dragStart = useRef({ x: 0, y: 0, pageX: 0, pageY: 0 });
@@ -921,14 +1098,14 @@ export function PageCard({
       {isCanvasMode ? (
         <div className="relative" style={{ width: CANVAS_CONTENT_WIDTH }}>
           <div
-            className={`rounded-3xl border bg-white/95 shadow-[0_18px_50px_rgba(15,23,42,0.14)] backdrop-blur transition-[border-color,box-shadow] ${
+            className={`rounded-2xl border bg-[#FCFCFC] shadow-[0_18px_50px_rgba(15,23,42,0.14)] backdrop-blur transition-[border-color,box-shadow] ${
               selected
                 ? "border-sky-300 shadow-[0_28px_72px_rgba(14,116,144,0.22)]"
                 : "border-slate-200/90"
             }`}
           >
             <div
-              className="flex min-h-10 cursor-grab select-none items-center gap-2 rounded-t-3xl border-b border-slate-200/80 bg-slate-50/90 px-4 active:cursor-grabbing"
+              className="flex min-h-10 cursor-grab select-none items-center gap-2 rounded-t-2xl border-b border-slate-200/80 bg-slate-50/90 px-4 active:cursor-grabbing"
               onPointerDown={handleDragPointerDown}
               onPointerMove={handleDragPointerMove}
               onPointerUp={handleDragPointerUp}
@@ -969,9 +1146,10 @@ export function PageCard({
               onSelect={onSelect}
               onSave={onSave}
               onSaveStateChange={setSaveState}
-              documentToolbarHost={documentToolbarHost}
+              editorViewMode={editorViewMode}
               backend={backend}
               onEditorReady={onEditorReady}
+              onCommentRailPresenceChange={onCommentRailPresenceChange}
             />
           </div>
         </div>
@@ -984,9 +1162,10 @@ export function PageCard({
           onSelect={onSelect}
           onSave={onSave}
           onSaveStateChange={setSaveState}
-          documentToolbarHost={documentToolbarHost}
+          editorViewMode={editorViewMode}
           backend={backend}
           onEditorReady={onEditorReady}
+          onCommentRailPresenceChange={onCommentRailPresenceChange}
         />
       )}
     </div>

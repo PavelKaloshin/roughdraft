@@ -40,6 +40,16 @@ export function createMarkedRenderer(options?: MarkdownOptions) {
   const baseRenderer = new marked.Renderer();
   const resolveFileUrl = options?.resolveFileUrl;
 
+  renderer.code = ({ text, lang, escaped }) => {
+    const language = (lang || "").match(/\S+/)?.[0];
+    const content = escaped ? text : escapeHtml(text);
+    const classAttr = language
+      ? ` class="language-${escapeHtml(language)}"`
+      : "";
+
+    return `<pre><code${classAttr}>${content}</code></pre>\n`;
+  };
+
   renderer.link = function ({ href, title, tokens }) {
     const rawHref = href || "";
     const renderedHref = resolveRenderedUrl(rawHref, resolveFileUrl);

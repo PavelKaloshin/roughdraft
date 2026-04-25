@@ -12,6 +12,7 @@ import { resolveUpdateStatus } from "./update-status.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const staticDir = path.resolve(__dirname, "../../app/dist");
+const defaultServerRoot = path.resolve(__dirname, "../../..");
 
 interface PageLayout {
   x: number;
@@ -62,6 +63,7 @@ interface ProjectTreeListing {
 interface CreateAppOptions {
   port?: number;
   projectDir?: string;
+  serverRoot?: string;
   homeDir?: string;
   staticDirPath?: string;
   packageJsonPath?: string;
@@ -302,6 +304,7 @@ function listProjectTree(projectDir: string): ProjectTreeListing {
 export function createApp(options: CreateAppOptions = {}): CreateAppResult {
   const port = options.port ?? 3000;
   const homeDir = options.homeDir ?? os.homedir();
+  const serverRoot = path.resolve(options.serverRoot ?? defaultServerRoot);
   const staticDirPath = options.staticDirPath ?? staticDir;
   const fetchImpl = options.fetchImpl ?? fetch;
   const app = express();
@@ -499,6 +502,10 @@ export function createApp(options: CreateAppOptions = {}): CreateAppResult {
     res.json({
       backend: "local-files",
       port,
+      projectDir: options.projectDir
+        ? path.resolve(options.projectDir)
+        : undefined,
+      serverRoot,
       stateless: true,
       capabilities: {
         projectPathRequired: true,

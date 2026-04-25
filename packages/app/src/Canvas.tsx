@@ -812,7 +812,7 @@ export function Canvas({
           isPanning ? "cursor-grabbing" : "cursor-grab"
         }`}
         style={{
-          background: "#ffffff",
+          background: "#FCFCFC",
         }}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}

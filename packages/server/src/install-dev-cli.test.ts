@@ -46,13 +46,23 @@ describe("installDevCli", () => {
 
     const wrapperContent = fs.readFileSync(result.wrapperPath, "utf8");
     const mode = fs.statSync(result.wrapperPath).mode & 0o777;
+    const expectedStateDir = path.join(
+      os.homedir(),
+      ".roughdraft",
+      "dev",
+      "roughdraft-dev-lyon-v2",
+    );
 
     expect(result.commandName).toBe("roughdraft-dev-lyon-v2");
     expect(wrapperContent).toContain(`# roughdraft-dev-repo-root=${repoRoot}`);
     expect(wrapperContent).toContain(
+      `if [[ -z "\${ROUGHDRAFT_STATE_DIR:-}" ]]; then export ROUGHDRAFT_STATE_DIR="${expectedStateDir}"; fi`,
+    );
+    expect(wrapperContent).toContain(
       `exec node "${path.join(repoRoot, "packages", "server", "bin", "roughdraft.mjs")}" "$@"`,
     );
     expect(mode).toBe(0o755);
+    expect(result.stateDir).toBe(expectedStateDir);
     expect(warnings).toEqual([]);
   });
 

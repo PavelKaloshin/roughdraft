@@ -1,18 +1,13 @@
+import { Bot, Check, Pencil, Reply, Trash2, User, X } from "lucide-react";
 import {
+  type MouseEvent,
+  type MutableRefObject,
+  type ReactNode,
   useEffect,
   useMemo,
   useRef,
   useState,
-  type MouseEvent,
-  type MutableRefObject,
-  type ReactNode,
 } from "react";
-import { Bot, Check, Pencil, Reply, Trash2, User, X } from "lucide-react";
-import {
-  buildCommentThreads,
-  type CriticComment,
-  type CriticCommentThread,
-} from "./critic-markup";
 import { Button } from "./components/ui/button";
 import { Textarea } from "./components/ui/textarea";
 import {
@@ -20,6 +15,11 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "./components/ui/tooltip";
+import {
+  buildCommentThreads,
+  type CriticComment,
+  type CriticCommentThread,
+} from "./critic-markup";
 import { cn } from "./lib/utils";
 
 interface CommentEditorListProps {
@@ -63,6 +63,9 @@ export function CommentEditorList({
     () => new Map(comments.map((comment) => [comment.id, comment])),
     [comments],
   );
+  const hasActiveSelection =
+    !!selectedCommentId &&
+    comments.some((comment) => comment.id === selectedCommentId);
 
   useEffect(() => {
     const validCommentIds = new Set(comments.map((comment) => comment.id));
@@ -185,7 +188,12 @@ export function CommentEditorList({
       data-comment-thread-container="true"
       className={cn(
         variant === "banner"
-          ? "space-y-2 rounded-2xl border border-amber-200/80 bg-amber-50/70 p-3"
+          ? cn(
+              "space-y-2 rounded-xl border border-transparent bg-transparent p-3 shadow-none transition-[background-color,border-color,box-shadow] duration-200 ease-out",
+              hasActiveSelection
+                ? "border-[#DFDFDC] bg-white shadow-[0_20px_48px_rgba(57,47,38,0.14)]"
+                : "",
+            )
           : "space-y-1.5 px-4 py-3",
         className,
       )}
@@ -196,6 +204,8 @@ export function CommentEditorList({
           thread={thread}
           depth={0}
           index={index}
+          isLast={index === threads.length - 1}
+          parentLines={[]}
           variant={variant}
           interactive={interactive}
           drafts={drafts}
@@ -228,6 +238,8 @@ interface CommentThreadNodeProps {
   thread: CriticCommentThread;
   depth: number;
   index: number;
+  isLast: boolean;
+  parentLines: boolean[];
   variant: "banner" | "rail";
   interactive: boolean;
   drafts: Record<string, string>;
@@ -247,16 +259,20 @@ interface CommentThreadNodeProps {
   onChangeDraft: (commentId: string, nextContent: string) => void;
 }
 
+const COMMENT_TREE_INDENT = 20;
+const COMMENT_TREE_ELBOW_TOP = 14;
+const COMMENT_TREE_ROW_GAP = 12;
+const COMMENT_AVATAR_SIZE = 28;
+const COMMENT_AVATAR_CENTER = 16;
+
 function CommentActionButton({
   label,
-  variant,
   tone = "neutral",
   icon,
   compact = false,
   onClick,
 }: {
   label: string;
-  variant: "banner" | "rail";
   tone?: "neutral" | "danger";
   icon: ReactNode;
   compact?: boolean;
@@ -275,12 +291,8 @@ function CommentActionButton({
                 ? "rounded-full border border-transparent transition-colors duration-150"
                 : "h-7 rounded-full border border-transparent px-2.5 text-[11px] font-medium tracking-[0.08em] uppercase transition-colors duration-150",
               tone === "danger"
-                ? variant === "banner"
-                  ? "text-amber-900/75 hover:bg-rose-100 hover:text-rose-700"
-                  : "text-slate-400 hover:bg-rose-50 hover:text-slate-900"
-                : variant === "banner"
-                  ? "text-amber-900/80 hover:bg-amber-100 hover:text-amber-950"
-                  : "text-slate-400 hover:bg-slate-100 hover:text-slate-900",
+                ? "text-stone-400 hover:bg-rose-100 hover:text-rose-700"
+                : "text-stone-400 hover:bg-[#DED8CE]/45 hover:text-stone-600",
             )}
           >
             {icon}
@@ -300,6 +312,8 @@ function CommentThreadNode({
   thread,
   depth,
   index,
+  isLast,
+  parentLines,
   variant,
   interactive,
   drafts,
@@ -319,35 +333,45 @@ function CommentThreadNode({
   onChangeDraft,
 }: CommentThreadNodeProps) {
   const { comment, replies } = thread;
+  const hasReplies = replies.length > 0;
   const isSelected = comment.id === selectedCommentId;
   const isHovered = comment.id === hoveredCommentId;
   const isEditing = interactive && editingCommentIds.includes(comment.id);
   const isAiAuthor = comment.authorType === "ai";
+  const userAuthorId = comment.authorId?.trim();
   const authorLabel = isAiAuthor
     ? "AI"
-    : comment.authorId?.trim()
-      ? comment.authorId
-      : "User";
+    : userAuthorId && userAuthorId.toLowerCase() !== "user"
+      ? userAuthorId
+      : "Me";
   const AuthorIcon = isAiAuthor ? Bot : User;
   const draftContent = drafts[comment.id] ?? comment.content;
-  const showThreadLine = replies.length > 0;
   const avatarTone = isAiAuthor
     ? variant === "banner"
       ? "border-sky-200 bg-sky-100 text-sky-700"
       : "border-sky-200 bg-sky-50 text-sky-700"
     : variant === "banner"
-      ? "border-amber-200 bg-amber-100 text-amber-800"
-      : "border-amber-200 bg-amber-50 text-amber-700";
+      ? "border-[#D2C7B8] bg-[#DED8CE] text-stone-700"
+      : "border-[#D2C7B8] bg-[#DED8CE] text-stone-700";
   const bodyTone =
     variant === "banner"
       ? isSelected
-        ? "bg-white/85"
+        ? "bg-white"
         : isHovered
-          ? "bg-white/70"
+          ? "bg-white"
           : "bg-transparent"
       : "bg-transparent";
-  const threadLineTone =
-    variant === "banner" ? "bg-amber-200/80" : "bg-slate-200/90";
+  const treeLineTone =
+    variant === "banner" ? "bg-[#DED8CE]/90" : "bg-[#DED8CE]/85";
+  const ancestorGuideOffsets = parentLines.reduce<number[]>(
+    (offsets, showLine, guideIndex) => {
+      if (showLine) {
+        offsets.push(guideIndex * COMMENT_TREE_INDENT + COMMENT_AVATAR_CENTER);
+      }
+      return offsets;
+    },
+    [],
+  );
 
   return (
     <div
@@ -374,162 +398,214 @@ function CommentThreadNode({
         onSelectComment?.(comment.id);
       }}
     >
-      {showThreadLine ? (
-        <div
-          aria-hidden="true"
-          className={cn(
-            "pointer-events-none absolute left-4 w-px",
-            threadLineTone,
-            depth > 0 ? "top-0 bottom-0" : "top-10 bottom-0",
-          )}
-        />
-      ) : null}
-      <div className="grid grid-cols-[2rem_minmax(0,1fr)] gap-x-2">
-        <div className="relative flex justify-center">
+      <div className="relative flex min-w-0 items-stretch">
+        {depth > 0 ? (
           <div
-            className={cn(
-              "relative z-10 flex size-7 items-center justify-center rounded-full border shadow-[0_1px_2px_rgba(15,23,42,0.08)]",
-              avatarTone,
-            )}
-            title={authorLabel}
+            aria-hidden="true"
+            className="pointer-events-none relative shrink-0 self-stretch"
+            style={{ width: depth * COMMENT_TREE_INDENT }}
           >
-            <AuthorIcon className="size-4 shrink-0" />
-          </div>
-        </div>
-        <div className={cn("min-w-0 rounded-2xl px-0.5", bodyTone)}>
-          <div className="truncate text-[13px] font-semibold text-slate-900">
-            {authorLabel}
-          </div>
-          <div
-            className={cn(
-              "mt-1 text-sm leading-6 whitespace-pre-wrap",
-              variant === "banner" ? "text-slate-800" : "text-slate-700",
-            )}
-          >
-            {isEditing
-              ? null
-              : comment.content.trim().length > 0
-                ? comment.content
-                : "Empty comment"}
-          </div>
-          {isEditing ? (
-            <Textarea
-              ref={(node) => {
-                if (node) {
-                  textareaRefs.current.set(comment.id, node);
-                } else {
-                  textareaRefs.current.delete(comment.id);
-                }
-              }}
-              value={draftContent}
-              placeholder={depth === 0 ? "Add your comment" : "Write a reply"}
-              rows={1}
+            {ancestorGuideOffsets.map((left) => (
+              <div
+                key={`${comment.id}-guide-${left}`}
+                className={cn("absolute top-0 bottom-0 w-px", treeLineTone)}
+                style={{
+                  left,
+                  top: -COMMENT_TREE_ROW_GAP,
+                  bottom: -COMMENT_TREE_ROW_GAP,
+                }}
+              />
+            ))}
+            <div
               className={cn(
-                "mt-1 min-h-12 px-3 py-2 text-sm leading-6 md:text-sm md:leading-6",
-                variant === "banner"
-                  ? "border-amber-200 bg-white/90 text-slate-800"
-                  : "border-slate-200 bg-white text-slate-700 shadow-none",
+                "absolute w-px",
+                treeLineTone,
+                isLast ? "" : "bottom-0",
               )}
-              onPointerDown={(event) => {
-                event.stopPropagation();
-                onSelectComment?.(comment.id);
-              }}
-              onClick={(event) => {
-                event.stopPropagation();
-              }}
-              onKeyDown={(event) => {
-                if (
-                  (event.metaKey || event.ctrlKey) &&
-                  event.key.toLowerCase() === "enter"
-                ) {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  onSubmitEditingComment(comment.id);
-                  return;
-                }
-
-                if (event.key !== "Escape") return;
-
-                event.preventDefault();
-                event.stopPropagation();
-                onCancelEditingComment(comment.id);
-              }}
-              onFocus={() => {
-                onSelectComment?.(comment.id);
-              }}
-              onChange={(event) => {
-                onChangeDraft(comment.id, event.target.value);
+              style={{
+                left: (depth - 1) * COMMENT_TREE_INDENT + COMMENT_AVATAR_CENTER,
+                top: -COMMENT_TREE_ROW_GAP,
+                ...(isLast
+                  ? {
+                      height: COMMENT_TREE_ELBOW_TOP + COMMENT_TREE_ROW_GAP,
+                    }
+                  : {
+                      bottom: -COMMENT_TREE_ROW_GAP,
+                    }),
               }}
             />
-          ) : null}
-          <div className="mt-2 flex flex-wrap items-center gap-1">
-            {isEditing ? (
-              <>
-                <CommentActionButton
-                  label="Save"
-                  variant={variant}
-                  icon={<Check className="size-3.5" />}
+            <div
+              className={cn("absolute h-px", treeLineTone)}
+              style={{
+                left: (depth - 1) * COMMENT_TREE_INDENT + COMMENT_AVATAR_CENTER,
+                top: COMMENT_TREE_ELBOW_TOP,
+                width: COMMENT_TREE_INDENT,
+              }}
+            />
+          </div>
+        ) : null}
+        <div className="min-w-0 flex-1">
+          <div className="relative grid grid-cols-[2rem_minmax(0,1fr)] gap-x-2">
+            {hasReplies ? (
+              <div
+                aria-hidden="true"
+                className={cn(
+                  "pointer-events-none absolute w-px",
+                  treeLineTone,
+                )}
+                style={{
+                  left: COMMENT_AVATAR_CENTER,
+                  top: COMMENT_AVATAR_SIZE,
+                  bottom: -COMMENT_TREE_ROW_GAP,
+                }}
+              />
+            ) : null}
+            <div className="relative flex justify-center">
+              <div
+                className={cn(
+                  "relative z-10 flex size-7 items-center justify-center rounded-full border shadow-[0_1px_2px_rgba(15,23,42,0.08)]",
+                  avatarTone,
+                )}
+                title={authorLabel}
+              >
+                <AuthorIcon className="size-3.5 shrink-0" />
+              </div>
+            </div>
+            <div className={cn("min-w-0 rounded-xl px-0.5", bodyTone)}>
+              <div className="truncate text-[13px] font-semibold text-slate-900">
+                {authorLabel}
+              </div>
+              <div
+                className={cn(
+                  "mt-1 text-sm leading-6 whitespace-pre-wrap",
+                  variant === "banner" ? "text-slate-800" : "text-slate-700",
+                )}
+              >
+                {isEditing
+                  ? null
+                  : comment.content.trim().length > 0
+                    ? comment.content
+                    : "Empty comment"}
+              </div>
+              {isEditing ? (
+                <Textarea
+                  ref={(node) => {
+                    if (node) {
+                      textareaRefs.current.set(comment.id, node);
+                    } else {
+                      textareaRefs.current.delete(comment.id);
+                    }
+                  }}
+                  value={draftContent}
+                  placeholder={
+                    depth === 0 ? "Add your comment" : "Write a reply"
+                  }
+                  rows={1}
+                  className={cn(
+                    "mt-1 min-h-12 px-3 py-2 text-sm leading-6 md:text-sm md:leading-6",
+                    variant === "banner"
+                      ? "border-amber-200 bg-white/90 text-slate-800"
+                      : "border-slate-200 bg-white text-slate-700 shadow-none",
+                  )}
+                  onPointerDown={(event) => {
+                    event.stopPropagation();
+                    onSelectComment?.(comment.id);
+                  }}
                   onClick={(event) => {
                     event.stopPropagation();
-                    onSubmitEditingComment(comment.id);
                   }}
-                />
-                <CommentActionButton
-                  label="Cancel"
-                  variant={variant}
-                  icon={<X className="size-3.5" />}
-                  onClick={(event) => {
+                  onKeyDown={(event) => {
+                    if (
+                      (event.metaKey || event.ctrlKey) &&
+                      event.key.toLowerCase() === "enter"
+                    ) {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      onSubmitEditingComment(comment.id);
+                      return;
+                    }
+
+                    if (event.key !== "Escape") return;
+
+                    event.preventDefault();
                     event.stopPropagation();
                     onCancelEditingComment(comment.id);
                   }}
-                />
-              </>
-            ) : (
-              <>
-                <CommentActionButton
-                  label="Reply"
-                  variant={variant}
-                  icon={<Reply className="size-3.5" />}
-                  compact
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    onReplyComment?.(comment.id);
+                  onFocus={() => {
+                    onSelectComment?.(comment.id);
+                  }}
+                  onChange={(event) => {
+                    onChangeDraft(comment.id, event.target.value);
                   }}
                 />
-                <CommentActionButton
-                  label="Edit"
-                  variant={variant}
-                  icon={<Pencil className="size-3.5" />}
-                  compact
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    onStartEditingComment(comment.id);
-                  }}
-                />
-                <CommentActionButton
-                  label="Delete"
-                  variant={variant}
-                  tone="danger"
-                  icon={<Trash2 className="size-3.5" />}
-                  compact
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    onDeleteComment(comment.id);
-                  }}
-                />
-              </>
-            )}
+              ) : null}
+              <div className="mt-2 flex flex-wrap items-center gap-1">
+                {isEditing ? (
+                  <>
+                    <CommentActionButton
+                      label="Save"
+                      icon={<Check className="size-3.5" />}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onSubmitEditingComment(comment.id);
+                      }}
+                    />
+                    <CommentActionButton
+                      label="Cancel"
+                      icon={<X className="size-3.5" />}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onCancelEditingComment(comment.id);
+                      }}
+                    />
+                  </>
+                ) : (
+                  <>
+                    <CommentActionButton
+                      label="Reply"
+                      icon={<Reply className="size-3.5" />}
+                      compact
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onReplyComment?.(comment.id);
+                      }}
+                    />
+                    <CommentActionButton
+                      label="Edit"
+                      icon={<Pencil className="size-3.5" />}
+                      compact
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onStartEditingComment(comment.id);
+                      }}
+                    />
+                    <CommentActionButton
+                      label="Delete"
+                      tone="danger"
+                      icon={<Trash2 className="size-3.5" />}
+                      compact
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onDeleteComment(comment.id);
+                      }}
+                    />
+                  </>
+                )}
+              </div>
+            </div>
           </div>
         </div>
       </div>
-      {replies.length > 0 ? (
-        <div className="mt-3 ml-5 space-y-3">
+      {hasReplies ? (
+        <div className="mt-3 space-y-3">
           {replies.map((reply, replyIndex) => (
             <CommentThreadNode
               key={reply.comment.id}
               thread={reply}
               depth={depth + 1}
               index={replyIndex}
+              isLast={replyIndex === replies.length - 1}
+              parentLines={depth === 0 ? [] : [...parentLines, !isLast]}
               variant={variant}
               interactive={interactive}
               drafts={drafts}
