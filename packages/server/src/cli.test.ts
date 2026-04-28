@@ -232,6 +232,81 @@ describe("cli", () => {
     expect(fs.existsSync(getServerStateFilePath(test.deps.env))).toBeTruthy();
   });
 
+  it("reuses a connected document window before opening another browser window", async () => {
+    const documentPath = path.join(projectDir, "draft.md");
+    fs.writeFileSync(documentPath, "# Draft\n");
+
+    let postedOpenRequest: { path?: string; url?: string } | null = null;
+    let lastOpenedUrl: string | null = null;
+    const deps = createCliDependencies({
+      env: {
+        ...process.env,
+        ROUGHDRAFT_STATE_DIR: stateDir,
+      },
+      cwd: projectDir,
+      fetchImpl: async (input, init) => {
+        const url =
+          input instanceof URL
+            ? input
+            : new URL(
+                typeof input === "string" ? input : input.url,
+                "http://localhost",
+              );
+
+        if (
+          url.pathname === "/api/status" &&
+          url.port === String(ROUGHDRAFT_DEFAULT_PORT)
+        ) {
+          return new Response(
+            JSON.stringify({
+              backend: "local-files",
+              port: ROUGHDRAFT_DEFAULT_PORT,
+              projectDir,
+              serverRoot,
+            }),
+            {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            },
+          );
+        }
+
+        if (url.pathname === "/api/open-request" && init?.method === "POST") {
+          postedOpenRequest = JSON.parse(String(init.body));
+          return new Response(JSON.stringify({ delivered: true }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+
+        throw new Error("connect ECONNREFUSED");
+      },
+      isProcessRunning: () => false,
+      stopProcess: async () => {},
+      spawnServerProcess: async () => {
+        throw new Error("should not spawn");
+      },
+      openUrl: (url) => {
+        lastOpenedUrl = url;
+        return "browser";
+      },
+      log: () => {},
+      error: () => {},
+    });
+
+    const exitCode = await runCli(["open", documentPath], deps);
+
+    expect(exitCode).toBe(0);
+    expect(postedOpenRequest).toEqual({
+      path: documentPath,
+      url: expectedOpenUrl(
+        `http://localhost:${ROUGHDRAFT_DEFAULT_PORT}`,
+        documentPath,
+      ),
+    });
+    expect(lastOpenedUrl).toBeNull();
+  });
+
   it("prints only the document URL from open --print-url", async () => {
     const test = createTestDependencies();
     const documentPath = path.join(projectDir, "draft.md");

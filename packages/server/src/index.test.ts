@@ -425,6 +425,24 @@ describe("createApp", () => {
     expect(fs.statSync(createdDir).isDirectory()).toBe(true);
   });
 
+  it("reports an undelivered open request when no matching window is listening", async () => {
+    const { app } = createApp({
+      homeDir,
+      staticDirPath: projectDir,
+      port: 4312,
+    });
+
+    const response = await request(app)
+      .post("/api/open-request")
+      .send({
+        path: path.join(projectDir, "draft.md"),
+        url: "http://localhost:4312/?path=/tmp/draft.md",
+      });
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ delivered: false });
+  });
+
   it("serves local files and stores uploaded assets inside the project", async () => {
     fs.writeFileSync(path.join(projectDir, "image.txt"), "asset text\n");
 

@@ -153,6 +153,38 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    const sourceUrl = new URL("/api/open-requests", window.location.origin);
+    if (requestedPathState.rawPath) {
+      sourceUrl.searchParams.set("path", requestedPathState.rawPath);
+    }
+
+    const source = new EventSource(`${sourceUrl.pathname}${sourceUrl.search}`);
+    const handleOpenRequest = (event: Event) => {
+      try {
+        const payload = JSON.parse((event as MessageEvent<string>).data) as {
+          url?: unknown;
+        };
+        if (typeof payload.url !== "string" || !payload.url.trim()) return;
+
+        const nextUrl = new URL(payload.url, window.location.origin);
+        window.focus();
+        if (nextUrl.href !== window.location.href) {
+          window.location.assign(nextUrl.href);
+        }
+      } catch (error) {
+        console.error("Failed to handle Roughdraft open request:", error);
+      }
+    };
+
+    source.addEventListener("open-request", handleOpenRequest);
+
+    return () => {
+      source.removeEventListener("open-request", handleOpenRequest);
+      source.close();
+    };
+  }, [requestedPathState.rawPath]);
+
+  useEffect(() => {
     let cancelled = false;
 
     const initialize = async () => {

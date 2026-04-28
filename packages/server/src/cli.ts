@@ -77,7 +77,12 @@ export interface CliDependencies {
   error: (message: string) => void;
 }
 
-type OpenMode = "browser" | "chrome-app" | "disabled" | "none";
+type OpenMode =
+  | "browser"
+  | "chrome-app"
+  | "disabled"
+  | "existing-window"
+  | "none";
 
 interface EnsureRunningResult {
   server: {
@@ -732,6 +737,32 @@ function buildTargetUrl(baseUrl: string, openPath: string): string {
   url.pathname = "/";
   url.searchParams.set("path", openPath);
   return url.toString();
+}
+
+async function sendOpenRequestToExistingWindow(
+  deps: CliDependencies,
+  baseUrl: string,
+  targetUrl: string,
+  openPath: string,
+): Promise<boolean> {
+  try {
+    const requestUrl = new URL("/api/open-request", baseUrl);
+    const response = await deps.fetchImpl(requestUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: openPath, url: targetUrl }),
+      signal: AbortSignal.timeout(STATUS_TIMEOUT_MS),
+    });
+
+    if (!response.ok) {
+      return false;
+    }
+
+    const payload = (await response.json()) as { delivered?: unknown };
+    return payload.delivered === true;
+  } catch {
+    return false;
+  }
 }
 
 function resolveTargetPath(inputPath: string): ResolvedTargetPath {
@@ -1783,10 +1814,17 @@ export async function runCli(
     }
 
     const targetUrl = buildTargetUrl(baseUrl, openPath);
-    const openMode =
-      options.noOpen || deps.env.ROUGHDRAFT_NO_OPEN === "1"
-        ? "disabled"
+    let openMode: OpenMode = "disabled";
+    if (!options.noOpen && deps.env.ROUGHDRAFT_NO_OPEN !== "1") {
+      openMode = (await sendOpenRequestToExistingWindow(
+        deps,
+        baseUrl,
+        targetUrl,
+        openPath,
+      ))
+        ? "existing-window"
         : deps.openUrl(targetUrl);
+    }
 
     if (result?.portChanged) {
       const message = `Preferred port ${getPreferredPort(deps.env)} is busy, using ${result.server.port}.`;
@@ -1815,6 +1853,11 @@ export async function runCli(
 
     if (openMode === "chrome-app") {
       deps.log(`Opened Roughdraft in a Chrome app window: ${targetUrl}`);
+      return 0;
+    }
+
+    if (openMode === "existing-window") {
+      deps.log(`Reused an existing Roughdraft window: ${targetUrl}`);
       return 0;
     }
 

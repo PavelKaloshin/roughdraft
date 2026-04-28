@@ -80,4 +80,38 @@ test.describe("opening local markdown files", () => {
       file: "review.md",
     });
   });
+
+  test("focuses an existing window for a repeated open request", async ({
+    page,
+  }) => {
+    const filePath = writeProjectFile(
+      projectDir,
+      "repeat.md",
+      "# Repeat Open\n\nExisting window body.\n",
+    );
+
+    await openMarkdownFile(page, filePath, "code");
+    await expect(page.locator(".cm-content")).toContainText(
+      "Existing window body.",
+    );
+
+    const targetUrl = `/?${new URLSearchParams({
+      path: filePath,
+      editor: "code",
+    }).toString()}`;
+    const response = await page.request.post("/api/open-request", {
+      data: { path: filePath, url: targetUrl },
+    });
+
+    expect(response.ok()).toBe(true);
+    await expect(response.json()).resolves.toEqual({ delivered: true });
+    await expect(page.locator(".cm-content")).toContainText(
+      "Existing window body.",
+    );
+
+    logE2eEvent("open-file.reused-existing-window", {
+      projectDir,
+      file: "repeat.md",
+    });
+  });
 });
