@@ -12,6 +12,29 @@ import {
 import { createEditorExtensions } from "../src/editor-extensions";
 
 describe("CriticMarkup comments", () => {
+  it("preserves YAML frontmatter delimiters and raw table-like YAML text", () => {
+    const input = [
+      "---",
+      "title: Frontmatter round trip",
+      "summary: |",
+      "  | column | value |",
+      "  | --- | --- |",
+      "  | path | docs/table.md |",
+      "tags:",
+      "  - roughdraft",
+      "---",
+      "",
+      "# Body",
+      "",
+      "Opening this file in rich text should not rewrite frontmatter.",
+      "",
+    ].join("\n");
+
+    const { doc, comments } = criticMarkdownToEditorState(input);
+
+    expect(editorStateToCriticMarkdown(doc, comments)).toBe(input);
+  });
+
   it("detects review rail content without counting fenced examples", () => {
     expect(
       criticMarkdownHasReviewRail(

@@ -16,6 +16,8 @@ import {
 import {
   createMarkedRenderer,
   createTurndownService,
+  prependYamlFrontmatter,
+  splitYamlFrontmatter,
   type MarkdownOptions,
 } from "../markdown";
 
@@ -989,31 +991,49 @@ export function criticMarkdownHasReviewRail(
   options?: MarkdownOptions,
 ): boolean {
   const { parser, comments, changes } = createCriticMarked(options);
-  parser.parse(markdown);
+  parser.parse(splitYamlFrontmatter(markdown).body);
   return comments.size > 0 || changes.size > 0;
 }
 
 export function criticMarkdownToEditorState(
   markdown: string,
   options?: MarkdownOptions,
-): { doc: JSONContent; comments: Map<string, CriticComment> } {
+): {
+  doc: JSONContent;
+  comments: Map<string, CriticComment>;
+  frontmatter: string | null;
+} {
+  const { frontmatter, body } = splitYamlFrontmatter(markdown);
   const { parser, comments } = createCriticMarked(options);
-  const html = parser.parse(markdown) as string;
-  const doc = generateJSON(html, extensions);
+  const html = parser.parse(body) as string;
+  const doc = generateJSON(html, extensions) as JSONContent & {
+    yamlFrontmatter?: string;
+  };
+  if (frontmatter) {
+    doc.yamlFrontmatter = frontmatter;
+  }
 
-  return { doc, comments };
+  return { doc, comments, frontmatter };
 }
 
 export function editorStateToCriticMarkdown(
   doc: JSONContent,
   comments: Map<string, CriticComment>,
+  options?: { frontmatter?: string | null },
 ): string {
   const html = generateHTML(doc, extensions);
   const service = createTurndownService();
   addCriticCommentRule(service, comments);
   addCriticChangeRule(service, comments);
   addCriticCodeBlockRule(service);
-  return `${service.turndown(html).trimEnd()}\n`;
+  const frontmatter =
+    options?.frontmatter ??
+    (doc as JSONContent & { yamlFrontmatter?: string }).yamlFrontmatter ??
+    null;
+  return prependYamlFrontmatter(
+    `${service.turndown(html).trimEnd()}\n`,
+    frontmatter,
+  );
 }
 
 export function createCriticComment(

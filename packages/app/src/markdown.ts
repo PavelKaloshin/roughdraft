@@ -6,6 +6,11 @@ export interface MarkdownOptions {
   resolveFileUrl?: (path: string) => string | null;
 }
 
+export interface YamlFrontmatterSplit {
+  frontmatter: string | null;
+  body: string;
+}
+
 function isExternalUrl(path: string): boolean {
   return /^(?:[a-z]+:)?\/\//i.test(path) || path.startsWith("data:");
 }
@@ -33,6 +38,59 @@ function resolveRenderedUrl(
 ) {
   if (isExternalUrl(path) || isInPageAnchor(path)) return path;
   return resolveFileUrl?.(path) ?? path;
+}
+
+function isYamlFrontmatterDelimiter(line: string): boolean {
+  return /^(?:---|\.\.\.)[ \t]*$/.test(line.replace(/\r$/, ""));
+}
+
+export function splitYamlFrontmatter(markdown: string): YamlFrontmatterSplit {
+  const openingDelimiter = markdown.match(/^---[ \t]*(?:\r\n|\n)/);
+  if (!openingDelimiter) return { frontmatter: null, body: markdown };
+
+  let lineStart = openingDelimiter[0].length;
+
+  while (lineStart < markdown.length) {
+    const nextLineBreak = markdown.indexOf("\n", lineStart);
+    const lineEnd = nextLineBreak === -1 ? markdown.length : nextLineBreak + 1;
+    const line = markdown.slice(
+      lineStart,
+      nextLineBreak === -1 ? lineEnd : lineEnd - 1,
+    );
+
+    if (isYamlFrontmatterDelimiter(line)) {
+      let bodyStart = lineEnd;
+
+      while (bodyStart < markdown.length) {
+        const blankLineBreak = markdown.indexOf("\n", bodyStart);
+        const blankLineEnd =
+          blankLineBreak === -1 ? markdown.length : blankLineBreak + 1;
+        const blankLine = markdown.slice(
+          bodyStart,
+          blankLineBreak === -1 ? blankLineEnd : blankLineEnd - 1,
+        );
+
+        if (blankLine.replace(/\r$/, "").trim() !== "") break;
+        bodyStart = blankLineEnd;
+      }
+
+      return {
+        frontmatter: markdown.slice(0, bodyStart),
+        body: markdown.slice(bodyStart),
+      };
+    }
+
+    lineStart = lineEnd;
+  }
+
+  return { frontmatter: null, body: markdown };
+}
+
+export function prependYamlFrontmatter(
+  markdown: string,
+  frontmatter?: string | null,
+): string {
+  return frontmatter ? `${frontmatter}${markdown}` : markdown;
 }
 
 export function createMarkedRenderer(options?: MarkdownOptions) {

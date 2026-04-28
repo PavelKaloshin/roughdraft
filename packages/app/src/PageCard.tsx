@@ -593,6 +593,7 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
   const [comments, setComments] = useState<Map<string, CriticComment>>(
     () => parsedContent.comments,
   );
+  const frontmatterRef = useRef<string | null>(parsedContent.frontmatter);
 
   useEffect(() => {
     commentsRef.current = comments;
@@ -618,6 +619,7 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
         editorStateToCriticMarkdown(
           currentDoc,
           nextComments ?? commentsRef.current,
+          { frontmatter: frontmatterRef.current },
         ),
       );
     },
@@ -964,6 +966,7 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
   useEffect(() => {
     if (!editor) return;
 
+    frontmatterRef.current = parsedContent.frontmatter;
     commentsRef.current = parsedContent.comments;
     setComments(parsedContent.comments);
     setSelectedCommentId(null);

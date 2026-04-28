@@ -439,6 +439,43 @@ describe("PageCard editor integration", () => {
     expect(rendered.onSaveStateChange.mock.calls.at(-1)?.[0]).toBe("idle");
   });
 
+  it("rich-text edits preserve raw YAML frontmatter on autosave", async () => {
+    const frontmatter = [
+      "---",
+      "title: Frontmatter autosave",
+      "summary: |",
+      "  | column | value |",
+      "  | --- | --- |",
+      "  | path | docs/table.md |",
+      "tags:",
+      "  - roughdraft",
+      "---",
+      "",
+    ].join("\n");
+    const rendered = await renderPageCard({
+      page: {
+        id: "doc-frontmatter-autosave-1",
+        title: "Doc Frontmatter Autosave 1",
+        content: `${frontmatter}# Body\n\nKeep this body editable.\n`,
+      },
+      selected: true,
+    });
+
+    vi.useFakeTimers();
+
+    await insertTextAtEnd(rendered.getEditor(), " updated");
+
+    await act(async () => {
+      vi.advanceTimersByTime(500);
+      await Promise.resolve();
+    });
+
+    expect(rendered.onSave).toHaveBeenCalledTimes(1);
+    expect(rendered.onSave.mock.calls[0]?.[1]).toBe(
+      `${frontmatter}# Body\n\nKeep this body editable. updated\n`,
+    );
+  });
+
   it("viewing mode disables rich-text editing", async () => {
     const rendered = await renderPageCard({
       page: {
