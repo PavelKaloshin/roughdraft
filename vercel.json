@@ -2,5 +2,11 @@
   "buildCommand": "cd packages/app && pnpm install && pnpm build",
   "outputDirectory": "packages/app/dist",
   "installCommand": "pnpm install",
-  "framework": null
+  "framework": null,
+  "rewrites": [
+    {
+      "source": "/roughdraft-flavored-markdown",
+      "destination": "/index.html"
+    }
+  ]
 }

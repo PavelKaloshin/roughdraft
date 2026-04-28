@@ -1,12 +1,24 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Check, Copy, ExternalLink } from "lucide-react";
+import {
+  ArrowLeft,
+  ArrowRight,
+  Braces,
+  Check,
+  Copy,
+  ExternalLink,
+  FileText,
+  MessageSquare,
+  PencilLine,
+} from "lucide-react";
 import {
   type DocumentEditorViewMode,
+  ROUGHDRAFT_FLAVORED_MARKDOWN_PATH,
   buildLocationForDocumentEditorViewMode,
   formatWorkspacePathForDisplay,
   getDocumentEditorViewModeFromLocation,
   getPathLeaf,
   getRequestedPathState,
+  isReservedAppPath,
   joinPath,
   syncRequestedPathInUrl,
 } from "./app-navigation";
@@ -34,6 +46,61 @@ type SaveState = "idle" | "saving" | "error";
 type DocumentDiskChangeState = "clean" | "changed" | "conflict" | "paused";
 const AGENT_SETUP_PROMPT =
   "Install Roughdraft for me using `npm i -g roughdraft`, then read https://roughdraft.page/setup.md and set yourself up to use it.";
+const ROUGHDRAFT_MARKDOWN_FEATURES = [
+  {
+    title: "Comment in the margins",
+    description:
+      "Leave review notes inline, then let your agent read and respond to the same `.md` file.",
+    example: "{>>Can we tighten this claim?<<}",
+    icon: MessageSquare,
+  },
+  {
+    title: "Suggest changes",
+    description:
+      "Mark insertions, deletions, and substitutions without turning Markdown into a proprietary document.",
+    example: "{~~rough notes~>clear next steps~~}",
+    icon: PencilLine,
+  },
+  {
+    title: "Keep Markdown portable",
+    description:
+      "Roughdraft flavored Markdown blends CriticMarkup with Notion-style review affordances for people and agents.",
+    example: "regular.md + review markup",
+    icon: FileText,
+  },
+] as const;
+const ROUGHDRAFT_MARKDOWN_SYNTAX = [
+  {
+    label: "Comment",
+    syntax:
+      '{==selected text==}{>>Comment text<<}{id="c1" by="user" at="2026-04-28T12:00:00.000Z"}',
+    description:
+      "Highlights the reviewed text and attaches a margin comment to it.",
+  },
+  {
+    label: "Reply",
+    syntax:
+      '{>>I can make that edit.<<}{id="c2" by="AI" at="2026-04-28T12:01:00.000Z" re="c1"}',
+    description:
+      "Adds a threaded reply by pointing `re` at the parent comment id.",
+  },
+  {
+    label: "Insertion",
+    syntax: '{++new text++}{id="s1" by="AI" at="2026-04-28T12:02:00.000Z"}',
+    description: "Suggests text to add without applying it silently.",
+  },
+  {
+    label: "Deletion",
+    syntax: '{--old text--}{id="s2" by="user" at="2026-04-28T12:03:00.000Z"}',
+    description: "Suggests removing text while keeping the original visible.",
+  },
+  {
+    label: "Substitution",
+    syntax:
+      '{~~old text~>new text~~}{id="s3" by="AI" at="2026-04-28T12:04:00.000Z"}',
+    description: "Suggests replacing one span with another.",
+  },
+] as const;
 
 export function Homepage({
   message,
@@ -161,13 +228,204 @@ export function Homepage({
             className="block aspect-[1728/1117] w-full object-cover"
           />
         </div>
+
+        <section
+          aria-labelledby="roughdraft-markdown-heading"
+          className="mx-auto mt-20 grid w-full max-w-5xl gap-8 text-left sm:mt-24 lg:grid-cols-[0.95fr_1.05fr] lg:items-start"
+        >
+          <div>
+            <p className="text-xs font-medium tracking-[0.16em] text-stone-500 uppercase">
+              Roughdraft flavored Markdown
+            </p>
+            <h2
+              className="mt-3 text-3xl leading-tight font-semibold text-balance text-slate-950 sm:text-4xl"
+              id="roughdraft-markdown-heading"
+            >
+              We extended Markdown to add support for comment threads and
+              suggested changes.
+            </h2>
+            <p className="mt-4 text-base leading-7 text-slate-600">
+              The big idea is simple: keep the file as Markdown, but make it
+              reviewable. Roughdraft uses a small layer of portable markup so
+              you can comment, suggest edits, and send the exact same document
+              back to your coding agent.
+            </p>
+            <Button
+              className="mt-6 h-9 gap-2 px-3 text-sm"
+              variant="outline"
+              render={
+                <a href={ROUGHDRAFT_FLAVORED_MARKDOWN_PATH}>
+                  Read the spec
+                  <ArrowRight className="size-4" aria-hidden="true" />
+                </a>
+              }
+            />
+          </div>
+
+          <div className="grid gap-3">
+            {ROUGHDRAFT_MARKDOWN_FEATURES.map(
+              ({ description, example, icon: Icon, title }) => (
+                <div
+                  className="grid gap-4 rounded-lg border border-slate-200 bg-white p-4 shadow-[0_10px_30px_rgba(15,23,42,0.06)] sm:grid-cols-[2.5rem_1fr]"
+                  key={title}
+                >
+                  <div className="flex size-10 items-center justify-center rounded-md border border-slate-200 bg-slate-50 text-slate-700">
+                    <Icon className="size-4" aria-hidden="true" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-semibold text-slate-950">
+                      {title}
+                    </h3>
+                    <p className="mt-1 text-sm leading-6 text-slate-600">
+                      {description}
+                    </p>
+                    <code className="mt-3 block overflow-x-auto rounded-md border border-slate-200 bg-[#FAFAF8] px-3 py-2 text-xs text-slate-700">
+                      {example}
+                    </code>
+                  </div>
+                </div>
+              ),
+            )}
+          </div>
+        </section>
       </div>
     </div>
   );
 }
+
+export function RoughdraftFlavoredMarkdownPage() {
+  return (
+    <main className="min-h-screen bg-[#FCFCFC] px-6 py-8 text-slate-950">
+      <div className="mx-auto max-w-5xl">
+        <Button
+          className="h-9 gap-2 px-3 text-sm"
+          variant="ghost"
+          render={
+            <a href="/">
+              <ArrowLeft className="size-4" aria-hidden="true" />
+              Back to Roughdraft
+            </a>
+          }
+        />
+
+        <section className="mt-12 max-w-3xl">
+          <p className="text-xs font-medium tracking-[0.16em] text-stone-500 uppercase">
+            Roughdraft flavored Markdown
+          </p>
+          <h1 className="mt-3 text-4xl leading-tight font-semibold text-balance text-slate-950 sm:text-5xl">
+            Markdown with review comments and suggested changes
+          </h1>
+          <p className="mt-5 text-lg leading-8 text-slate-600">
+            Roughdraft Flavored Markdown is regular Markdown plus portable
+            review markup. It blends CriticMarkup syntax with Notion-style
+            comment threads, so a person and a coding agent can review the same
+            file without a sidecar database or hosted document format.
+          </p>
+        </section>
+
+        <section className="mt-12 grid gap-4 md:grid-cols-3">
+          {[
+            {
+              title: "Plain text first",
+              description:
+                "The saved file remains readable in editors, terminals, git diffs, and agent context windows.",
+              icon: FileText,
+            },
+            {
+              title: "Threaded review",
+              description:
+                "Comments carry document-local ids, authors, timestamps, and reply links for back-and-forth discussion.",
+              icon: MessageSquare,
+            },
+            {
+              title: "Explicit edits",
+              description:
+                "Suggestions are represented as insertions, deletions, and substitutions until someone accepts them.",
+              icon: PencilLine,
+            },
+          ].map(({ description, icon: Icon, title }) => (
+            <div
+              className="rounded-lg border border-slate-200 bg-white p-5 shadow-[0_10px_30px_rgba(15,23,42,0.05)]"
+              key={title}
+            >
+              <div className="flex size-10 items-center justify-center rounded-md border border-slate-200 bg-slate-50 text-slate-700">
+                <Icon className="size-4" aria-hidden="true" />
+              </div>
+              <h2 className="mt-4 text-base font-semibold text-slate-950">
+                {title}
+              </h2>
+              <p className="mt-2 text-sm leading-6 text-slate-600">
+                {description}
+              </p>
+            </div>
+          ))}
+        </section>
+
+        <section className="mt-14 grid gap-8 lg:grid-cols-[0.8fr_1.2fr]">
+          <div>
+            <p className="text-xs font-medium tracking-[0.16em] text-stone-500 uppercase">
+              Syntax
+            </p>
+            <h2 className="mt-3 text-3xl leading-tight font-semibold text-slate-950">
+              The review layer is small on purpose
+            </h2>
+            <p className="mt-4 text-base leading-7 text-slate-600">
+              Roughdraft uses CriticMarkup-compatible markers for comments,
+              highlights, insertions, deletions, and substitutions. Metadata is
+              stored in a compact attribute block after the markup.
+            </p>
+          </div>
+
+          <div className="grid gap-3">
+            {ROUGHDRAFT_MARKDOWN_SYNTAX.map(
+              ({ description, label, syntax }) => (
+                <div
+                  className="rounded-lg border border-slate-200 bg-white p-4"
+                  key={label}
+                >
+                  <div className="flex items-center gap-2">
+                    <Braces
+                      className="size-4 text-slate-500"
+                      aria-hidden="true"
+                    />
+                    <h3 className="text-sm font-semibold text-slate-950">
+                      {label}
+                    </h3>
+                  </div>
+                  <p className="mt-2 text-sm leading-6 text-slate-600">
+                    {description}
+                  </p>
+                  <code className="mt-3 block overflow-x-auto rounded-md border border-slate-200 bg-[#FAFAF8] px-3 py-2 text-xs text-slate-700">
+                    {syntax}
+                  </code>
+                </div>
+              ),
+            )}
+          </div>
+        </section>
+
+        <section className="mt-14 max-w-3xl border-t border-slate-200 pt-10">
+          <h2 className="text-2xl font-semibold text-slate-950">
+            What this is not
+          </h2>
+          <p className="mt-4 text-base leading-7 text-slate-600">
+            It is not a new replacement for Markdown, and it is not a hidden app
+            state format. If Roughdraft adds review information, that
+            information should stay visible, portable, and understandable in the
+            Markdown file itself.
+          </p>
+        </section>
+      </div>
+    </main>
+  );
+}
+
 export function App() {
   const initialRequestedPathState = getRequestedPathState();
   const [requestedPathState] = useState(initialRequestedPathState);
+  const isRoughdraftFlavoredMarkdownRoute = isReservedAppPath(
+    window.location.pathname,
+  );
   const [backend, setBackend] = useState<StorageBackend | null>(null);
   const [documentPage, setDocumentPage] = useState<Page | null>(null);
   const [activeDocumentPath, setActiveDocumentPath] = useState<string | null>(
@@ -333,8 +591,15 @@ export function App() {
         )
       : null;
 
-    document.title = workspaceTitlePath ?? "Roughdraft";
-  }, [activeDocumentPath, backend, requestedPathState.rawPath]);
+    document.title = isRoughdraftFlavoredMarkdownRoute
+      ? "Roughdraft Flavored Markdown"
+      : (workspaceTitlePath ?? "Roughdraft");
+  }, [
+    activeDocumentPath,
+    backend,
+    isRoughdraftFlavoredMarkdownRoute,
+    requestedPathState.rawPath,
+  ]);
 
   const handleSaveDocument = useCallback(
     async (id: string, content: string) => {
@@ -488,6 +753,10 @@ export function App() {
 
   if (loading) {
     return <div className="h-screen bg-[#FCFCFC]" aria-hidden="true" />;
+  }
+
+  if (isRoughdraftFlavoredMarkdownRoute) {
+    return <RoughdraftFlavoredMarkdownPage />;
   }
 
   if (!requestedPathState.rawPath || loadError) {

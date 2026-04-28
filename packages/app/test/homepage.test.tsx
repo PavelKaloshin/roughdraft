@@ -1,7 +1,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Homepage } from "../src/App";
+import { Homepage, RoughdraftFlavoredMarkdownPage } from "../src/App";
 
 const AGENT_SETUP_PROMPT =
   "Install Roughdraft for me using `npm i -g roughdraft`, then read https://roughdraft.page/setup.md and set yourself up to use it.";
@@ -57,6 +57,16 @@ describe("Homepage", () => {
     expect(container.textContent).toContain("Free");
     expect(container.textContent).toContain("Open-source");
     expect(container.textContent).toContain("Runs locally");
+    expect(container.textContent).toContain("Roughdraft flavored Markdown");
+    expect(container.textContent).toContain(
+      "We extended Markdown to add support for comment threads and suggested changes.",
+    );
+    expect(container.textContent).toContain(
+      "blends CriticMarkup with Notion-style review affordances",
+    );
+    expect(container.textContent).toContain(
+      "{~~rough notes~>clear next steps~~}",
+    );
     expect(
       container.querySelectorAll('[contenteditable="plaintext-only"]'),
     ).toHaveLength(0);
@@ -77,6 +87,10 @@ describe("Homepage", () => {
     expect(githubLink?.textContent).toContain("View on GitHub");
     expect(githubLink?.getAttribute("target")).toBe("_blank");
     expect(githubLink?.getAttribute("rel")).toBe("noreferrer");
+    expect(
+      container.querySelector('a[href="/roughdraft-flavored-markdown"]')
+        ?.textContent,
+    ).toContain("Read the spec");
 
     expect(cta).toBeDefined();
     if (!cta) throw new Error("CTA not found");
@@ -99,5 +113,24 @@ describe("Homepage", () => {
 
     expect(writeText).toHaveBeenCalledWith(AGENT_SETUP_PROMPT);
     expect(document.body.textContent).toContain("Copied");
+  });
+
+  it("renders the Roughdraft flavored Markdown spec page", async () => {
+    await act(async () => {
+      root.render(<RoughdraftFlavoredMarkdownPage />);
+    });
+
+    expect(container.textContent).toContain(
+      "Markdown with review comments and suggested changes",
+    );
+    expect(container.textContent).toContain(
+      "regular Markdown plus portable review markup",
+    );
+    expect(container.textContent).toContain("Threaded review");
+    expect(container.textContent).toContain("Substitution");
+    expect(container.textContent).toContain("{~~old text~>new text~~}");
+    expect(container.querySelector('a[href="/"]')?.textContent).toContain(
+      "Back to Roughdraft",
+    );
   });
 });
