@@ -760,8 +760,9 @@ export function App() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
-  const documentEditorViewMode =
-    getDocumentEditorViewModeFromLocation("rich-text");
+  const [documentEditorViewMode, setDocumentEditorViewMode] = useState(() =>
+    getDocumentEditorViewModeFromLocation("rich-text"),
+  );
   const backendRef = useRef<StorageBackend | null>(null);
   const documentPageRef = useRef<Page | null>(null);
   const activeDocumentPathRef = useRef<string | null>(activeDocumentPath);
@@ -1068,10 +1069,17 @@ export function App() {
 
   const handleDocumentEditorViewModeChange = useCallback(
     (nextMode: DocumentEditorViewMode) => {
-      if (nextMode === documentEditorViewMode) return;
-      window.location.assign(buildLocationForDocumentEditorViewMode(nextMode));
+      setDocumentEditorViewMode((current) => {
+        if (nextMode === current) return current;
+        window.history.replaceState(
+          null,
+          "",
+          buildLocationForDocumentEditorViewMode(nextMode),
+        );
+        return nextMode;
+      });
     },
-    [documentEditorViewMode],
+    [],
   );
 
   if (loading) {

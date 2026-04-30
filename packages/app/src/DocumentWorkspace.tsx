@@ -1,13 +1,15 @@
 import {
   AlertTriangle,
+  Check,
   CodeXml,
   Eye,
+  Loader2,
   MessageSquarePlus,
   PencilLine,
   RefreshCcw,
   Upload,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { DocumentEditorViewMode } from "./app-navigation";
 import { Button } from "./components/ui/button";
 import {
@@ -99,6 +101,27 @@ export function DocumentWorkspace({
 }: DocumentWorkspaceProps) {
   const [documentInteractionMode, setDocumentInteractionMode] =
     useState<DocumentInteractionMode>("editing");
+  const [saveState, setSaveState] = useState<SaveState>("idle");
+  const [showSaved, setShowSaved] = useState(false);
+  const wasSavingRef = useRef(false);
+
+  const handleSaveStateChange = useCallback(
+    (state: SaveState) => {
+      setSaveState(state);
+      onDocumentSaveStateChange(state);
+      if (state === "saving") {
+        wasSavingRef.current = true;
+        setShowSaved(false);
+      } else if (state === "idle" && wasSavingRef.current) {
+        wasSavingRef.current = false;
+        setShowSaved(true);
+        const timer = setTimeout(() => setShowSaved(false), 2000);
+        return () => clearTimeout(timer);
+      }
+    },
+    [onDocumentSaveStateChange],
+  );
+
   const [documentHasComments, setDocumentHasComments] = useState(
     () =>
       !!documentPage?.content &&
@@ -243,6 +266,25 @@ export function DocumentWorkspace({
                 >
                   {documentFilenameLabel}
                 </div>
+                {saveState === "saving" ? (
+                  <span
+                    role="status"
+                    aria-label="Saving"
+                    className="inline-flex shrink-0 items-center gap-1 font-mono text-[0.6rem] tracking-[0.01em] text-stone-400 dark:text-stone-500"
+                  >
+                    <Loader2 className="size-[0.6rem] animate-spin" />
+                    Saving
+                  </span>
+                ) : showSaved ? (
+                  <span
+                    role="status"
+                    aria-label="Saved"
+                    className="inline-flex shrink-0 items-center gap-1 font-mono text-[0.6rem] tracking-[0.01em] text-stone-400 dark:text-stone-500"
+                  >
+                    <Check className="size-[0.6rem]" />
+                    Saved
+                  </span>
+                ) : null}
                 <div className="ml-auto inline-flex h-[1.25rem] shrink-0 items-center">
                   <Select<DocumentInteractionMode>
                     value={documentInteractionMode}
@@ -286,7 +328,7 @@ export function DocumentWorkspace({
               page={documentPage}
               selected
               onSave={onSaveDocument}
-              onSaveStateChange={onDocumentSaveStateChange}
+              onSaveStateChange={handleSaveStateChange}
               editorViewMode={documentEditorViewMode}
               interactionMode={documentInteractionMode}
               backend={backend}

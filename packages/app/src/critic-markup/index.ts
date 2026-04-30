@@ -16,6 +16,7 @@ import {
 import {
   createMarkedRenderer,
   createTurndownService,
+  normalizeBlockSpacing,
   prependYamlFrontmatter,
   protectRichTextRoundTripMarkdown,
   splitYamlFrontmatter,
@@ -1032,7 +1033,7 @@ export function editorStateToCriticMarkdown(
     (doc as JSONContent & { yamlFrontmatter?: string }).yamlFrontmatter ??
     null;
   return prependYamlFrontmatter(
-    `${service.turndown(html).trimEnd()}\n`,
+    normalizeBlockSpacing(`${service.turndown(html).trimEnd()}\n`),
     frontmatter,
   );
 }

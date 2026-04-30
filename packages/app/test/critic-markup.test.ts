@@ -36,7 +36,6 @@ describe("CriticMarkup comments", () => {
       "---",
       "",
       "# Body",
-      "",
       "Opening this file in rich text should not rewrite frontmatter.",
       "",
     ].join("\n");
@@ -191,7 +190,7 @@ describe("CriticMarkup comments", () => {
     expect(output).toContain(
       '{==Second item==}{>>Needs review<<}{id="cmt4" by="AI" at="2024-01-15T10:33:00.000Z"}',
     );
-    expect(output).toContain("*   First item");
+    expect(output).toContain("- First item");
   });
 
   it("does not import a trailing blank line into fenced code blocks", () => {
@@ -520,7 +519,7 @@ const command = "{==roughdraft open==}{>>test<<}{id="c1" by="user" at="2026-04-2
       '## Use {++new title++}{id="s1" by="user" at="2024-01-15T10:30:00.000Z"}',
     );
     expect(output).toContain(
-      '*   Keep {--old item--}{id="s2" by="user" at="2024-01-15T10:31:00.000Z"}',
+      '- Keep {--old item--}{id="s2" by="user" at="2024-01-15T10:31:00.000Z"}',
     );
   });
 

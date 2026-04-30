@@ -286,6 +286,7 @@ export function createTurndownService(): TurndownService {
   const service = new TurndownService({
     headingStyle: "atx",
     codeBlockStyle: "fenced",
+    bulletListMarker: "-",
     blankReplacement(_content, node) {
       if (node.hasAttribute(rawMarkdownBlockAttribute)) {
         return `\n\n${decodeRawMarkdownBlock(
@@ -301,6 +302,30 @@ export function createTurndownService(): TurndownService {
 
   service.use(tables as Parameters<TurndownService["use"]>[0]);
   service.use(taskListItems as Parameters<TurndownService["use"]>[0]);
+
+  service.addRule("compactListItem", {
+    filter: "li",
+    replacement(content, node, options) {
+      const trimmed = content
+        .replace(/^\n+/, "")
+        .replace(/\n+$/, "\n")
+        .replace(/\n/gm, "\n  ");
+
+      let prefix = `${options.bulletListMarker} `;
+      const parent = node.parentNode;
+      if (parent && parent.nodeName === "OL") {
+        const start = (parent as HTMLOListElement).getAttribute("start");
+        const index = Array.prototype.indexOf.call(parent.children, node);
+        prefix = `${start ? Number(start) + index : index + 1}. `;
+      }
+
+      return (
+        prefix +
+        trimmed +
+        (node.nextSibling && !/\n$/.test(trimmed) ? "\n" : "")
+      );
+    },
+  });
 
   service.addRule("tiptapHeaderTable", {
     filter(node) {
@@ -410,8 +435,24 @@ export function createTurndownService(): TurndownService {
 
 const turndown = createTurndownService();
 
+/**
+ * Collapse runs of 3+ newlines to 2 and remove the blank line that
+ * Turndown inserts before/after ATX headings.  This keeps block
+ * separation where it matters (between consecutive paragraphs) while
+ * producing a more compact output that round-trips with fewer
+ * gratuitous whitespace changes.
+ */
+export function normalizeBlockSpacing(md: string): string {
+  let normalized = md.replace(/\n{3,}/g, "\n\n");
+  // Remove blank line immediately before a heading.
+  normalized = normalized.replace(/\n\n(#{1,6} )/g, "\n$1");
+  // Remove blank line immediately after a heading line.
+  normalized = normalized.replace(/(^#{1,6} [^\n]+)\n\n/gm, "$1\n");
+  return normalized;
+}
+
 export function toMarkdown(html: string): string {
-  return `${turndown.turndown(html).trimEnd()}\n`;
+  return normalizeBlockSpacing(`${turndown.turndown(html).trimEnd()}\n`);
 }
 
 export function toHtml(markdown: string, options?: MarkdownOptions): string {

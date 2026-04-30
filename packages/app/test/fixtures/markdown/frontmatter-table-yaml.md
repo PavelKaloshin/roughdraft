@@ -9,5 +9,4 @@ tags:
 ---
 
 # Body
-
 Opening this file in rich text should not rewrite frontmatter.

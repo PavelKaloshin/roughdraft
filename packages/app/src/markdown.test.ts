@@ -81,7 +81,6 @@ describe("toHtml", () => {
     expect(toMarkdown(toHtml(readMarkdownFixture("headerless-table.md")))).toBe(
       [
         "# Headerless Table",
-        "",
         "|     |     |",
         "| --- | --- |",
         "| First | Ready |",
@@ -89,6 +88,37 @@ describe("toHtml", () => {
         "",
       ].join("\n"),
     );
+  });
+});
+
+describe("normalizeBlockSpacing", () => {
+  it("does not add blank lines between headings and adjacent blocks on round-trip", () => {
+    const compact = [
+      "# OpenAI Chat API Compatibility Plan",
+      "## Goal",
+      "Build a Python/Flask service that exposes endpoints.",
+      "## Source References",
+      "- Codex app-server documentation",
+      "- OpenAI Chat Completions overview",
+      "## Key Capabilities",
+      "1. First capability",
+      "2. Second capability",
+      "",
+    ].join("\n");
+
+    expect(toMarkdown(toHtml(compact))).toBe(compact);
+  });
+
+  it("preserves paragraph separation", () => {
+    const spaced = "First paragraph.\n\nSecond paragraph.\n";
+
+    expect(toMarkdown(toHtml(spaced))).toBe(spaced);
+  });
+
+  it("uses dash bullet markers and compact list indentation", () => {
+    const html = "<ul><li>Alpha</li><li>Beta</li></ul>";
+
+    expect(toMarkdown(html)).toBe("- Alpha\n- Beta\n");
   });
 });
 
