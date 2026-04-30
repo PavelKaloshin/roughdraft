@@ -5,6 +5,10 @@ import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
+  type RfmDiagnostic,
+  validateRoughdraftMarkdown,
+} from "@roughdraft/rfm";
+import {
   ROUGHDRAFT_BIND_HOST,
   ROUGHDRAFT_DEFAULT_PORT,
   ROUGHDRAFT_LOOPBACK_HOSTS,
@@ -561,7 +565,7 @@ function printHelp(log: (message: string) => void) {
   log("  start              Start or reuse the background server");
   log("  status             Show server status");
   log("  stop               Stop the managed background server");
-  log("  doctor             Diagnose local setup issues");
+  log("  doctor [path]      Diagnose setup or validate Markdown");
   log("  help agent         Print the agent setup prompt");
   log("  help criticmarkup  Show CriticMarkup examples");
   log("  agent-setup        Print the agent setup prompt");
@@ -650,9 +654,11 @@ function printCommandHelp(
 
   if (command === "doctor") {
     log("Usage:");
-    log("  roughdraft doctor [--json]");
+    log("  roughdraft doctor [path] [--json]");
     log("");
-    log("Diagnoses local Roughdraft setup and server state.");
+    log(
+      "Diagnoses local Roughdraft setup and server state, or validates one Markdown file.",
+    );
     log("");
     log("Flags:");
     log("  --json               Print machine-readable output");
@@ -1401,6 +1407,102 @@ async function runDoctor(
   return 0;
 }
 
+async function runMarkdownDoctor(
+  deps: CliDependencies,
+  targetPath: string,
+  json: boolean,
+): Promise<number> {
+  if (!isMarkdownPath(targetPath)) {
+    deps.error(`Roughdraft doctor can only validate .md files: ${targetPath}`);
+    return USAGE_ERROR;
+  }
+
+  const absolutePath = path.resolve(deps.cwd, targetPath);
+  let markdown: string;
+
+  try {
+    const stat = fs.statSync(absolutePath);
+    if (!stat.isFile()) {
+      deps.error(`Path is not a file: ${absolutePath}`);
+      return USAGE_ERROR;
+    }
+    markdown = fs.readFileSync(absolutePath, "utf8");
+  } catch (error) {
+    const code =
+      error instanceof Error && "code" in error
+        ? String((error as NodeJS.ErrnoException).code)
+        : "";
+    deps.error(
+      code === "ENOENT"
+        ? `Path not found: ${absolutePath}`
+        : `Could not read path: ${absolutePath}`,
+    );
+    return USAGE_ERROR;
+  }
+
+  const validation = validateRoughdraftMarkdown(markdown);
+  const payload = {
+    kind: "markdown" as const,
+    path: absolutePath,
+    format: validation.format,
+    version: validation.version,
+    ok: validation.ok,
+    errors: validation.errors,
+    warnings: validation.warnings,
+    summary: validation.summary,
+  };
+
+  if (json) {
+    emitJson(deps.log, payload);
+    return validation.ok ? 0 : 1;
+  }
+
+  const displayPath = relativeDisplayPath(deps.cwd, absolutePath);
+  deps.log(`Roughdraft Markdown doctor: ${displayPath}`);
+  deps.log(`Status: ${validation.ok ? "passed" : "failed"}`);
+
+  if (validation.errors.length > 0) {
+    deps.log("");
+    deps.log("Errors:");
+    for (const diagnostic of validation.errors) {
+      deps.log(formatMarkdownDiagnostic(diagnostic));
+    }
+  }
+
+  if (validation.warnings.length > 0) {
+    deps.log("");
+    deps.log("Warnings:");
+    for (const diagnostic of validation.warnings) {
+      deps.log(formatMarkdownDiagnostic(diagnostic));
+    }
+  }
+
+  if (validation.errors.length === 0 && validation.warnings.length === 0) {
+    deps.log("");
+    deps.log(
+      `Found ${validation.summary.comments} comment(s) and ${validation.summary.suggestions} suggestion(s).`,
+    );
+  }
+
+  return validation.ok ? 0 : 1;
+}
+
+function isMarkdownPath(targetPath: string): boolean {
+  const extension = path.extname(targetPath).toLowerCase();
+  return extension === ".md";
+}
+
+function relativeDisplayPath(cwd: string, absolutePath: string): string {
+  const relativePath = path.relative(cwd, absolutePath);
+  return relativePath && !relativePath.startsWith("..")
+    ? relativePath
+    : absolutePath;
+}
+
+function formatMarkdownDiagnostic(diagnostic: RfmDiagnostic): string {
+  return `  ${diagnostic.line}:${diagnostic.column}  ${diagnostic.message}`;
+}
+
 function getConfidentStopCandidate(
   payload: StatusPayload | null,
 ): number | null {
@@ -1810,13 +1912,17 @@ export async function runCli(
         return 0;
       }
 
-      if (options.positionals.length > 0) {
-        deps.error("Usage: roughdraft doctor [--json]");
+      if (options.positionals.length > 1) {
+        deps.error("Usage: roughdraft doctor [path] [--json]");
         return USAGE_ERROR;
       }
 
       deps = applyCliEnvOverrides(deps, options);
       const json = parsed.global.json || options.json;
+      if (options.positionals.length === 1) {
+        return runMarkdownDoctor(deps, options.positionals[0] ?? "", json);
+      }
+
       shouldPrintUpdateNotice = !json;
       return runDoctor(deps, json);
     }

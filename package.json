@@ -21,22 +21,25 @@
     "lint:fix": "biome check --write . --assist-enabled=false",
     "unused": "knip --no-progress",
     "format": "biome format --write .",
-    "test": "pnpm --filter @roughdraft/app test && pnpm --filter @roughdraft/server test",
+    "test": "pnpm --filter @roughdraft/rfm test && pnpm --filter @roughdraft/app test && pnpm --filter @roughdraft/server test",
     "test:e2e": "playwright test --config packages/app/playwright.config.ts",
     "test:smoke": "playwright test --config packages/app/playwright.config.ts --grep @smoke",
     "test:coverage": "pnpm --filter @roughdraft/app exec vitest run --coverage && pnpm --filter @roughdraft/server exec vitest run --coverage",
     "check": "pnpm lint && pnpm test && pnpm build",
-    "build": "pnpm --filter @roughdraft/app build && pnpm --filter @roughdraft/server build",
+    "build": "pnpm --filter @roughdraft/rfm build && pnpm --filter @roughdraft/app build && pnpm --filter @roughdraft/server build",
     "preview": "node packages/server/bin/roughdraft.mjs open README.md"
   },
   "files": [
     "packages/app/dist",
+    "packages/rfm/dist",
+    "packages/rfm/package.json",
     "packages/server/dist",
     "packages/server/bin",
     "packages/server/defaults.mjs",
     "packages/server/defaults.d.mts"
   ],
   "dependencies": {
+    "@roughdraft/rfm": "file:packages/rfm",
     "express": "^5.1.0"
   },
   "devDependencies": {

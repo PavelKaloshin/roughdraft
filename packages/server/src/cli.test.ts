@@ -1035,6 +1035,15 @@ describe("cli", () => {
     );
   });
 
+  it("shows doctor help with the optional markdown path", async () => {
+    const test = createTestDependencies();
+
+    const exitCode = await runCli(["doctor", "--help"], test.deps);
+
+    expect(exitCode).toBe(0);
+    expect(test.logs).toContain("  roughdraft doctor [path] [--json]");
+  });
+
   it("rejects unknown command typos with suggestions", async () => {
     const test = createTestDependencies();
 
@@ -1101,6 +1110,96 @@ describe("cli", () => {
       repoRootMatches: true,
       stateDir: devStateDir,
     });
+  });
+
+  it("validates a conforming markdown file from doctor path", async () => {
+    const test = createTestDependencies();
+    const documentPath = path.join(projectDir, "draft.md");
+    fs.writeFileSync(
+      documentPath,
+      'Please revisit {==this sentence==}{>>Needs a source.<<}{id="c1" by="user" at="2026-04-28T12:00:00.000Z"}.\n',
+    );
+
+    const exitCode = await runCli(["doctor", documentPath], test.deps);
+
+    expect(exitCode).toBe(0);
+    expect(test.logs).toContain("Roughdraft Markdown doctor: draft.md");
+    expect(test.logs).toContain("Status: passed");
+    expect(test.logs).toContain("Found 1 comment(s) and 0 suggestion(s).");
+  });
+
+  it("returns validation errors from doctor path", async () => {
+    const test = createTestDependencies();
+    const documentPath = path.join(projectDir, "draft.md");
+    fs.writeFileSync(documentPath, "{>>Needs metadata<<}\n");
+
+    const exitCode = await runCli(["doctor", documentPath], test.deps);
+
+    expect(exitCode).toBe(1);
+    expect(test.logs).toContain("Status: failed");
+    expect(test.logs).toContain("Errors:");
+    expect(test.logs).toContain(
+      "  1:1  Missing required metadata attribute `id`.",
+    );
+  });
+
+  it("emits JSON validation output from doctor path --json", async () => {
+    const test = createTestDependencies();
+    const documentPath = path.join(projectDir, "draft.md");
+    fs.writeFileSync(
+      documentPath,
+      [
+        '{>>First<<}{id="c1" by="user" at="2026-04-28T12:00:00.000Z"}',
+        '{++Second++}{id="c1" by="user" at="2026-04-28T12:01:00.000Z"}',
+      ].join("\n"),
+    );
+
+    const exitCode = await runCli(
+      ["doctor", documentPath, "--json"],
+      test.deps,
+    );
+    const payload = parseOnlyJsonLog<{
+      kind: string;
+      path: string;
+      ok: boolean;
+      errors: Array<{ code: string }>;
+      summary: { comments: number; suggestions: number };
+    }>(test.logs);
+
+    expect(exitCode).toBe(1);
+    expect(payload).toMatchObject({
+      kind: "markdown",
+      path: documentPath,
+      ok: false,
+      summary: {
+        comments: 1,
+        suggestions: 1,
+      },
+    });
+    expect(payload.errors.map((error) => error.code)).toContain("duplicate-id");
+  });
+
+  it("rejects missing markdown files from doctor path before validation", async () => {
+    const test = createTestDependencies();
+    const documentPath = path.join(projectDir, "missing.md");
+
+    const exitCode = await runCli(["doctor", documentPath], test.deps);
+
+    expect(exitCode).toBe(2);
+    expect(test.errors).toContain(`Path not found: ${documentPath}`);
+  });
+
+  it("rejects non-markdown doctor paths as usage errors", async () => {
+    const test = createTestDependencies();
+    const documentPath = path.join(projectDir, "draft.txt");
+    fs.writeFileSync(documentPath, "# Draft\n");
+
+    const exitCode = await runCli(["doctor", documentPath], test.deps);
+
+    expect(exitCode).toBe(2);
+    expect(test.errors).toContain(
+      `Roughdraft doctor can only validate .md files: ${documentPath}`,
+    );
   });
 
   it("starts a new server when the preferred port belongs to another checkout", async () => {

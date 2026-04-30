@@ -183,7 +183,7 @@ open <path>        Open one Markdown file, starting the server if needed
 start              Start or reuse the background server
 status             Show server status
 stop               Stop the managed background server
-doctor             Diagnose local setup issues
+doctor [path]      Diagnose setup or validate Markdown
 help agent         Print the agent setup prompt
 help criticmarkup  Show CriticMarkup examples
 agent-setup        Print the agent setup prompt
@@ -209,6 +209,8 @@ roughdraft start --port <port>
 roughdraft status --json
 roughdraft stop --all
 roughdraft doctor --json
+roughdraft doctor ./draft.md
+roughdraft doctor ./draft.md --json
 ```
 
 Usage errors return exit code `2`. Runtime failures return exit code `1`. `roughdraft status --json` returns exit code `0` even when the JSON says `"running": false`.

@@ -4,11 +4,12 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc",
+    "build": "pnpm --filter @roughdraft/rfm build && tsc",
     "dev": "tsx watch src/dev.ts",
     "test": "vitest run"
   },
   "dependencies": {
+    "@roughdraft/rfm": "workspace:*",
     "express": "^5.1.0"
   },
   "devDependencies": {
