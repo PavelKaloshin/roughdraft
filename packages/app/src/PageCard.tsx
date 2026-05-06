@@ -713,7 +713,7 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
       shouldRerenderOnTransaction: false,
       editorProps: {
         attributes: {
-          class: "tiptap min-h-[70vh] selection:bg-sky-100",
+          class: "tiptap min-h-[70vh]",
         },
         handleDrop: (_view, event) => {
           const files = Array.from(event.dataTransfer?.files ?? []);
