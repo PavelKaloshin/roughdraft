@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import { expect, test } from "@playwright/test";
 import {
+  appendInCodeEditor,
   codeEditor,
   createMarkdownProject,
   logE2eEvent,
@@ -109,5 +110,39 @@ test.describe("browsing a directory of markdown files", () => {
     });
 
     logE2eEvent("directory-browse.live-file", { projectDir, file: "alpha.md" });
+  });
+
+  test("switches files even when the current file has unsaved edits @smoke", async ({
+    page,
+  }) => {
+    const alpha = writeProjectFile(
+      projectDir,
+      "alpha.md",
+      "# Alpha\n\nAlpha body.\n",
+    );
+    writeProjectFile(projectDir, "beta.md", "# Beta\n\nBeta body.\n");
+
+    await page.goto(
+      `/?${new URLSearchParams({
+        dir: projectDir,
+        path: alpha,
+        editor: "code",
+      }).toString()}`,
+    );
+    await expect(codeEditor(page)).toContainText("Alpha body.");
+
+    // Leave an unsaved local edit in the current file.
+    await appendInCodeEditor(page, "\nLocal unsaved edit.\n");
+
+    // Switching files must still work (no blocking confirm dialog).
+    await page.getByTestId("directory-file-beta.md").click();
+    await expect(codeEditor(page)).toContainText("Beta body.");
+    await expect(page).toHaveURL(/path=.*beta\.md/);
+
+    logE2eEvent("directory-browse.switch-with-unsaved", {
+      projectDir,
+      from: "alpha.md",
+      to: "beta.md",
+    });
   });
 });

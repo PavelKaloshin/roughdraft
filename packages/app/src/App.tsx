@@ -1948,20 +1948,6 @@ export function App() {
       if (!currentBackend || !directoryPath) return;
       if (relativePath === activeDocumentPathRef.current) return;
 
-      if (
-        shouldWarnBeforeUnload({
-          activeDocumentPath: activeDocumentPathRef.current,
-          isDirty: documentDirtyRef.current,
-          saveState: documentSaveStateRef.current,
-          diskChangeState: documentDiskChangeState,
-        }) &&
-        !window.confirm(
-          "You have unsaved changes. Switch files and discard them?",
-        )
-      ) {
-        return;
-      }
-
       window.history.pushState(
         null,
         "",
@@ -1978,7 +1964,7 @@ export function App() {
         setLoadError("Could not open that markdown file.");
       }
     },
-    [directoryPath, documentDiskChangeState, loadDocument],
+    [directoryPath, loadDocument],
   );
 
   useEffect(() => {
