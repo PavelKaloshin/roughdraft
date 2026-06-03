@@ -71,6 +71,75 @@ export function getRequestedPathState(): RequestedPathState {
   return { rawPath, projectPath, documentPath };
 }
 
+export type WorkspaceMode = "single" | "directory";
+
+export interface WorkspaceState {
+  mode: WorkspaceMode;
+  rawPath: string | null;
+  directoryPath: string | null;
+  projectPath: string | null;
+  documentPath: string | null;
+}
+
+function getDirectoryPathFromLocation(): string | null {
+  const searchParams = new URLSearchParams(window.location.search);
+  const directoryPath = searchParams.get("dir")?.trim();
+  return directoryPath || null;
+}
+
+function relativePathWithin(
+  basePath: string,
+  targetPath: string,
+): string | null {
+  const base = normalizePathSeparators(basePath).replace(/\/+$/, "");
+  const target = normalizePathSeparators(targetPath);
+  if (target === base) return null;
+
+  const prefix = `${base}/`;
+  if (!target.startsWith(prefix)) return null;
+
+  return target.slice(prefix.length) || null;
+}
+
+export function getWorkspaceState(): WorkspaceState {
+  const directoryPath = getDirectoryPathFromLocation();
+  if (directoryPath) {
+    const rawPath =
+      new URLSearchParams(window.location.search).get("path")?.trim() || null;
+    return {
+      mode: "directory",
+      rawPath,
+      directoryPath,
+      projectPath: directoryPath,
+      documentPath: rawPath ? relativePathWithin(directoryPath, rawPath) : null,
+    };
+  }
+
+  const single = getRequestedPathState();
+  return {
+    mode: "single",
+    rawPath: single.rawPath,
+    directoryPath: null,
+    projectPath: single.projectPath,
+    documentPath: single.documentPath,
+  };
+}
+
+export function buildLocationForDirectorySelection(
+  directoryPath: string,
+  fileAbsolutePath: string | null,
+): string {
+  const url = new URL(window.location.href);
+  url.pathname = "/";
+  url.searchParams.set("dir", directoryPath);
+  if (fileAbsolutePath) {
+    url.searchParams.set("path", fileAbsolutePath);
+  } else {
+    url.searchParams.delete("path");
+  }
+  return `${url.pathname}${url.search}${url.hash}`;
+}
+
 export function formatWorkspacePathForDisplay(path?: string | null) {
   const value = path?.trim();
   if (!value) return null;

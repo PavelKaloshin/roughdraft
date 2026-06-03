@@ -142,6 +142,10 @@ suggestions:
 | Comment editor | Reply editing | Use a reply action | `comment-rail-child-editor` | Useful for nested thread spacing. |
 | Code mode | Review rail present | Open review fixture with `?editor=code` | `page-card-code`, `markdown-code-editor` | Confirms code editor and rail can coexist. |
 | Code mode | Review rail absent | Open fenced fixture with `?editor=code` | `page-card-code`, `markdown-code-editor` | Confirms fenced CriticMarkup alone does not create review rail. |
+| Directory | Sidebar, no file selected | Open URL with `?dir=<directory>` (or `rd open <dir>`) | `role=navigation[name="Directory files"]`, empty-state text | Empty state copy: `Select a Markdown file from the sidebar to review it.` |
+| Directory | File open from sidebar | In directory mode, click a file in the tree | `role=navigation[name="Directory files"]`, `rich-text-editor` | Active file button has `aria-current="true"`; URL gains `&path=`. |
+| Directory | Nested folder expanded | In directory mode with nested `.md` files | `role=navigation[name="Directory files"]` | Folders toggle open/closed; capture an expanded subfolder with a highlighted active file. |
+| Directory | Empty directory | Open `?dir=<dir>` with no `.md` files | `role=navigation[name="Directory files"]` | Sidebar copy: `No Markdown files here.` |
 | Error/home fallback | Non-Markdown path | Open URL with `?path=/tmp/file.txt` | homepage error message | Copy: `Roughdraft now opens one .md file at a time.` |
 | Error/home fallback | Missing/unloadable path | Open URL with invalid markdown path through local backend | homepage error message | Captures load-error homepage variant. |
 ## Playwright Capture Skeleton

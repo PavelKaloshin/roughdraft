@@ -1,10 +1,10 @@
+import { spawn, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawn, spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 import {
   type RfmDiagnostic,
   validateRoughdraftMarkdown,
@@ -115,6 +115,7 @@ interface EnsureRunningResult {
 interface ResolvedTargetPath {
   projectDir: string;
   openPath: string;
+  isDirectory: boolean;
 }
 
 interface ReusableServer {
@@ -846,7 +847,9 @@ function printHelp(log: (message: string) => void) {
   log("  roughdraft <path>");
   log("");
   log("Commands:");
-  log("  open <path>        Open a Markdown file and wait for Done Reviewing");
+  log(
+    "  open <path>        Open a Markdown file (waits for Done Reviewing) or a directory to browse",
+  );
   log("  start              Start or reuse the background server");
   log("  status             Show server status");
   log("  stop               Stop the managed background server");
@@ -869,6 +872,7 @@ function printHelp(log: (message: string) => void) {
   log("  roughdraft open ./draft.md --print-url");
   log("  roughdraft open ./draft.md --json");
   log("  roughdraft open ./draft.md --no-watch");
+  log("  roughdraft open ./docs");
   log("  roughdraft watch ./draft.md --json");
   log("  roughdraft status --json");
   log("");
@@ -888,6 +892,9 @@ function printCommandHelp(
     log("");
     log(
       "Opens one Markdown file and waits for Done Reviewing. Starts Roughdraft if needed.",
+    );
+    log(
+      "If <path> is a directory, opens a browsable tree of its Markdown files instead.",
     );
     log("");
     log("Flags:");
@@ -1136,11 +1143,15 @@ function buildLoopbackUrl(host: string, port: number, pathname = "/"): URL {
   return new URL(`http://${baseHost}:${port}${pathname}`);
 }
 
-function buildTargetUrl(baseUrl: string, openPath: string): string {
+function buildTargetUrl(
+  baseUrl: string,
+  openPath: string,
+  isDirectory = false,
+): string {
   const url = new URL(baseUrl);
 
   url.pathname = "/";
-  url.searchParams.set("path", openPath);
+  url.searchParams.set(isDirectory ? "dir" : "path", openPath);
   return url.toString();
 }
 
@@ -1429,7 +1440,11 @@ function resolveTargetPath(inputPath: string): ResolvedTargetPath {
   try {
     const stat = fs.statSync(resolvedPath);
     if (stat.isDirectory()) {
-      throw new Error(`Roughdraft can only open .md files: ${resolvedPath}`);
+      return {
+        projectDir: resolvedPath,
+        openPath: resolvedPath,
+        isDirectory: true,
+      };
     }
 
     if (stat.isFile()) {
@@ -1440,6 +1455,7 @@ function resolveTargetPath(inputPath: string): ResolvedTargetPath {
       return {
         projectDir: path.dirname(resolvedPath),
         openPath: resolvedPath,
+        isDirectory: false,
       };
     }
   } catch (error) {
@@ -2706,13 +2722,22 @@ export async function runCli(
         return 1;
       }
 
-      const { projectDir, openPath } = resolvedTarget;
+      const { projectDir, openPath, isDirectory } = resolvedTarget;
+
+      if (isDirectory && options.watch) {
+        deps.error("Cannot watch a directory; --watch works on a single file.");
+        return USAGE_ERROR;
+      }
 
       const remoteHost =
         typeof deps.env.ROUGHDRAFT_HOST === "string"
           ? deps.env.ROUGHDRAFT_HOST.trim()
           : "";
       if (remoteHost.length > 0) {
+        if (isDirectory) {
+          deps.error("Remote mode can only open a single .md file.");
+          return USAGE_ERROR;
+        }
         return runRemoteOpen(deps, {
           host: remoteHost,
           openPath,
@@ -2733,7 +2758,7 @@ export async function runCli(
         baseUrl = buildPublicBaseUrl(result.server.port);
       }
 
-      const targetUrl = buildTargetUrl(baseUrl, openPath);
+      const targetUrl = buildTargetUrl(baseUrl, openPath, isDirectory);
       let openMode: OpenMode = "disabled";
       if (!options.noOpen && deps.env.ROUGHDRAFT_NO_OPEN !== "1") {
         openMode = (await sendOpenRequestToExistingWindow(
@@ -2760,7 +2785,7 @@ export async function runCli(
         return 0;
       }
 
-      const shouldWatch = !options.noWatch && !options.printUrl;
+      const shouldWatch = !isDirectory && !options.noWatch && !options.printUrl;
 
       if (shouldWatch) {
         if (!json) {

@@ -356,6 +356,10 @@ function toCanonicalRelativePath(
   return isDirectory ? `${canonicalPath}/` : canonicalPath;
 }
 
+function isIgnoredTreeDirectory(name: string): boolean {
+  return name === "node_modules" || name.startsWith(".");
+}
+
 function listProjectTree(projectDir: string): ProjectTreeListing {
   const paths: string[] = [];
 
@@ -376,6 +380,9 @@ function listProjectTree(projectDir: string): ProjectTreeListing {
       const absolutePath = path.join(dir, entry.name);
 
       if (entry.isDirectory()) {
+        if (isIgnoredTreeDirectory(entry.name)) {
+          continue;
+        }
         paths.push(toCanonicalRelativePath(projectDir, absolutePath, true));
         visitDirectory(absolutePath);
         continue;

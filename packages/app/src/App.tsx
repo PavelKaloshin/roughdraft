@@ -22,12 +22,13 @@ import {
   useState,
 } from "react";
 import {
+  buildLocationForDirectorySelection,
   buildLocationForDocumentEditorViewMode,
   type DocumentEditorViewMode,
   formatWorkspacePathForDisplay,
   getDocumentEditorViewModeFromLocation,
   getPathLeaf,
-  getRequestedPathState,
+  getWorkspaceState,
   joinPath,
   PREVIEW_PATH,
   ROUGHDRAFT_FLAVORED_MARKDOWN_PATH,
@@ -43,6 +44,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "./components/ui/dialog";
+import { DirectoryEmptyState, DirectorySidebar } from "./DirectoryWorkspace";
 import { DocumentWorkspace } from "./DocumentWorkspace";
 import { detectBackend } from "./detect-backend";
 import {
@@ -1471,8 +1473,10 @@ export function PreviewPage() {
 }
 
 export function App() {
-  const initialRequestedPathState = getRequestedPathState();
+  const initialRequestedPathState = getWorkspaceState();
   const [requestedPathState] = useState(initialRequestedPathState);
+  const isDirectoryMode = requestedPathState.mode === "directory";
+  const [fileTreePaths, setFileTreePaths] = useState<string[]>([]);
   const isRoughdraftFlavoredMarkdownRoute =
     window.location.pathname === ROUGHDRAFT_FLAVORED_MARKDOWN_PATH;
   const isPreviewRoute = window.location.pathname === PREVIEW_PATH;
@@ -1594,6 +1598,39 @@ export function App() {
           return;
         }
 
+        if (requestedPathState.mode === "directory") {
+          if (!requestedPathState.directoryPath) {
+            setActiveDocumentPath(null);
+            setLoadError("Could not open that directory.");
+            setLoading(false);
+            return;
+          }
+
+          if (detectedBackend.canManageProjects) {
+            await detectedBackend.openProject(requestedPathState.directoryPath);
+          }
+          if (cancelled) return;
+
+          if (detectedBackend.listFileTree) {
+            const tree = await detectedBackend.listFileTree();
+            if (cancelled) return;
+            setFileTreePaths(tree.paths);
+          }
+
+          if (requestedPathState.documentPath) {
+            await loadDocument(
+              detectedBackend,
+              requestedPathState.documentPath,
+            );
+          } else {
+            setActiveDocumentPath(null);
+          }
+          if (cancelled) return;
+
+          setLoading(false);
+          return;
+        }
+
         if (!requestedPathState.rawPath) {
           setActiveDocumentPath(null);
           setLoading(false);
@@ -1639,7 +1676,9 @@ export function App() {
     };
   }, [
     loadDocument,
+    requestedPathState.directoryPath,
     requestedPathState.documentPath,
+    requestedPathState.mode,
     requestedPathState.projectPath,
     requestedPathState.rawPath,
   ]);
@@ -1894,6 +1933,73 @@ export function App() {
     [],
   );
 
+  const directoryPath = requestedPathState.directoryPath;
+
+  const handleSelectDirectoryFile = useCallback(
+    async (relativePath: string) => {
+      const currentBackend = backendRef.current;
+      if (!currentBackend || !directoryPath) return;
+      if (relativePath === activeDocumentPathRef.current) return;
+
+      if (
+        shouldWarnBeforeUnload({
+          activeDocumentPath: activeDocumentPathRef.current,
+          isDirty: documentDirtyRef.current,
+          saveState: documentSaveStateRef.current,
+          diskChangeState: documentDiskChangeState,
+        }) &&
+        !window.confirm(
+          "You have unsaved changes. Switch files and discard them?",
+        )
+      ) {
+        return;
+      }
+
+      window.history.pushState(
+        null,
+        "",
+        buildLocationForDirectorySelection(
+          directoryPath,
+          joinPath(directoryPath, relativePath),
+        ),
+      );
+
+      try {
+        await loadDocument(currentBackend, relativePath);
+      } catch (error) {
+        console.error("Failed to open markdown file:", error);
+        setLoadError("Could not open that markdown file.");
+      }
+    },
+    [directoryPath, documentDiskChangeState, loadDocument],
+  );
+
+  useEffect(() => {
+    if (!isDirectoryMode) return;
+
+    const handlePopState = () => {
+      const currentBackend = backendRef.current;
+      if (!currentBackend) return;
+
+      const nextState = getWorkspaceState();
+      if (nextState.documentPath) {
+        void loadDocument(currentBackend, nextState.documentPath).catch(
+          (error) => {
+            console.error("Failed to open markdown file:", error);
+          },
+        );
+      } else {
+        setDocumentPage(null);
+        setActiveDocumentPath(null);
+        documentDirtyRef.current = false;
+        setDocumentDiskChangeState("clean");
+      }
+    };
+
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, [isDirectoryMode, loadDocument]);
+
   if (loading) {
     return (
       <div
@@ -1911,7 +2017,7 @@ export function App() {
     return <PreviewPage />;
   }
 
-  if (!requestedPathState.rawPath || loadError) {
+  if ((!requestedPathState.rawPath && !isDirectoryMode) || loadError) {
     return (
       <Homepage
         message={loadError ?? <HomepageSubtitle />}
@@ -1927,33 +2033,59 @@ export function App() {
   const documentFilenameLabel =
     getPathLeaf(documentAbsolutePath ?? activeDocumentPath) ?? "Untitled.md";
 
+  const updateNotice = updateStatus ? (
+    <div className="pointer-events-none absolute top-4 right-4 z-40 max-w-sm">
+      <div className="pointer-events-auto">
+        <UpdateNotice updateStatus={updateStatus} />
+      </div>
+    </div>
+  ) : null;
+
+  const hasOpenDocument = Boolean(documentPage && activeDocumentPath);
+  const documentWorkspace = hasOpenDocument ? (
+    <DocumentWorkspace
+      documentPage={documentPage}
+      activeDocumentPath={activeDocumentPath}
+      documentFilenameLabel={documentFilenameLabel}
+      documentEditorViewMode={documentEditorViewMode}
+      onDocumentEditorViewModeChange={handleDocumentEditorViewModeChange}
+      onSaveDocument={handleSaveDocument}
+      onDocumentSaveStateChange={handleDocumentSaveStateChange}
+      onDocumentDirtyStateChange={handleDocumentDirtyStateChange}
+      onDocumentLocalContentChange={handleDocumentLocalContentChange}
+      documentDiskChangeState={documentDiskChangeState}
+      documentForceResetKey={documentForceResetKey}
+      onReloadDocumentFromDisk={handleReloadDocumentFromDisk}
+      onKeepEditingWithoutAutosave={handleKeepEditingWithoutAutosave}
+      onOverwriteDocumentOnDisk={handleOverwriteDocumentOnDisk}
+      onCompleteReview={handleCompleteReview}
+      backend={backend}
+    />
+  ) : null;
+
+  if (isDirectoryMode && directoryPath) {
+    return (
+      <main className="relative flex h-screen min-w-0 overflow-hidden bg-[#FCFCFC] dark:bg-background text-slate-950 dark:text-slate-50">
+        <DirectorySidebar
+          directoryLabel={
+            formatWorkspacePathForDisplay(directoryPath) ?? directoryPath
+          }
+          paths={fileTreePaths}
+          activePath={activeDocumentPath}
+          onSelect={handleSelectDirectoryFile}
+        />
+        <div className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
+          {updateNotice}
+          {documentWorkspace ?? <DirectoryEmptyState />}
+        </div>
+      </main>
+    );
+  }
+
   return (
     <main className="relative flex h-screen min-w-0 flex-col overflow-hidden bg-[#FCFCFC] dark:bg-background text-slate-950 dark:text-slate-50">
-      {updateStatus ? (
-        <div className="pointer-events-none absolute top-4 right-4 z-40 max-w-sm">
-          <div className="pointer-events-auto">
-            <UpdateNotice updateStatus={updateStatus} />
-          </div>
-        </div>
-      ) : null}
-      <DocumentWorkspace
-        documentPage={documentPage}
-        activeDocumentPath={activeDocumentPath}
-        documentFilenameLabel={documentFilenameLabel}
-        documentEditorViewMode={documentEditorViewMode}
-        onDocumentEditorViewModeChange={handleDocumentEditorViewModeChange}
-        onSaveDocument={handleSaveDocument}
-        onDocumentSaveStateChange={handleDocumentSaveStateChange}
-        onDocumentDirtyStateChange={handleDocumentDirtyStateChange}
-        onDocumentLocalContentChange={handleDocumentLocalContentChange}
-        documentDiskChangeState={documentDiskChangeState}
-        documentForceResetKey={documentForceResetKey}
-        onReloadDocumentFromDisk={handleReloadDocumentFromDisk}
-        onKeepEditingWithoutAutosave={handleKeepEditingWithoutAutosave}
-        onOverwriteDocumentOnDisk={handleOverwriteDocumentOnDisk}
-        onCompleteReview={handleCompleteReview}
-        backend={backend}
-      />
+      {updateNotice}
+      {documentWorkspace}
     </main>
   );
 }

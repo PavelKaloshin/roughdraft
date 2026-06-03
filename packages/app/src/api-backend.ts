@@ -2,6 +2,7 @@ import {
   type BackendInfo,
   type CompleteReviewOptions,
   type CompleteReviewResult,
+  type FileTreeListing,
   type MarkdownFileChangeEvent,
   MarkdownFileConflictError,
   type Page,
@@ -51,6 +52,14 @@ export class ApiBackend implements StorageBackend {
       throw new Error(
         `Failed to get markdown file ${relativePath}: ${res.status}`,
       );
+    }
+    return res.json();
+  }
+
+  async listFileTree(): Promise<FileTreeListing> {
+    const res = await fetch(this.buildUrl("/api/file-tree"));
+    if (!res.ok) {
+      throw new Error(`Failed to list file tree: ${res.status}`);
     }
     return res.json();
   }

@@ -659,6 +659,33 @@ describe("createApp", () => {
     });
   });
 
+  it("omits .git, node_modules, and hidden directories from the project tree", async () => {
+    fs.mkdirSync(path.join(projectDir, ".git"), { recursive: true });
+    fs.mkdirSync(path.join(projectDir, "node_modules", "pkg"), {
+      recursive: true,
+    });
+    fs.mkdirSync(path.join(projectDir, ".hidden"), { recursive: true });
+    fs.writeFileSync(path.join(projectDir, ".git", "config.md"), "# Git\n");
+    fs.writeFileSync(
+      path.join(projectDir, "node_modules", "pkg", "readme.md"),
+      "# Pkg\n",
+    );
+    fs.writeFileSync(path.join(projectDir, ".hidden", "secret.md"), "# H\n");
+    fs.writeFileSync(path.join(projectDir, "draft.md"), "# Draft\n");
+
+    const { app } = createApp({
+      homeDir,
+      staticDirPath: projectDir,
+    });
+
+    const response = await request(app).get("/api/file-tree").query({
+      projectPath: projectDir,
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ paths: ["draft.md"] });
+  });
+
   it("opens and creates project directories", async () => {
     const createdDir = path.join(projectDir, "created", "workspace");
 

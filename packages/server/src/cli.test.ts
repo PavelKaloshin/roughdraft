@@ -102,6 +102,16 @@ describe("cli", () => {
     return url.toString();
   }
 
+  function expectedDirectoryUrl(
+    baseUrl: string,
+    directoryPath: string,
+  ): string {
+    const url = new URL(baseUrl);
+    url.pathname = "/";
+    url.searchParams.set("dir", directoryPath);
+    return url.toString();
+  }
+
   function parseOnlyJsonLog<T>(logs: string[]): T {
     expect(logs).toHaveLength(1);
     return JSON.parse(logs[0] ?? "{}") as T;
@@ -263,6 +273,31 @@ describe("cli", () => {
       expectedOpenUrl(`http://localhost:${persisted.port}`, documentPath),
     );
     expect(fs.existsSync(getServerStateFilePath(test.deps.env))).toBeTruthy();
+  });
+
+  it("opens a directory with a dir-scoped URL", async () => {
+    const test = createTestDependencies();
+    fs.mkdirSync(path.join(projectDir, "sub"), { recursive: true });
+    fs.writeFileSync(path.join(projectDir, "draft.md"), "# Draft\n");
+
+    const exitCode = await runCli(["open", projectDir], test.deps);
+    const persisted = JSON.parse(
+      fs.readFileSync(getServerStateFilePath(test.deps.env), "utf8"),
+    ) as { port: number };
+
+    expect(exitCode).toBe(0);
+    expect(test.getLastOpenedUrl()).toBe(
+      expectedDirectoryUrl(`http://localhost:${persisted.port}`, projectDir),
+    );
+  });
+
+  it("rejects --watch when opening a directory", async () => {
+    const test = createTestDependencies();
+
+    const exitCode = await runCli(["open", projectDir, "--watch"], test.deps);
+
+    expect(exitCode).not.toBe(0);
+    expect(test.errors.join("\n")).toMatch(/director/i);
   });
 
   it("prints an update notice after a successful human-readable command", async () => {
@@ -1204,15 +1239,17 @@ describe("cli", () => {
     expect(fs.existsSync(stateFilePath)).toBeFalsy();
   });
 
-  it("rejects directories before opening", async () => {
+  it("rejects non-markdown files before opening", async () => {
     const test = createTestDependencies();
+    const notMarkdown = path.join(projectDir, "notes.txt");
+    fs.writeFileSync(notMarkdown, "plain text\n");
 
-    const exitCode = await runCli(["open", projectDir], test.deps);
+    const exitCode = await runCli(["open", notMarkdown], test.deps);
 
     expect(exitCode).toBe(1);
     expect(test.getSpawnCount()).toBe(0);
     expect(test.errors).toContain(
-      `Roughdraft can only open .md files: ${projectDir}`,
+      `Roughdraft can only open .md files: ${notMarkdown}`,
     );
     expect(test.getLastOpenedUrl()).toBeNull();
   });

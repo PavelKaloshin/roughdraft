@@ -49,10 +49,15 @@ export interface BackendInfo {
   originPath?: string;
 }
 
+export interface FileTreeListing {
+  paths: string[];
+}
+
 export interface StorageBackend {
   info: BackendInfo;
   canManageProjects: boolean;
   getMarkdownFile(relativePath: string): Promise<Page>;
+  listFileTree?(): Promise<FileTreeListing>;
   saveMarkdownFile(
     relativePath: string,
     content: string,

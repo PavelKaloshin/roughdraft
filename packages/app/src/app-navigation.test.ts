@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  PREVIEW_PATH,
-  ROUGHDRAFT_FLAVORED_MARKDOWN_PATH,
+  buildLocationForDirectorySelection,
   buildLocationForLinkedMarkdownDocument,
   getRequestedPathState,
+  getWorkspaceState,
+  PREVIEW_PATH,
+  ROUGHDRAFT_FLAVORED_MARKDOWN_PATH,
   syncRequestedPathInUrl,
 } from "./app-navigation";
 
@@ -91,5 +93,89 @@ describe("app navigation", () => {
         href: "diagram.png",
       }),
     ).toBeNull();
+  });
+
+  it("reports single-file workspace state for a path query parameter", () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/?path=%2FUsers%2Fme%2Fproject%2Fdraft.md",
+    );
+
+    expect(getWorkspaceState()).toEqual({
+      mode: "single",
+      rawPath: "/Users/me/project/draft.md",
+      directoryPath: null,
+      projectPath: "/Users/me/project",
+      documentPath: "draft.md",
+    });
+  });
+
+  it("reports directory workspace state with no file selected", () => {
+    window.history.replaceState(null, "", "/?dir=%2FUsers%2Fme%2Fproject");
+
+    expect(getWorkspaceState()).toEqual({
+      mode: "directory",
+      rawPath: null,
+      directoryPath: "/Users/me/project",
+      projectPath: "/Users/me/project",
+      documentPath: null,
+    });
+  });
+
+  it("resolves a selected file relative to the directory root", () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/?dir=%2FUsers%2Fme%2Fproject&path=%2FUsers%2Fme%2Fproject%2Fnotes%2Falpha.md",
+    );
+
+    expect(getWorkspaceState()).toEqual({
+      mode: "directory",
+      rawPath: "/Users/me/project/notes/alpha.md",
+      directoryPath: "/Users/me/project",
+      projectPath: "/Users/me/project",
+      documentPath: "notes/alpha.md",
+    });
+  });
+
+  it("ignores a path outside the directory root", () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/?dir=%2FUsers%2Fme%2Fproject&path=%2FUsers%2Fme%2Fother%2Falpha.md",
+    );
+
+    expect(getWorkspaceState().documentPath).toBeNull();
+  });
+
+  it("builds directory selection locations preserving the directory root", () => {
+    window.history.replaceState(null, "", "/?dir=%2FUsers%2Fme%2Fproject");
+
+    const location = buildLocationForDirectorySelection(
+      "/Users/me/project",
+      "/Users/me/project/notes/alpha.md",
+    );
+    const params = new URLSearchParams(location.split("?")[1]);
+
+    expect(params.get("dir")).toBe("/Users/me/project");
+    expect(params.get("path")).toBe("/Users/me/project/notes/alpha.md");
+  });
+
+  it("clears the selected file when building a directory-only location", () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/?dir=%2FUsers%2Fme%2Fproject&path=%2FUsers%2Fme%2Fproject%2Fdraft.md",
+    );
+
+    const location = buildLocationForDirectorySelection(
+      "/Users/me/project",
+      null,
+    );
+    const params = new URLSearchParams(location.split("?")[1]);
+
+    expect(params.get("dir")).toBe("/Users/me/project");
+    expect(params.has("path")).toBe(false);
   });
 });
