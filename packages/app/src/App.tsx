@@ -96,6 +96,13 @@ export function shouldWarnBeforeUnload({
 const AGENT_SETUP_PROMPT =
   "Install Roughdraft for me using `npm i -g roughdraft`, then read https://roughdraft.md/setup.md and set yourself up to use it.";
 const PREVIEW_DOCUMENT_PATH = "preview.md";
+const DIRECTORY_TREE_REFRESH_MS = 2000;
+
+function arraysShallowEqual(left: string[], right: string[]): boolean {
+  if (left === right) return true;
+  if (left.length !== right.length) return false;
+  return left.every((value, index) => value === right[index]);
+}
 const PREVIEW_INITIAL_MARKDOWN = [
   "# Live Preview",
   "",
@@ -1999,6 +2006,39 @@ export function App() {
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
   }, [isDirectoryMode, loadDocument]);
+
+  useEffect(() => {
+    if (!isDirectoryMode || !backend?.listFileTree) return;
+    const listFileTree = backend.listFileTree.bind(backend);
+
+    let cancelled = false;
+    let inFlight = false;
+
+    const refreshTree = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const tree = await listFileTree();
+        if (cancelled) return;
+        setFileTreePaths((current) =>
+          arraysShallowEqual(current, tree.paths) ? current : tree.paths,
+        );
+      } catch (error) {
+        console.error("Failed to refresh directory tree:", error);
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    const intervalId = window.setInterval(() => {
+      void refreshTree();
+    }, DIRECTORY_TREE_REFRESH_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [isDirectoryMode, backend]);
 
   if (loading) {
     return (

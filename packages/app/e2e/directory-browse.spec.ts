@@ -1,5 +1,7 @@
+import fs from "node:fs";
 import { expect, test } from "@playwright/test";
 import {
+  codeEditor,
   createMarkdownProject,
   logE2eEvent,
   removeMarkdownProject,
@@ -59,5 +61,53 @@ test.describe("browsing a directory of markdown files", () => {
       projectDir,
       files: ["alpha.md", "notes/beta.md"],
     });
+  });
+
+  test("shows markdown files created on disk after the directory loads @smoke", async ({
+    page,
+  }) => {
+    writeProjectFile(projectDir, "alpha.md", "# Alpha\n");
+
+    await page.goto(`/?${new URLSearchParams({ dir: projectDir }).toString()}`);
+    await expect(page.getByTestId("directory-file-alpha.md")).toBeVisible();
+
+    // A coding agent (or any process) writes a new file into the directory.
+    writeProjectFile(projectDir, "gamma.md", "# Gamma\n");
+
+    await expect(page.getByTestId("directory-file-gamma.md")).toBeVisible({
+      timeout: 10_000,
+    });
+
+    logE2eEvent("directory-browse.live-tree", {
+      projectDir,
+      added: "gamma.md",
+    });
+  });
+
+  test("live-reloads the open file when it changes on disk @smoke", async ({
+    page,
+  }) => {
+    const filePath = writeProjectFile(
+      projectDir,
+      "alpha.md",
+      "# Alpha\n\nOriginal body.\n",
+    );
+
+    const params = new URLSearchParams({
+      dir: projectDir,
+      path: filePath,
+      editor: "code",
+    });
+    await page.goto(`/?${params.toString()}`);
+    await expect(codeEditor(page)).toContainText("Original body.");
+
+    // The file is rewritten on disk while the browser copy is clean.
+    fs.writeFileSync(filePath, "# Alpha\n\nUpdated body.\n");
+
+    await expect(codeEditor(page)).toContainText("Updated body.", {
+      timeout: 10_000,
+    });
+
+    logE2eEvent("directory-browse.live-file", { projectDir, file: "alpha.md" });
   });
 });
