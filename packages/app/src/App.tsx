@@ -1553,8 +1553,14 @@ export function App() {
 
   useEffect(() => {
     const sourceUrl = new URL("/api/open-requests", window.location.origin);
-    if (requestedPathState.rawPath) {
-      sourceUrl.searchParams.set("path", requestedPathState.rawPath);
+    // In directory mode the CLI sends an open request keyed on the directory,
+    // so register this window under the directory path; otherwise use the file.
+    const registrationPath =
+      requestedPathState.mode === "directory"
+        ? requestedPathState.directoryPath
+        : requestedPathState.rawPath;
+    if (registrationPath) {
+      sourceUrl.searchParams.set("path", registrationPath);
     }
 
     const source = new EventSource(`${sourceUrl.pathname}${sourceUrl.search}`);
@@ -1567,6 +1573,20 @@ export function App() {
 
         const nextUrl = new URL(payload.url, window.location.origin);
         window.focus();
+
+        // If we are already browsing the requested directory, keep the
+        // currently open file instead of resetting to the directory root.
+        const currentUrl = new URL(window.location.href);
+        const nextDir = nextUrl.searchParams.get("dir");
+        const currentDir = currentUrl.searchParams.get("dir");
+        if (
+          nextDir &&
+          nextDir === currentDir &&
+          !nextUrl.searchParams.get("path")
+        ) {
+          return;
+        }
+
         if (nextUrl.href !== window.location.href) {
           window.location.assign(nextUrl.href);
         }
@@ -1581,7 +1601,11 @@ export function App() {
       source.removeEventListener("open-request", handleOpenRequest);
       source.close();
     };
-  }, [requestedPathState.rawPath]);
+  }, [
+    requestedPathState.directoryPath,
+    requestedPathState.mode,
+    requestedPathState.rawPath,
+  ]);
 
   useEffect(() => {
     let cancelled = false;

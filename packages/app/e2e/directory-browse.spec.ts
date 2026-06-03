@@ -145,4 +145,24 @@ test.describe("browsing a directory of markdown files", () => {
       to: "beta.md",
     });
   });
+
+  test("reuses an existing window for a repeated directory open request @smoke", async ({
+    page,
+  }) => {
+    writeProjectFile(projectDir, "alpha.md", "# Alpha\n");
+
+    await page.goto(`/?${new URLSearchParams({ dir: projectDir }).toString()}`);
+    await expect(page.getByTestId("directory-file-alpha.md")).toBeVisible();
+
+    // The CLI keys the open request on the directory path.
+    const targetUrl = `/?${new URLSearchParams({ dir: projectDir }).toString()}`;
+    const response = await page.request.post("/api/open-request", {
+      data: { path: projectDir, url: targetUrl },
+    });
+
+    expect(response.ok()).toBe(true);
+    await expect(response.json()).resolves.toEqual({ delivered: true });
+
+    logE2eEvent("directory-browse.reused-window", { projectDir });
+  });
 });
