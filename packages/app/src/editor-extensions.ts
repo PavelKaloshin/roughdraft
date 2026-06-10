@@ -16,8 +16,10 @@ import type {
 } from "@tiptap/pm/model";
 import { Plugin, PluginKey } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
+import { ReactNodeViewRenderer } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import { rawMarkdownBlockAttribute } from "./markdown";
+import { MermaidCodeBlockView } from "./MermaidCodeBlockView";
 
 declare module "@tiptap/core" {
   interface Commands<ReturnType> {
@@ -715,6 +717,10 @@ const MarkdownCode = Code.extend({
 
 const MarkdownCodeBlock = CodeBlock.extend({
   marks: "commentRef criticChange",
+
+  addNodeView() {
+    return ReactNodeViewRenderer(MermaidCodeBlockView);
+  },
 });
 
 const MarkdownImage = Image.extend({

@@ -46,6 +46,21 @@ describe("CriticMarkup comments", () => {
     expect(editorStateToCriticMarkdown(doc, comments)).toBe(input);
   });
 
+  it("round-trips a mermaid fenced code block without rewriting it", () => {
+    const input = [
+      "```mermaid",
+      "graph TD;",
+      "  A-->B;",
+      "  A-->C;",
+      "```",
+      "",
+    ].join("\n");
+
+    const { doc, comments } = criticMarkdownToEditorState(input);
+
+    expect(editorStateToCriticMarkdown(doc, comments)).toBe(input);
+  });
+
   it("detects review rail content without counting fenced examples", () => {
     expect(
       criticMarkdownHasReviewRail(
