@@ -43,6 +43,7 @@ import {
   PageCard,
 } from "./PageCard";
 import type { CompleteReviewOptions, Page, StorageBackend } from "./storage";
+import { useReviewLayoutShiftAnimation } from "./useReviewLayoutShiftAnimation";
 
 type DiskChangeState = "clean" | "changed" | "conflict" | "paused";
 type ReviewHandoffState =
@@ -305,6 +306,8 @@ export function DocumentWorkspace({
       !!documentPage?.content &&
       criticMarkdownHasReviewRail(documentPage.content),
   );
+  const documentHeaderRef =
+    useReviewLayoutShiftAnimation<HTMLDivElement>(documentHasComments);
 
   useEffect(() => {
     setDocumentHasComments(
@@ -528,12 +531,12 @@ export function DocumentWorkspace({
               open={reviewHandoffPopoverOpen}
               onOpenChange={setReviewHandoffPopoverOpen}
             >
-              <div className="relative flex items-center overflow-hidden rounded-[7px] shadow-[0_10px_28px_rgba(0,0,0,0.18)] after:pointer-events-none after:absolute after:top-px after:right-8 after:bottom-px after:z-10 after:w-px after:bg-[#444] after:content-[''] dark:after:bg-[#444]">
+              <div className="relative flex items-center overflow-hidden rounded-[7px] shadow-[0_10px_28px_rgba(0,0,0,0.18)] after:pointer-events-none after:absolute after:top-px after:right-8 after:bottom-px after:z-10 after:w-px after:bg-[#4a4038] after:content-[''] dark:after:bg-slate-600">
                 <Button
                   type="button"
                   data-testid="review-handoff-button"
                   size="lg"
-                  className="h-9 rounded-r-none rounded-l-[7px] border-0 bg-black px-3 text-sm font-bold text-white hover:bg-black/85 focus-visible:ring-black/25 dark:bg-black dark:text-white dark:hover:bg-black/85 dark:focus-visible:ring-white/30"
+                  className="h-9 rounded-r-none rounded-l-[7px] border-0 bg-[#2B2420] px-3 text-sm font-bold text-white hover:bg-[#3a322b] focus-visible:ring-slate-300 dark:bg-slate-700 dark:text-slate-100 dark:hover:bg-slate-600 dark:focus-visible:ring-slate-600"
                   disabled={reviewHandoffDisabled}
                   onClick={() =>
                     void handleCompleteReview(
@@ -559,7 +562,7 @@ export function DocumentWorkspace({
                       type="button"
                       data-testid="review-handoff-comment-trigger"
                       size="icon-lg"
-                      className="h-9 w-8 rounded-l-none rounded-r-[7px] border-0 bg-black text-white hover:bg-black/85 focus-visible:ring-black/25 dark:bg-black dark:text-white dark:hover:bg-black/85 dark:focus-visible:ring-white/30"
+                      className="h-9 w-8 rounded-l-none rounded-r-[7px] border-0 bg-[#2B2420] text-white hover:bg-[#3a322b] focus-visible:ring-slate-300 dark:bg-slate-700 dark:text-slate-100 dark:hover:bg-slate-600 dark:focus-visible:ring-slate-600"
                       disabled={reviewHandoffDisabled}
                       aria-label="Add overall handoff comment"
                     >
@@ -706,14 +709,15 @@ export function DocumentWorkspace({
       <div className="mx-auto min-h-full max-w-[1080px]">
         {documentPage ? (
           <div
+            ref={documentHeaderRef}
             data-testid="document-page-header"
             className={cn(
-              "document-page-shell mb-2 flex flex-col gap-6 text-[0.62rem] font-medium tracking-[0.01em] text-stone-400 min-[1100px]:grid min-[1100px]:grid-cols-[minmax(0,46.5rem)_minmax(24rem,1fr)] min-[1100px]:items-start min-[1100px]:justify-between min-[1100px]:gap-8",
+              "review-layout-grid document-page-shell mb-2 text-[0.62rem] font-medium tracking-[0.01em] text-stone-400",
               !documentHasComments &&
-                "document-page-shell-no-comments min-[1100px]:grid-cols-[minmax(0,46.5rem)] min-[1100px]:justify-center",
+                "review-layout-grid--centered document-page-shell-no-comments",
             )}
           >
-            <div className="document-page-main w-full max-w-[46.5rem] min-w-0">
+            <div className="review-layout-main document-page-main w-full max-w-[46.5rem] min-w-0">
               <div className="flex w-full flex-wrap items-center gap-1.5 px-1">
                 <Tooltip>
                   <TooltipTrigger
@@ -721,12 +725,12 @@ export function DocumentWorkspace({
                       <button
                         type="button"
                         data-testid="document-editor-view-toggle"
-                        className="grid shrink-0 grid-cols-2 rounded-[999px] bg-[#E8E3DB] dark:bg-slate-700 px-[2px] pt-[3px] pb-[2px] shadow-[inset_0_1px_0_rgba(255,251,245,0.72)] dark:shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]"
+                        className="grid shrink-0 grid-cols-2 rounded-[999px] bg-[#E8E3DB] dark:bg-slate-800 px-[2px] pt-[3px] pb-[2px] shadow-[inset_0_1px_0_rgba(255,251,245,0.72)] dark:border-b dark:border-b-slate-800 dark:shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]"
                       >
                         <span
                           className={`flex w-[1.375rem] items-center justify-center rounded-full py-[2px] transition ${
                             documentEditorViewMode === "rich-text"
-                              ? "bg-[#FFFDFC] dark:bg-slate-500 text-stone-700 dark:text-white shadow-[0_1px_2px_rgba(41,37,36,0.12)]"
+                              ? "bg-[#FFFDFC] dark:bg-slate-600 text-stone-700 dark:text-white shadow-[0_1px_2px_rgba(41,37,36,0.12)]"
                               : "text-stone-500 dark:text-slate-400"
                           }`}
                         >
@@ -735,7 +739,7 @@ export function DocumentWorkspace({
                         <span
                           className={`flex w-[1.375rem] items-center justify-center rounded-full py-[2px] transition ${
                             documentEditorViewMode === "code"
-                              ? "bg-[#FFFDFC] dark:bg-slate-500 text-stone-700 dark:text-white shadow-[0_1px_2px_rgba(41,37,36,0.12)]"
+                              ? "bg-[#FFFDFC] dark:bg-slate-600 text-stone-700 dark:text-white shadow-[0_1px_2px_rgba(41,37,36,0.12)]"
                               : "text-stone-500 dark:text-slate-400"
                           }`}
                         >
@@ -763,7 +767,7 @@ export function DocumentWorkspace({
                       <button
                         type="button"
                         data-testid="document-file-menu-trigger"
-                        className="inline-flex min-w-0 max-w-full items-center gap-1 rounded-full px-1 py-0.5 font-mono text-[0.7rem] tracking-[0.01em] text-stone-400 outline-none transition hover:bg-[#EEE9E1] hover:text-stone-600 focus-visible:ring-2 focus-visible:ring-stone-300/70 dark:text-stone-500 dark:hover:bg-slate-800 dark:hover:text-stone-300 dark:focus-visible:ring-slate-600/70"
+                        className="inline-flex min-w-0 max-w-full items-center gap-1 rounded-full px-1 py-0.5 font-mono text-[0.7rem] tracking-[0.01em] text-stone-400 outline-none transition hover:bg-[#EEE9E1] hover:text-stone-600 focus-visible:ring-2 focus-visible:ring-stone-300/70 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-200 dark:focus-visible:ring-slate-600/70"
                         title={documentFilenameLabel}
                         aria-label="Document file actions"
                       >
@@ -815,7 +819,7 @@ export function DocumentWorkspace({
                     <SelectTrigger
                       data-testid="document-mode-trigger"
                       aria-label="Document mode"
-                      className="h-[1.5rem] px-1 font-mono text-[0.7rem] leading-[1.25rem] font-normal tracking-[0.01em] text-stone-400 dark:text-stone-500 hover:text-stone-500 dark:hover:text-stone-400"
+                      className="h-[1.5rem] px-1 font-mono text-[0.7rem] leading-[1.25rem] font-normal tracking-[0.01em] text-stone-400 dark:text-slate-400 hover:text-stone-500 dark:hover:text-slate-300"
                     >
                       <ActiveDocumentInteractionModeIcon className="size-[0.68rem]" />
                       <span className="truncate">
@@ -826,7 +830,7 @@ export function DocumentWorkspace({
                       {documentInteractionModeOptions.map(
                         ({ value, label, Icon }) => (
                           <SelectItem key={value} value={value} label={label}>
-                            <Icon className="size-3 text-stone-500 dark:text-stone-400" />
+                            <Icon className="size-3 text-stone-500 dark:text-slate-400" />
                             <SelectItemText>{label}</SelectItemText>
                           </SelectItem>
                         ),
@@ -836,12 +840,6 @@ export function DocumentWorkspace({
                 </div>
               </div>
             </div>
-            {documentHasComments ? (
-              <div
-                className="document-comment-rail pointer-events-none invisible hidden min-[1100px]:block"
-                aria-hidden="true"
-              />
-            ) : null}
           </div>
         ) : null}
         {documentPage ? (
