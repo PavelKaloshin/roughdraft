@@ -805,6 +805,25 @@ export function DocumentWorkspace({
                   saveState={saveState}
                   diskChangeState={documentDiskChangeState}
                 />
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <button
+                        type="button"
+                        data-testid="document-reload-button"
+                        className="inline-flex size-7 shrink-0 items-center justify-center rounded-full text-stone-400 outline-none transition hover:bg-[#EEE9E1] hover:text-stone-600 focus-visible:ring-2 focus-visible:ring-stone-300/70 dark:text-stone-500 dark:hover:bg-slate-800 dark:hover:text-stone-300 dark:focus-visible:ring-slate-600/70"
+                      >
+                        <RefreshCcw
+                          className="size-[0.8rem]"
+                          aria-hidden="true"
+                        />
+                      </button>
+                    }
+                    aria-label="Reload from disk"
+                    onClick={() => void onReloadDocumentFromDisk()}
+                  />
+                  <TooltipContent>Reload from disk</TooltipContent>
+                </Tooltip>
                 <div className="ml-auto inline-flex h-[1.25rem] shrink-0 items-center">
                   <Select<DocumentInteractionMode>
                     value={documentInteractionMode}

@@ -90,6 +90,7 @@ Paragraph with **bold**, [link](https://example.com), `inline code`.
 | Document | Editing mode | Open mode menu and choose Editing | `document-mode-trigger` | Normal edit behavior. |
 | Document | Suggesting mode | Open mode menu and choose Suggesting | `document-mode-trigger` | Selection actions should create suggestions instead of direct edits. |
 | Document | Viewing mode | Open mode menu and choose Viewing | `document-mode-trigger` | Editing controls should look non-editable. |
+| Document | Reload from disk | Click the reload control in the header | `document-reload-button` | Always available; re-reads the file from disk (bypasses HTTP cache). Tooltip/label `Reload from disk`. |
 | Document | Save status: saved | Any clean document after autosave | `document-save-status` | Checkmark should sit next to the filename and fade out over 2 seconds; accessible label remains `Saved`. |
 | Document | Save status: unsaved | Type in a local document before save completes | `document-save-status` | Spinner-only pending state; accessible label is `Unsaved changes`. Transient; often easier with save throttling or network mocking. |
 | Document | Save status: saving | Type and capture during autosave | `document-save-status` | Spinner-only pending state; accessible label is `Saving`. Transient; easiest with mocked delayed save. |

@@ -43,10 +43,13 @@ export class ApiBackend implements StorageBackend {
   }
 
   async getMarkdownFile(relativePath: string): Promise<Page> {
+    // `no-store` so a manual reload or watcher-triggered refresh always reads
+    // the current file from disk rather than a cached HTTP response.
     const res = await fetch(
       this.buildUrl("/api/markdown-file", {
         path: relativePath,
       }),
+      { cache: "no-store" },
     );
     if (!res.ok) {
       throw new Error(
@@ -58,7 +61,9 @@ export class ApiBackend implements StorageBackend {
 
   async readTextFile(relativePath: string): Promise<string> {
     const normalized = relativePath.replace(/^\.?\//, "");
-    const res = await fetch(this.buildUrl("/api/files", { path: normalized }));
+    const res = await fetch(this.buildUrl("/api/files", { path: normalized }), {
+      cache: "no-store",
+    });
     if (!res.ok) {
       throw new Error(`Failed to read file ${relativePath}: ${res.status}`);
     }
