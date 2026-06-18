@@ -70,6 +70,35 @@ describe("createApp", () => {
     expect(response.body.version).toEqual(expect.any(String));
   });
 
+  it("serves non-markdown files whose project path includes a dot-directory", async () => {
+    // Projects opened under a dotfile dir (e.g. ~/.claude/skills/...) must still
+    // serve their files. `res.sendFile` defaults to `dotfiles: "ignore"`, which
+    // 404s any path that traverses a dot-directory, so this reproduces the
+    // read-only viewer failing on every file under such a project.
+    const dottedProjectDir = path.join(projectDir, ".vault", "project");
+    fs.mkdirSync(path.join(dottedProjectDir, "templates"), { recursive: true });
+    fs.writeFileSync(
+      path.join(dottedProjectDir, "templates", "Dockerfile.tmpl"),
+      "FROM python:3.12\n",
+    );
+
+    const { app } = createApp({
+      homeDir,
+      staticDirPath: projectDir,
+    });
+
+    const response = await request(app).get("/api/files").query({
+      projectPath: dottedProjectDir,
+      path: "templates/Dockerfile.tmpl",
+    });
+
+    expect(response.status).toBe(200);
+    // supertest puts non-text bodies in `body` as a Buffer.
+    const body =
+      response.text ?? (response.body as Buffer | undefined)?.toString("utf-8");
+    expect(body).toContain("FROM python:3.12");
+  });
+
   it("lists, updates, and deletes page-backed markdown files", async () => {
     fs.writeFileSync(path.join(projectDir, "alpha.md"), "# Alpha\n");
 

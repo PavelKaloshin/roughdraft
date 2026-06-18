@@ -1202,7 +1202,11 @@ export function createApp(options: CreateAppOptions = {}): CreateAppResult {
       return;
     }
 
-    res.sendFile(absolutePath);
+    // `ensureProjectPath` already confined the path to the project boundary, so
+    // serve it even when the project lives under a dot-directory (e.g.
+    // ~/.claude/skills/...). Without this, sendFile's default `dotfiles:
+    // "ignore"` 404s every file whose path traverses a dot-directory.
+    res.sendFile(absolutePath, { dotfiles: "allow" });
   });
 
   app.post("/api/assets", (req, res) => {
