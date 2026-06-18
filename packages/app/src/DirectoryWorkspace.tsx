@@ -1,36 +1,40 @@
 import {
   ChevronDown,
   ChevronRight,
+  File as FileIcon,
+  FileCode,
   FileText,
   Folder,
   FolderOpen,
+  Image as ImageIcon,
 } from "lucide-react";
 import { useMemo, useState } from "react";
+import { classifyFile, type FileKind } from "./file-types";
 import { cn } from "./lib/utils";
 
-export interface MarkdownTreeNode {
+export interface FileTreeNode {
   name: string;
   relativePath: string;
   kind: "file" | "directory";
-  children: MarkdownTreeNode[];
+  children: FileTreeNode[];
 }
 
 /**
  * Build a nested tree from the flat `paths` returned by `/api/file-tree`.
  *
- * Only `.md` files are kept; directories are inferred from file path segments,
- * so empty directories and non-markdown files are pruned automatically.
- * Directories sort before files, then by numeric-aware name order.
+ * Every file is kept so the directory can be browsed in full; directories are
+ * inferred from file path segments, so empty directories are pruned
+ * automatically. Directories sort before files, then by numeric-aware name
+ * order. Markdown opens as the interactive unit of work; other files open
+ * read-only (see ADR 0005).
  */
-export function buildMarkdownFileTree(paths: string[]): MarkdownTreeNode[] {
-  const root: MarkdownTreeNode[] = [];
-  const directoryIndex = new Map<string, MarkdownTreeNode>();
+export function buildFileTree(paths: string[]): FileTreeNode[] {
+  const root: FileTreeNode[] = [];
+  const directoryIndex = new Map<string, FileTreeNode>();
 
-  const markdownPaths = paths.filter(
-    (entry) => !entry.endsWith("/") && entry.toLowerCase().endsWith(".md"),
-  );
+  const filePaths = paths.filter((entry) => !entry.endsWith("/"));
 
-  for (const filePath of markdownPaths) {
+  for (const filePath of filePaths) {
     const segments = filePath.split("/").filter(Boolean);
     let currentChildren = root;
     let currentPrefix = "";
@@ -64,7 +68,7 @@ export function buildMarkdownFileTree(paths: string[]): MarkdownTreeNode[] {
     });
   }
 
-  const sortNodes = (nodes: MarkdownTreeNode[]) => {
+  const sortNodes = (nodes: FileTreeNode[]) => {
     nodes.sort((left, right) => {
       if (left.kind !== right.kind) {
         return left.kind === "directory" ? -1 : 1;
@@ -81,7 +85,7 @@ export function buildMarkdownFileTree(paths: string[]): MarkdownTreeNode[] {
 }
 
 interface DirectoryTreeProps {
-  nodes: MarkdownTreeNode[];
+  nodes: FileTreeNode[];
   activePath: string | null;
   onSelect: (relativePath: string) => void;
   depth?: number;
@@ -119,13 +123,21 @@ function DirectoryTree({
 }
 
 interface DirectoryTreeNodeProps {
-  node: MarkdownTreeNode;
+  node: FileTreeNode;
   activePath: string | null;
   onSelect: (relativePath: string) => void;
   depth: number;
 }
 
 const INDENT_STEP_REM = 0.75;
+
+const fileIconByKind: Record<FileKind, typeof FileText> = {
+  markdown: FileText,
+  text: FileText,
+  code: FileCode,
+  image: ImageIcon,
+  binary: FileIcon,
+};
 
 function DirectoryTreeFolder({
   node,
@@ -176,6 +188,7 @@ function DirectoryTreeFile({
   depth,
 }: DirectoryTreeNodeProps) {
   const isActive = activePath === node.relativePath;
+  const FileKindIcon = fileIconByKind[classifyFile(node.relativePath).kind];
 
   return (
     <li>
@@ -192,7 +205,7 @@ function DirectoryTreeFile({
         )}
         style={{ paddingLeft: `${0.5 + depth * INDENT_STEP_REM + 1.25}rem` }}
       >
-        <FileText className="size-4 shrink-0 opacity-70" />
+        <FileKindIcon className="size-4 shrink-0 opacity-70" />
         <span className="truncate">{node.name}</span>
       </button>
     </li>
@@ -212,7 +225,7 @@ export function DirectorySidebar({
   activePath,
   onSelect,
 }: DirectorySidebarProps) {
-  const nodes = useMemo(() => buildMarkdownFileTree(paths), [paths]);
+  const nodes = useMemo(() => buildFileTree(paths), [paths]);
 
   return (
     <nav
@@ -239,9 +252,7 @@ export function DirectorySidebar({
             onSelect={onSelect}
           />
         ) : (
-          <p className="px-3 py-2 text-sm text-slate-400">
-            No Markdown files here.
-          </p>
+          <p className="px-3 py-2 text-sm text-slate-400">No files here.</p>
         )}
       </div>
     </nav>
@@ -255,7 +266,8 @@ export function DirectoryEmptyState() {
       className="flex h-full flex-1 items-center justify-center p-8 text-center"
     >
       <p className="max-w-sm text-sm text-slate-400">
-        Select a Markdown file from the sidebar to review it.
+        Select a file from the sidebar. Markdown opens for review; other files
+        open read-only.
       </p>
     </div>
   );

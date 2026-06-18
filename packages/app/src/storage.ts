@@ -57,6 +57,12 @@ export interface StorageBackend {
   info: BackendInfo;
   canManageProjects: boolean;
   getMarkdownFile(relativePath: string): Promise<Page>;
+  /**
+   * Read any file in the project as text, for the read-only viewer used on
+   * non-markdown files in directory mode. Unlike `getMarkdownFile` this is not
+   * gated to `.md` and never returns review/edit state.
+   */
+  readTextFile?(relativePath: string): Promise<string>;
   listFileTree?(): Promise<FileTreeListing>;
   saveMarkdownFile(
     relativePath: string,

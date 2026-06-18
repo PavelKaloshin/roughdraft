@@ -29,6 +29,11 @@ install: ## Install workspace dependencies
 build: ## Build rfm, app, and server
 	pnpm build
 
+.PHONY: build-global
+build-global: build ## Build and restart the global roughdraft server
+			-roughdraft stop
+			roughdraft start
+
 # --- Quality gates -----------------------------------------------------------
 
 .PHONY: check
@@ -87,3 +92,20 @@ rd-status: ## Show dev server status
 rd-open: ## Open a file or directory in Roughdraft (PATH=/abs/path)
 	@test -n "$(PATH_)" || { echo "Usage: make rd-open PATH_=/abs/path"; exit 2; }
 	"$(RD)" open "$(PATH_)"
+
+# --- Git (read-only) ---------------------------------------------------------
+
+.PHONY: status
+status: ## Show working tree status (short)
+	git status --short
+
+.PHONY: diff
+diff: ## Show diff (F=path to scope, default unstaged tree)
+	git diff $(F)
+
+# --- API smoke ---------------------------------------------------------------
+
+.PHONY: api-files
+api-files: ## Fetch a file via the running dev server (P=relative/path)
+	@test -n "$(P)" || { echo "Usage: make api-files P=relative/path"; exit 2; }
+	curl -s "http://localhost:7373/api/files?projectPath=$(WORKTREE_ROOT)&path=$(P)"

@@ -56,6 +56,15 @@ export class ApiBackend implements StorageBackend {
     return res.json();
   }
 
+  async readTextFile(relativePath: string): Promise<string> {
+    const normalized = relativePath.replace(/^\.?\//, "");
+    const res = await fetch(this.buildUrl("/api/files", { path: normalized }));
+    if (!res.ok) {
+      throw new Error(`Failed to read file ${relativePath}: ${res.status}`);
+    }
+    return res.text();
+  }
+
   async listFileTree(): Promise<FileTreeListing> {
     const res = await fetch(this.buildUrl("/api/file-tree"));
     if (!res.ok) {

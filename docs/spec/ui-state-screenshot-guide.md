@@ -60,37 +60,11 @@ Paragraph with **bold**, [link](https://example.com), `inline code`.
 ```
 ### Review Document
 ```markdown
-# Review document {==Select this sentence==}{>>Root comment<<}{#root} This sentence includes {++clearer wording++}{#s1}. Replace {~~old phrase~>new phrase~~}{#s2} and remove {--dead text--}{#s3}.
-
----
-comments:
-  root:
-    by: Nora
-    at: "2026-04-28T12:00:00.000Z"
-  child:
-    body: Nested reply
-    by: AI
-    at: "2026-04-28T12:01:00.000Z"
-    re: root
-  c1:
-    body: Looks good.
-    by: Nora
-    at: "2026-04-28T12:03:00.000Z"
-    re: s1
-suggestions:
-  s1:
-    by: AI
-    at: "2026-04-28T12:02:00.000Z"
-  s2:
-    by: AI
-    at: "2026-04-28T12:04:00.000Z"
-  s3:
-    by: AI
-    at: "2026-04-28T12:05:00.000Z"
+# Review document Select this sentence This sentence includes {++clearer wording++}{#s1}. Replace {~~old phrase~>new phrase~~}{#s2} and remove {--dead text--}{#s3}. --- comments: root: by: Nora at: "2026-04-28T12:00:00.000Z" child: body: Nested reply by: AI at: "2026-04-28T12:01:00.000Z" re: root c1: body: Looks good. by: Nora at: "2026-04-28T12:03:00.000Z" re: s1 suggestions: s1: by: AI at: "2026-04-28T12:02:00.000Z" s2: by: AI at: "2026-04-28T12:04:00.000Z" s3: by: AI at: "2026-04-28T12:05:00.000Z"
 ```
 ### Fenced CriticMarkup Document
 ```markdown
-# Fenced examples This page should not show a review rail just because examples appear inside code fences. ```text {==example==}{>>comment<<}{#c1} {++inserted++} {--deleted--} {~~old~>new~~} ```
+# Fenced examples This page should not show a review rail just because examples appear inside code fences. ```text example {++inserted++} {--deleted--} {~~old~>new~~} ```
 ```
 ## Capture Matrix
 | Area | State | How to reach it | Useful selectors | Notes |
@@ -142,29 +116,24 @@ suggestions:
 | Comment editor | Reply editing | Use a reply action | `comment-rail-child-editor` | Useful for nested thread spacing. |
 | Code mode | Review rail present | Open review fixture with `?editor=code` | `page-card-code`, `markdown-code-editor` | Confirms code editor and rail can coexist. |
 | Code mode | Review rail absent | Open fenced fixture with `?editor=code` | `page-card-code`, `markdown-code-editor` | Confirms fenced CriticMarkup alone does not create review rail. |
-| Directory | Sidebar, no file selected | Open URL with `?dir=<directory>` (or `rd open <dir>`) | `role=navigation[name="Directory files"]`, empty-state text | Empty state copy: `Select a Markdown file from the sidebar to review it.` |
-| Directory | File open from sidebar | In directory mode, click a file in the tree | `role=navigation[name="Directory files"]`, `rich-text-editor` | Active file button has `aria-current="true"`; URL gains `&path=`. |
-| Directory | Nested folder expanded | In directory mode with nested `.md` files | `role=navigation[name="Directory files"]` | Folders toggle open/closed; capture an expanded subfolder with a highlighted active file. |
-| Directory | Empty directory | Open `?dir=<dir>` with no `.md` files | `role=navigation[name="Directory files"]` | Sidebar copy: `No Markdown files here.` |
+| Directory | Sidebar, no file selected | Open URL with `?dir=<directory>` (or `rd open <dir>`) | `role=navigation[name="Directory files"]`, empty-state text | Empty state copy: `Select a file from the sidebar. Markdown opens for review; other files open read-only.` |
+| Directory | Mixed file types in tree | Open `?dir=<dir>` containing `.md`, code, image, and binary files | `role=navigation[name="Directory files"]` | Tree lists all files; icons differ by kind (markdown/text, code, image, other). |
+| Directory | Markdown file open | In directory mode, click a `.md` file | `role=navigation[name="Directory files"]`, `rich-text-editor` | Active file button has `aria-current="true"`; URL gains `&path=`. |
+| Directory | Code file read-only viewer | In directory mode, click a source file (e.g. `.ts`) | `file-viewer-workspace`, `file-viewer-code`, `file-viewer-readonly-badge` | Syntax-highlighted, `Read-only` badge, no comment/edit affordances. |
+| Directory | Text file read-only viewer | In directory mode, click a `.txt`/`LICENSE` file | `file-viewer-workspace`, `file-viewer-code` | Monospaced plain text, no highlighting language matched. |
+| Directory | Image preview | In directory mode, click an image (e.g. `.png`) | `file-viewer-workspace`, `file-viewer-image` | Centered image preview, `Read-only` badge. |
+| Directory | Binary stub | In directory mode, click a binary (e.g. `.pdf`/`.zip`) | `file-viewer-workspace`, `file-viewer-stub` | Stub copy: `Preview unavailable`. |
+| Directory | Nested folder expanded | In directory mode with nested files | `role=navigation[name="Directory files"]` | Folders toggle open/closed; capture an expanded subfolder with a highlighted active file. |
+| Directory | Empty directory | Open `?dir=<dir>` with no files | `role=navigation[name="Directory files"]` | Sidebar copy: `No files here.` |
 | Error/home fallback | Non-Markdown path | Open URL with `?path=/tmp/file.txt` | homepage error message | Copy: `Roughdraft now opens one .md file at a time.` |
 | Error/home fallback | Missing/unloadable path | Open URL with invalid markdown path through local backend | homepage error message | Captures load-error homepage variant. |
-## Playwright Capture Skeleton
-```ts
-import { chromium, devices } from "playwright";
+## Playwright Capture Skeleton ```ts import { chromium, devices } from "playwright"; const baseUrl = process.env.ROUGHDRAFT_BASE_URL ?? "[http://127.0.0.1:5173](http://127.0.0.1:5173)"; const outDir = process.env.ROUGHDRAFT_SCREENSHOT_DIR ?? ".context/ui-state-screenshots/manual";
+const browser = await chromium.launch(); const desktop = await browser.newPage({ viewport: { width: 1440, height: 1000 } }); await desktop.goto(`${baseUrl}/`); await desktop.screenshot({ path: `${outDir}/01-home-desktop.png`, fullPage: true });
 
-const baseUrl = process.env.ROUGHDRAFT_BASE_URL ?? "http://127.0.0.1:5173";
-const outDir = process.env.ROUGHDRAFT_SCREENSHOT_DIR ?? ".context/ui-state-screenshots/manual";
-
-const browser = await chromium.launch();
-const desktop = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
-await desktop.goto(`${baseUrl}/`);
-await desktop.screenshot({ path: `${outDir}/01-home-desktop.png`, fullPage: true });
-
-const mobile = await browser.newPage({ ...devices["iPhone 13"] });
-await mobile.goto(`${baseUrl}/`);
-await mobile.screenshot({ path: `${outDir}/01-home-mobile.png`, fullPage: true });
+const mobile = await browser.newPage({ ...devices["iPhone 13"] }); await mobile.goto(`${baseUrl}/`); await mobile.screenshot({ path: `${outDir}/01-home-mobile.png`, fullPage: true });
 
 await browser.close();
+
 ```
 
 For interaction-heavy states, prefer selectors over coordinates. The current code has stable `data-testid` hooks for the homepage storyboard, editor view toggle, mode trigger, conflict banner/actions, review rail, rich editor, code editor, selection menu, link popover, and context menu.
@@ -197,3 +166,4 @@ The most reliable long-term solution is a dedicated screenshot harness route or 
 - Capture both rich-text and code editor for document states that affect the editor surface or review rail.
   
 - Keep screenshots in `.context/` unless the run is intentionally being committed as visual documentation.
+```

@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { buildMarkdownFileTree } from "./DirectoryWorkspace";
+import { buildFileTree } from "./DirectoryWorkspace";
 
-describe("buildMarkdownFileTree", () => {
-  it("nests markdown files under their directories", () => {
-    const tree = buildMarkdownFileTree(["notes/", "notes/alpha.md", "zeta.md"]);
+describe("buildFileTree", () => {
+  it("nests files under their directories", () => {
+    const tree = buildFileTree(["notes/", "notes/alpha.md", "zeta.md"]);
 
     expect(tree).toEqual([
       {
@@ -28,29 +28,29 @@ describe("buildMarkdownFileTree", () => {
     ]);
   });
 
-  it("drops non-markdown files and directories without markdown", () => {
-    const tree = buildMarkdownFileTree([
+  it("keeps non-markdown files and prunes only empty directories", () => {
+    const tree = buildFileTree([
       "empty/",
       "empty/nested/",
       "assets/",
       "assets/diagram.png",
+      "src/app.ts",
       "draft.md",
     ]);
 
-    expect(tree).toEqual([
-      {
-        name: "draft.md",
-        relativePath: "draft.md",
-        kind: "file",
-        children: [],
-      },
+    expect(tree.map((node) => node.name)).toEqual([
+      "assets",
+      "src",
+      "draft.md",
     ]);
+    expect(tree[0]?.children.map((node) => node.name)).toEqual(["diagram.png"]);
+    expect(tree[1]?.children.map((node) => node.name)).toEqual(["app.ts"]);
   });
 
   it("orders directories before files and sorts numerically", () => {
-    const tree = buildMarkdownFileTree([
+    const tree = buildFileTree([
       "b.md",
-      "a.md",
+      "a.txt",
       "10-late.md",
       "2-early.md",
       "docs/z.md",
@@ -60,16 +60,16 @@ describe("buildMarkdownFileTree", () => {
       "docs",
       "2-early.md",
       "10-late.md",
-      "a.md",
+      "a.txt",
       "b.md",
     ]);
   });
 
   it("uses the canonical relative path as the file identifier", () => {
-    const tree = buildMarkdownFileTree(["a/b/c/deep.md"]);
+    const tree = buildFileTree(["a/b/c/deep.rs"]);
 
     const deep = tree[0]?.children[0]?.children[0]?.children[0];
-    expect(deep?.relativePath).toBe("a/b/c/deep.md");
+    expect(deep?.relativePath).toBe("a/b/c/deep.rs");
     expect(deep?.kind).toBe("file");
   });
 });

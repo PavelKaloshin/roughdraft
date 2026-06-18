@@ -46,6 +46,8 @@ import {
 } from "./components/ui/dialog";
 import { DirectoryEmptyState, DirectorySidebar } from "./DirectoryWorkspace";
 import { DocumentWorkspace } from "./DocumentWorkspace";
+import { classifyFile, type FileKind } from "./file-types";
+import { FileViewerWorkspace } from "./FileViewerWorkspace";
 import { detectBackend } from "./detect-backend";
 import {
   getCommentAnchorMeasurements,
@@ -1489,6 +1491,13 @@ export function App() {
   const isPreviewRoute = window.location.pathname === PREVIEW_PATH;
   const [backend, setBackend] = useState<StorageBackend | null>(null);
   const [documentPage, setDocumentPage] = useState<Page | null>(null);
+  // A non-markdown file opened read-only from the directory tree. Mutually
+  // exclusive with `documentPage`: markdown uses the full review workspace,
+  // everything else uses the read-only viewer (ADR 0005).
+  const [activeViewerFile, setActiveViewerFile] = useState<{
+    path: string;
+    kind: Exclude<FileKind, "markdown">;
+  } | null>(null);
   const [activeDocumentPath, setActiveDocumentPath] = useState<string | null>(
     initialRequestedPathState.documentPath,
   );
@@ -1511,11 +1520,13 @@ export function App() {
   const documentDirtyRef = useRef(false);
   const documentSaveStateRef = useRef<DocumentSaveState>("saved");
   const documentDraftContentRef = useRef<string | null>(null);
+  const activeViewerFileRef = useRef<string | null>(null);
 
   backendRef.current = backend;
   documentPageRef.current = documentPage;
   activeDocumentPathRef.current = activeDocumentPath;
   documentSaveStateRef.current = documentSaveState;
+  activeViewerFileRef.current = activeViewerFile?.path ?? null;
 
   const applyDocumentPage = useCallback((nextDocument: Page) => {
     setDocumentPage(nextDocument);
@@ -1525,6 +1536,7 @@ export function App() {
   const loadDocument = useCallback(
     async (nextBackend: StorageBackend, relativePath: string) => {
       const nextDocument = await nextBackend.getMarkdownFile(relativePath);
+      setActiveViewerFile(null);
       applyDocumentPage(nextDocument);
       setActiveDocumentPath(relativePath);
       documentDirtyRef.current = false;
@@ -1532,6 +1544,26 @@ export function App() {
       return nextDocument;
     },
     [applyDocumentPage],
+  );
+
+  // Open a file selected in the directory tree. Markdown goes through the full
+  // review workspace; any other file opens in the read-only viewer instead of
+  // hitting the `.md`-only markdown endpoint.
+  const openDirectoryFile = useCallback(
+    async (nextBackend: StorageBackend, relativePath: string) => {
+      const { kind } = classifyFile(relativePath);
+      if (kind === "markdown") {
+        await loadDocument(nextBackend, relativePath);
+        return;
+      }
+
+      setDocumentPage(null);
+      setActiveDocumentPath(null);
+      documentDirtyRef.current = false;
+      setDocumentDiskChangeState("clean");
+      setActiveViewerFile({ path: relativePath, kind });
+    },
+    [loadDocument],
   );
 
   useEffect(() => {
@@ -1614,6 +1646,7 @@ export function App() {
       setLoading(true);
       setLoadError(null);
       setDocumentPage(null);
+      setActiveViewerFile(null);
 
       try {
         const detectedBackend = await detectBackend();
@@ -1649,7 +1682,7 @@ export function App() {
           }
 
           if (requestedPathState.documentPath) {
-            await loadDocument(
+            await openDirectoryFile(
               detectedBackend,
               requestedPathState.documentPath,
             );
@@ -1707,6 +1740,7 @@ export function App() {
     };
   }, [
     loadDocument,
+    openDirectoryFile,
     requestedPathState.directoryPath,
     requestedPathState.documentPath,
     requestedPathState.mode,
@@ -1970,7 +2004,9 @@ export function App() {
     async (relativePath: string) => {
       const currentBackend = backendRef.current;
       if (!currentBackend || !directoryPath) return;
-      if (relativePath === activeDocumentPathRef.current) return;
+      const currentPath =
+        activeDocumentPathRef.current ?? activeViewerFileRef.current;
+      if (relativePath === currentPath) return;
 
       window.history.pushState(
         null,
@@ -1982,13 +2018,13 @@ export function App() {
       );
 
       try {
-        await loadDocument(currentBackend, relativePath);
+        await openDirectoryFile(currentBackend, relativePath);
       } catch (error) {
-        console.error("Failed to open markdown file:", error);
-        setLoadError("Could not open that markdown file.");
+        console.error("Failed to open file:", error);
+        setLoadError("Could not open that file.");
       }
     },
-    [directoryPath, loadDocument],
+    [directoryPath, openDirectoryFile],
   );
 
   useEffect(() => {
@@ -2000,14 +2036,15 @@ export function App() {
 
       const nextState = getWorkspaceState();
       if (nextState.documentPath) {
-        void loadDocument(currentBackend, nextState.documentPath).catch(
+        void openDirectoryFile(currentBackend, nextState.documentPath).catch(
           (error) => {
-            console.error("Failed to open markdown file:", error);
+            console.error("Failed to open file:", error);
           },
         );
       } else {
         setDocumentPage(null);
         setActiveDocumentPath(null);
+        setActiveViewerFile(null);
         documentDirtyRef.current = false;
         setDocumentDiskChangeState("clean");
       }
@@ -2015,7 +2052,7 @@ export function App() {
 
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
-  }, [isDirectoryMode, loadDocument]);
+  }, [isDirectoryMode, openDirectoryFile]);
 
   useEffect(() => {
     if (!isDirectoryMode || !backend?.listFileTree) return;
@@ -2114,6 +2151,19 @@ export function App() {
   ) : null;
 
   if (isDirectoryMode && directoryPath) {
+    const fileViewer =
+      backend && activeViewerFile ? (
+        <FileViewerWorkspace
+          key={activeViewerFile.path}
+          backend={backend}
+          relativePath={activeViewerFile.path}
+          fileLabel={
+            getPathLeaf(activeViewerFile.path) ?? activeViewerFile.path
+          }
+          kind={activeViewerFile.kind}
+        />
+      ) : null;
+
     return (
       <main className="relative flex h-screen min-w-0 overflow-hidden bg-[#FCFCFC] dark:bg-background text-slate-950 dark:text-slate-50">
         <DirectorySidebar
@@ -2121,12 +2171,12 @@ export function App() {
             formatWorkspacePathForDisplay(directoryPath) ?? directoryPath
           }
           paths={fileTreePaths}
-          activePath={activeDocumentPath}
+          activePath={activeDocumentPath ?? activeViewerFile?.path ?? null}
           onSelect={handleSelectDirectoryFile}
         />
         <div className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
           {updateNotice}
-          {documentWorkspace ?? <DirectoryEmptyState />}
+          {documentWorkspace ?? fileViewer ?? <DirectoryEmptyState />}
         </div>
       </main>
     );
