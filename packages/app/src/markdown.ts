@@ -74,7 +74,14 @@ function protectIndentedCodeAfterLists(markdown: string): string {
 }
 
 function codeSpanContainsPipe(value: string): boolean {
-  return /`[^`\n]*\|[^`\n]*`/.test(value);
+  // Match each real code span and check whether its contents hold a pipe. A
+  // naive `/`[^`\n]*\|[^`\n]*`/` regex false-positives across two separate code
+  // spans: it pairs the closing backtick of one span with the opening backtick
+  // of the next and treats the cell-separator `|` between them as "inside" a
+  // code span, which wrongly protected (and dropped) any table row with two or
+  // more code-span links.
+  const codeSpans = value.match(/`[^`\n]+`/g) ?? [];
+  return codeSpans.some((span) => span.includes("|"));
 }
 
 function protectPipeSensitiveTables(markdown: string): string {
