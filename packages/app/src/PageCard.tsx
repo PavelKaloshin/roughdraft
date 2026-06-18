@@ -34,6 +34,7 @@ import { buildLocationForLinkedMarkdownDocument } from "./app-navigation";
 import { toHtml } from "./markdown";
 import type { Page, StorageBackend } from "./storage";
 import { useCommentAnchorLayout } from "./useCommentAnchorLayout";
+import { useReviewLayoutShiftAnimation } from "./useReviewLayoutShiftAnimation";
 
 export type DocumentSaveState = "saved" | "unsaved" | "saving" | "error";
 
@@ -623,6 +624,7 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
   const [pendingFocusCommentId, setPendingFocusCommentId] = useState<
     string | null
   >(null);
+  const [newCommentDraftIds, setNewCommentDraftIds] = useState<string[]>([]);
 
   const resolveFileUrl = useCallback(
     (path: string) => backend.resolveFileUrl(path),
@@ -1478,6 +1480,9 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
     nextComments.set(comment.id, comment);
     commentsRef.current = nextComments;
     setComments(nextComments);
+    setNewCommentDraftIds((current) =>
+      current.includes(comment.id) ? current : [...current, comment.id],
+    );
 
     suppressNextMarkdownUpdateRef.current = true;
     currentEditor
@@ -1623,6 +1628,9 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
       nextComments.set(commentId, updater(existingComment));
       commentsRef.current = nextComments;
       setComments(nextComments);
+      setNewCommentDraftIds((current) =>
+        current.filter((currentCommentId) => currentCommentId !== commentId),
+      );
       emitMarkdownChange(undefined, nextComments);
     },
     [emitMarkdownChange],
@@ -1802,6 +1810,9 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
       setPendingFocusCommentId((current) =>
         current && deletedIds.has(current) ? null : current,
       );
+      setNewCommentDraftIds((current) =>
+        current.filter((commentId) => !deletedIds.has(commentId)),
+      );
       emitMarkdownChange(currentEditor.getJSON(), nextComments);
       requestAnimationFrame(() => {
         measureLayout();
@@ -1860,24 +1871,28 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
   }, []);
 
   const hasReviewRail = comments.size > 0 || criticChanges.length > 0;
+  const documentShellRef =
+    useReviewLayoutShiftAnimation<HTMLDivElement>(hasReviewRail);
   const activeComments = activeCommentIds
     .map((commentId) => comments.get(commentId))
     .filter((comment): comment is CriticComment => Boolean(comment));
   const contentCardClass =
-    "rounded-[0.75rem] border border-[#E9E9E8] dark:border-slate-700 bg-white dark:bg-card shadow-[0_18px_44px_rgba(57,47,38,0.08)] dark:shadow-[0_18px_44px_rgba(0,0,0,0.35)]";
+    "rounded-[0.75rem] border border-[#E9E9E8] dark:border-slate-800 bg-white dark:bg-card shadow-[0_18px_44px_rgba(57,47,38,0.08)] dark:shadow-[0_18px_44px_rgba(0,0,0,0.35)]";
   const documentShellClass = cn(
     "document-page-shell",
     layout === "embedded-demo"
       ? "grid grid-cols-1 gap-3 p-4 min-[900px]:grid-cols-[minmax(0,min(100%,42rem))_minmax(13rem,16rem)] min-[900px]:items-start min-[900px]:justify-start"
-      : "flex flex-col gap-6 min-[1100px]:grid min-[1100px]:grid-cols-[minmax(0,46.5rem)_minmax(24rem,1fr)] min-[1100px]:items-start min-[1100px]:justify-between min-[1100px]:gap-8",
+      : "review-layout-grid",
     !hasReviewRail && "document-page-shell-no-comments",
     layout !== "embedded-demo" &&
       !hasReviewRail &&
-      "min-[1100px]:grid-cols-[minmax(0,46.5rem)] min-[1100px]:justify-center",
+      "review-layout-grid--centered",
   );
   const documentMainClass = cn(
     "document-page-main w-full min-w-0",
-    layout === "embedded-demo" ? "max-w-none" : "max-w-[46.5rem]",
+    layout === "embedded-demo"
+      ? "max-w-none"
+      : "review-layout-main max-w-[46.5rem]",
   );
   const contentInsetClass = layout === "embedded-demo" ? "pb-0" : "pb-24";
   const fallbackClass = cn(
@@ -1888,7 +1903,7 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
     "document-comment-rail",
     layout === "embedded-demo"
       ? "block px-4 pb-4 min-[900px]:p-0"
-      : "hidden min-[1100px]:block",
+      : "review-layout-rail hidden min-[1100px]:block",
   );
 
   return (
@@ -1896,7 +1911,11 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
       className="cursor-text bg-transparent"
       data-testid="page-card-rich-text"
     >
-      <div data-testid="document-page-shell" className={documentShellClass}>
+      <div
+        ref={documentShellRef}
+        data-testid="document-page-shell"
+        className={documentShellClass}
+      >
         <div className={documentMainClass}>
           {activeComments.length > 0 ? (
             <CommentEditorList
@@ -1916,6 +1935,7 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
               onSelectComment={selectComment}
               onHoverComment={setHoveredCommentId}
               pendingFocusCommentId={pendingFocusCommentId}
+              newCommentDraftIds={newCommentDraftIds}
               onAutoFocusComment={(commentId) => {
                 setPendingFocusCommentId((current) =>
                   current === commentId ? null : current,
@@ -1988,6 +2008,7 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
           onFocusSuggestion={focusSuggestion}
           onHoverSuggestion={setHoveredChangeId}
           pendingFocusCommentId={pendingFocusCommentId}
+          newCommentDraftIds={newCommentDraftIds}
           onAutoFocusComment={(commentId) => {
             setPendingFocusCommentId((current) =>
               current === commentId ? null : current,
@@ -2019,31 +2040,39 @@ const CodeEditorSurface = memo(function CodeEditorSurface({
     "document-page-shell",
     layout === "embedded-demo"
       ? "grid grid-cols-1 gap-3 p-4 min-[900px]:grid-cols-[minmax(0,min(100%,42rem))_minmax(13rem,16rem)] min-[900px]:items-start min-[900px]:justify-start"
-      : "flex flex-col gap-6 min-[1100px]:grid min-[1100px]:grid-cols-[minmax(0,46.5rem)_minmax(24rem,1fr)] min-[1100px]:items-start min-[1100px]:justify-between min-[1100px]:gap-8",
+      : "review-layout-grid",
     !hasCommentRailSpace && "document-page-shell-no-comments",
     layout !== "embedded-demo" &&
       !hasCommentRailSpace &&
-      "min-[1100px]:grid-cols-[minmax(0,46.5rem)] min-[1100px]:justify-center",
+      "review-layout-grid--centered",
   );
   const documentMainClass = cn(
     "document-page-main w-full min-w-0",
-    layout === "embedded-demo" ? "max-w-none" : "max-w-[46.5rem]",
+    layout === "embedded-demo"
+      ? "max-w-none"
+      : "review-layout-main max-w-[46.5rem]",
   );
   const contentInsetClass = layout === "embedded-demo" ? "pb-0" : "pb-24";
   const reviewRailClass = cn(
     "document-comment-rail pointer-events-none invisible",
     layout === "embedded-demo"
       ? "block px-4 pb-4 min-[900px]:p-0"
-      : "hidden min-[1100px]:block",
+      : "review-layout-rail hidden min-[1100px]:block",
   );
+  const documentShellRef =
+    useReviewLayoutShiftAnimation<HTMLDivElement>(hasCommentRailSpace);
 
   return (
     <div className="cursor-text bg-transparent" data-testid="page-card-code">
-      <div data-testid="document-page-shell" className={documentShellClass}>
+      <div
+        ref={documentShellRef}
+        data-testid="document-page-shell"
+        className={documentShellClass}
+      >
         <div className={documentMainClass}>
           <div className={contentInsetClass}>
             <div
-              className="min-h-[calc(70vh+4rem)] rounded-[0.75rem] border border-[#E9E9E8] dark:border-slate-700 bg-white dark:bg-card py-10 pr-6 pl-5 shadow-[0_18px_44px_rgba(57,47,38,0.08)] dark:shadow-[0_18px_44px_rgba(0,0,0,0.35)] sm:py-14 sm:pr-10 sm:pl-8"
+              className="min-h-[calc(70vh+4rem)] rounded-[0.75rem] border border-[#E9E9E8] dark:border-slate-800 bg-white dark:bg-card py-10 pr-6 pl-5 shadow-[0_18px_44px_rgba(57,47,38,0.08)] dark:shadow-[0_18px_44px_rgba(0,0,0,0.35)] sm:py-14 sm:pr-10 sm:pl-8"
               data-testid="document-content-card"
             >
               <MarkdownCodeEditor

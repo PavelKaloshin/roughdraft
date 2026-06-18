@@ -1600,6 +1600,17 @@ describe("PageCard editor integration", () => {
       "comment-banner-c1-action-save",
     );
     expect(saveButton).not.toBeNull();
+    expect(saveButton?.className).toContain("rounded-xl");
+    expect(saveButton?.className).toContain("bg-[#E8E3DB]");
+    expect(saveButton?.className).toContain("font-bold");
+    expect(saveButton?.className).toContain("w-full");
+    expect(saveButton?.className).toContain("text-sm");
+    expect(
+      queryByTestId<HTMLButtonElement>(
+        rendered.container,
+        "comment-banner-c1-action-cancel",
+      ),
+    ).toBeNull();
 
     await act(async () => {
       saveButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -1771,6 +1782,31 @@ describe("PageCard editor integration", () => {
     expect(
       suggestionThread?.querySelector('[data-testid="comment-tree-line"]'),
     ).not.toBeNull();
+  });
+
+  it("truncates long suggestion summaries in the review rail", async () => {
+    const longInsertedText =
+      "I do really like typing this way. It feels natural. It's a great way to collaborate with AI. What happens if this goes on super long. Will it just keep going? This is too much.";
+    const expectedPreview = `${longInsertedText.slice(0, 140)}...`;
+
+    const rendered = await renderPageCard({
+      page: {
+        id: "doc-long-suggestion-summary-1",
+        title: "Doc Long Suggestion Summary 1",
+        content: `This sentence includes {++${longInsertedText}++}{id="s1" by="AI" at="2026-04-25T23:55:00.000Z"}`,
+      },
+      selected: true,
+    });
+
+    await flushAnimationFrame();
+
+    const suggestionThread = rendered.container.querySelector<HTMLElement>(
+      '[data-suggestion-thread-container="true"]',
+    );
+    const suggestionText = suggestionThread?.textContent ?? "";
+
+    expect(suggestionText).toContain(`Insert: "${expectedPreview}"`);
+    expect(suggestionText).not.toContain(`Insert: "${longInsertedText}"`);
   });
 
   it("saving a reply to a YAML endmatter-backed suggestion preserves split endmatter", async () => {

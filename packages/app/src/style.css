@@ -73,6 +73,20 @@
 }
 
 @layer components {
+  .review-handoff-robots .flash {
+    transform-origin: 340px 165px;
+    opacity: 0;
+  }
+
+  .review-handoff-robots .flash.pop {
+    animation: review-handoff-robots-pop 450ms ease-out;
+  }
+
+  .review-handoff-robots .bob-l.hop,
+  .review-handoff-robots .bob-r.hop {
+    animation: review-handoff-robots-hop 400ms ease-out;
+  }
+
   .tiptap {
     @apply min-h-[120px] text-slate-800 dark:text-slate-200 outline-none;
     --editor-font-size: 16px;
@@ -633,6 +647,31 @@
   }
 }
 
+@keyframes review-handoff-robots-pop {
+  0% {
+    opacity: 0;
+    transform: scale(0.3);
+  }
+  35% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.6);
+  }
+}
+
+@keyframes review-handoff-robots-hop {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  45% {
+    transform: translateY(-7px);
+  }
+}
+
 @theme inline {
   --font-heading: var(--font-sans);
   --font-sans: "Inter Variable", sans-serif;
@@ -722,9 +761,9 @@
 .dark {
   --background: oklch(0.141 0.006 67.1);
   --foreground: oklch(0.985 0 0);
-  --card: oklch(0.21 0.006 56.1);
+  --card: oklch(0.21 0.025 257);
   --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.21 0.006 56.1);
+  --popover: oklch(0.21 0.025 257);
   --popover-foreground: oklch(0.985 0 0);
   --primary: oklch(0.92 0.005 84.2);
   --primary-foreground: oklch(0.21 0.006 56.1);
@@ -769,4 +808,61 @@
 
 .document-save-status-saved {
   animation: document-save-status-saved-fade 2s ease-out forwards;
+}
+
+/*
+ * Review layout grid: a single document column that rests centered (no
+ * comments) or shifted-left with a review rail (comments present).
+ *
+ * The visible motion is FLIP-driven by useReviewLayoutShiftAnimation. The grid
+ * moves to its next resting layout immediately, then a temporary inverse
+ * translate animates back to zero. This avoids relying on grid-template-columns
+ * interpolation while the first comment UI mounts.
+ *
+ * Below the breakpoint the shell falls back to a simple stacked column.
+ */
+.review-layout-grid {
+  --review-layout-shift-x: 0px;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  transform: translateX(var(--review-layout-shift-x));
+}
+
+@media (min-width: 1100px) {
+  .review-layout-grid {
+    display: grid;
+    /* comments present: document on the left, fixed-width rail on the right */
+    --review-rail-width: 18rem;
+    grid-template-columns: minmax(0, 46.5rem) var(--review-rail-width);
+    justify-content: center;
+    align-items: start;
+    column-gap: 2rem;
+  }
+
+  /* no comments: rail collapses to nothing and the document re-centers */
+  .review-layout-grid.review-layout-grid--centered {
+    --review-rail-width: 0rem;
+    column-gap: 0rem;
+  }
+
+  .review-layout-grid > .review-layout-main {
+    grid-column: 1;
+  }
+
+  .review-layout-grid > .review-layout-rail {
+    grid-column: 2;
+    min-width: 0;
+  }
+}
+
+.review-layout-grid.review-layout-grid--animating {
+  transition: transform 180ms cubic-bezier(0.4, 0, 0.2, 1);
+  will-change: transform;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .review-layout-grid {
+    transition: none;
+  }
 }

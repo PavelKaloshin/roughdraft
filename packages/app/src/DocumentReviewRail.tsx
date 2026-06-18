@@ -33,6 +33,8 @@ import { SUGGESTED_PARAGRAPH_SENTINEL } from "./editor-extensions";
 import { cn } from "./lib/utils";
 import type { DraftSuggestionState } from "./PageCard";
 
+const SUGGESTION_QUOTE_PREVIEW_LIMIT = 140;
+
 export interface CriticChangeRailItem {
   changeId: string;
   change: CriticChangeAttrs;
@@ -69,6 +71,7 @@ interface DocumentReviewRailProps {
   onFocusSuggestion: (changeId: string) => void;
   onHoverSuggestion: (changeId: string | null) => void;
   pendingFocusCommentId?: string | null;
+  newCommentDraftIds?: string[];
   onAutoFocusComment?: (commentId: string) => void;
   draftSuggestion?: DraftSuggestionState | null;
   onDraftSuggestionTextChange?: (text: string) => void;
@@ -113,16 +116,22 @@ function getSuggestionRootComment(
   };
 }
 
+function truncateSuggestionQuote(text: string) {
+  if (text.length <= SUGGESTION_QUOTE_PREVIEW_LIMIT) return text;
+  return `${text.slice(0, SUGGESTION_QUOTE_PREVIEW_LIMIT)}...`;
+}
+
 function renderQuotedSuggestionText(text: string, fallback: string) {
   const withoutParagraphSentinels = text.replaceAll(
     SUGGESTED_PARAGRAPH_SENTINEL,
     "",
   );
-  const displayText =
+  const fullDisplayText =
     withoutParagraphSentinels.trim() ||
     (text.includes(SUGGESTED_PARAGRAPH_SENTINEL)
       ? "Inserted paragraph"
       : fallback);
+  const displayText = truncateSuggestionQuote(fullDisplayText);
 
   return (
     <span className="italic text-slate-600 dark:text-slate-400">
@@ -198,6 +207,7 @@ export function DocumentReviewRail({
   onFocusSuggestion,
   onHoverSuggestion,
   pendingFocusCommentId = null,
+  newCommentDraftIds = [],
   onAutoFocusComment,
   draftSuggestion = null,
   onDraftSuggestionTextChange,
@@ -472,6 +482,7 @@ export function DocumentReviewRail({
                   onFocusComment={onFocusComment}
                   onHoverComment={onHoverComment}
                   pendingFocusCommentId={pendingFocusCommentId}
+                  newCommentDraftIds={newCommentDraftIds}
                   onAutoFocusComment={onAutoFocusComment}
                 />
               </div>
@@ -700,6 +711,7 @@ export function DocumentReviewRail({
                   onHoverComment(commentId);
                 }}
                 pendingFocusCommentId={pendingFocusCommentId}
+                newCommentDraftIds={newCommentDraftIds}
                 onAutoFocusComment={onAutoFocusComment}
                 renderCommentContent={renderCommentContent}
                 getCommentActions={getCommentActions}

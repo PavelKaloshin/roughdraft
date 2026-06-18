@@ -38,6 +38,7 @@ interface CommentEditorListProps {
   onFocusComment?: (commentId: string) => void;
   onReplyComment?: (commentId: string) => void;
   pendingFocusCommentId?: string | null;
+  newCommentDraftIds?: string[];
   onAutoFocusComment?: (commentId: string) => void;
   renderCommentContent?: (context: CommentContentRenderContext) => ReactNode;
   getCommentActions?: (
@@ -49,6 +50,7 @@ export interface CommentActionDefinition {
   key: string;
   label: string;
   tone?: "neutral" | "danger";
+  presentation?: "default" | "popover";
   icon: ReactNode;
   compact?: boolean;
   onClick: (event: MouseEvent) => void;
@@ -103,6 +105,7 @@ export function CommentEditorList({
   onFocusComment,
   onReplyComment,
   pendingFocusCommentId = null,
+  newCommentDraftIds = [],
   onAutoFocusComment,
   renderCommentContent,
   getCommentActions,
@@ -281,7 +284,9 @@ export function CommentEditorList({
           variant={variant}
           interactive={interactive}
           drafts={drafts}
+          newCommentDraftIds={newCommentDraftIds}
           editingCommentIds={editingCommentIds}
+          pendingFocusCommentId={pendingFocusCommentId}
           selectedCommentId={selectedCommentId}
           hoveredCommentId={hoveredCommentId}
           textareaRefs={textareaRefs}
@@ -317,7 +322,9 @@ interface CommentThreadNodeProps {
   variant: "banner" | "rail";
   interactive: boolean;
   drafts: Record<string, string>;
+  newCommentDraftIds: string[];
   editingCommentIds: string[];
+  pendingFocusCommentId: string | null;
   selectedCommentId: string | null;
   hoveredCommentId: string | null;
   textareaRefs: MutableRefObject<Map<string, HTMLTextAreaElement>>;
@@ -337,16 +344,17 @@ interface CommentThreadNodeProps {
   onChangeDraft: (commentId: string, nextContent: string) => void;
 }
 
-const COMMENT_TREE_INDENT = 20;
-const COMMENT_TREE_ELBOW_TOP = 14;
-const COMMENT_TREE_ROW_GAP = 12;
-const COMMENT_AVATAR_SIZE = 28;
-const COMMENT_AVATAR_CENTER = 16;
+const COMMENT_TREE_INDENT = 16;
+const COMMENT_TREE_ELBOW_TOP = 12;
+const COMMENT_TREE_ROW_GAP = 10;
+const COMMENT_AVATAR_SIZE = 20;
+const COMMENT_AVATAR_CENTER = 12;
 
 function CommentActionButton({
   label,
   testId,
   tone = "neutral",
+  presentation = "default",
   icon,
   compact = false,
   className,
@@ -355,6 +363,7 @@ function CommentActionButton({
   label: string;
   testId?: string;
   tone?: "neutral" | "danger";
+  presentation?: "default" | "popover";
   icon: ReactNode;
   compact?: boolean;
   className?: string;
@@ -368,12 +377,16 @@ function CommentActionButton({
       variant="ghost"
       size={compact ? "icon-xs" : "sm"}
       className={cn(
-        compact
-          ? "rounded-full border border-transparent transition-colors duration-150"
-          : "h-7 rounded-full border border-transparent px-2.5 text-[11px] font-medium tracking-[0.08em] uppercase transition-colors duration-150",
-        tone === "danger"
-          ? "text-stone-400 hover:bg-rose-100 hover:text-rose-700 dark:text-stone-500 dark:hover:bg-rose-900/40 dark:hover:text-rose-400"
-          : "text-stone-400 hover:bg-[#DED8CE]/45 hover:text-stone-600 dark:text-stone-500 dark:hover:bg-slate-700 dark:hover:text-stone-300",
+        presentation === "popover" && !compact
+          ? "h-9 w-full rounded-xl bg-[#E8E3DB] px-3 py-2 text-sm font-bold normal-case tracking-normal text-black shadow-[inset_0_1px_0_rgba(255,251,245,0.72)] hover:bg-[#ded8ce] hover:text-black dark:bg-slate-700 dark:text-slate-100 dark:shadow-[inset_0_1px_0_rgba(255,255,255,0.08)] dark:hover:bg-slate-600 dark:hover:text-slate-100"
+          : compact
+            ? "rounded-full border border-transparent transition-colors duration-150"
+            : "h-7 rounded-full border border-transparent px-2.5 text-[11px] font-medium tracking-[0.08em] uppercase transition-colors duration-150",
+        presentation === "popover"
+          ? ""
+          : tone === "danger"
+            ? "text-stone-400 hover:bg-rose-100 hover:text-rose-700 dark:text-stone-500 dark:hover:bg-rose-900/40 dark:hover:text-rose-400"
+            : "text-stone-400 hover:bg-[#DED8CE]/45 hover:text-stone-600 dark:text-stone-500 dark:hover:bg-slate-700 dark:hover:text-stone-300",
         className,
       )}
       onPointerDown={(event) => event.stopPropagation()}
@@ -403,7 +416,9 @@ function CommentThreadNode({
   variant,
   interactive,
   drafts,
+  newCommentDraftIds,
   editingCommentIds,
+  pendingFocusCommentId,
   selectedCommentId,
   hoveredCommentId,
   textareaRefs,
@@ -454,8 +469,13 @@ function CommentThreadNode({
     variant === "banner"
       ? "bg-[#DED8CE]/90 dark:bg-slate-600/90"
       : "bg-[#DED8CE]/85 dark:bg-slate-600/85";
-  const defaultContent =
-    comment.content.trim().length > 0 ? comment.content : "Empty comment";
+  const hasCommentContent = comment.content.trim().length > 0;
+  const defaultContent = hasCommentContent ? comment.content : "Empty comment";
+  const isNewRootCommentDraft =
+    isEditing &&
+    depth === 0 &&
+    (comment.id === pendingFocusCommentId ||
+      newCommentDraftIds.includes(comment.id));
   const renderedContent =
     renderCommentContent?.({
       comment,
@@ -468,6 +488,7 @@ function CommentThreadNode({
         {
           key: "save",
           label: "Save",
+          presentation: isNewRootCommentDraft ? "popover" : "default",
           icon: <Check className="size-3.5" />,
           onClick: (event) => {
             event.stopPropagation();
@@ -517,13 +538,16 @@ function CommentThreadNode({
           },
         },
       ];
+  const defaultVisibleActions = isNewRootCommentDraft
+    ? defaultActions.filter((action) => action.key !== "cancel")
+    : defaultActions;
   const actions =
     getCommentActions?.({
       comment,
       depth,
       isEditing,
-      defaultActions,
-    }) ?? defaultActions;
+      defaultActions: defaultVisibleActions,
+    }) ?? defaultVisibleActions;
   const ancestorGuideOffsets = parentLines.reduce<number[]>(
     (offsets, showLine, guideIndex) => {
       if (showLine) {
@@ -614,7 +638,7 @@ function CommentThreadNode({
           </div>
         ) : null}
         <div className="min-w-0 flex-1">
-          <div className="relative grid grid-cols-[2rem_minmax(0,1fr)] gap-x-2">
+          <div className="relative grid grid-cols-[1.5rem_minmax(0,1fr)] gap-x-1.5">
             {interactive && isRootThread ? (
               <CommentActionButton
                 label="Delete thread"
@@ -647,27 +671,28 @@ function CommentThreadNode({
             <div className="relative flex justify-center">
               <div
                 className={cn(
-                  "relative z-10 flex size-7 items-center justify-center rounded-full border shadow-[0_1px_2px_rgba(15,23,42,0.08)]",
+                  "relative z-10 flex size-5 items-center justify-center rounded-full border shadow-[0_1px_2px_rgba(15,23,42,0.08)]",
                   avatarTone,
                 )}
                 title={authorLabel}
               >
-                <AuthorIcon className="size-3.5 shrink-0" />
+                <AuthorIcon className="size-2.5 shrink-0" />
               </div>
             </div>
             <div
               className={cn(
                 "min-w-0 rounded-xl px-0.5",
-                isRootThread && interactive && "pr-7",
+                isRootThread && interactive && !isEditing && "pr-7",
                 bodyTone,
               )}
             >
-              <div className="truncate text-[13px] font-semibold text-slate-900 dark:text-slate-100">
+              <div className="truncate text-xs font-semibold text-slate-900 dark:text-slate-100">
                 {authorLabel}
               </div>
               <div
                 className={cn(
-                  "mt-1 text-sm leading-6 whitespace-pre-wrap",
+                  "mt-0.5 text-[13px] leading-5 whitespace-pre-wrap",
+                  !hasCommentContent && "italic",
                   variant === "banner"
                     ? "text-slate-800 dark:text-slate-200"
                     : "text-slate-700 dark:text-slate-300",
@@ -691,7 +716,7 @@ function CommentThreadNode({
                   }
                   rows={1}
                   className={cn(
-                    "mt-1 min-h-12 px-3 py-2 text-sm leading-6 md:text-sm md:leading-6",
+                    "mt-2 min-h-12 px-2.5 py-2 text-[13px] leading-5 md:text-[13px] md:leading-5",
                     variant === "banner"
                       ? "border-amber-200 dark:border-amber-700 bg-white/90 dark:bg-slate-800/90 text-slate-800 dark:text-slate-200"
                       : "border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 shadow-none",
@@ -735,6 +760,7 @@ function CommentThreadNode({
                     label={action.label}
                     testId={`comment-${variant}-${comment.id}-action-${action.key}`}
                     tone={action.tone}
+                    presentation={action.presentation}
                     icon={action.icon}
                     compact={action.compact}
                     onClick={action.onClick}
@@ -746,7 +772,7 @@ function CommentThreadNode({
         </div>
       </div>
       {hasReplies ? (
-        <div className="mt-3 space-y-3">
+        <div className="mt-2.5 space-y-2.5">
           {replies.map((reply, replyIndex) => (
             <CommentThreadNode
               key={reply.comment.id}
@@ -758,7 +784,9 @@ function CommentThreadNode({
               variant={variant}
               interactive={interactive}
               drafts={drafts}
+              newCommentDraftIds={newCommentDraftIds}
               editingCommentIds={editingCommentIds}
+              pendingFocusCommentId={pendingFocusCommentId}
               selectedCommentId={selectedCommentId}
               hoveredCommentId={hoveredCommentId}
               textareaRefs={textareaRefs}

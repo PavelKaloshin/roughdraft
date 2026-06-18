@@ -4,6 +4,7 @@ import {
   CheckCheck,
   ChevronDown,
   CodeXml,
+  Copy,
   Eye,
   Loader2,
   MessageSquarePlus,
@@ -33,16 +34,20 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "./components/ui/tooltip";
-import { criticMarkdownHasReviewRail } from "./critic-markup";
+import {
+  criticMarkdownHasReviewRail,
+  criticMarkdownToRenderedHtml,
+} from "./critic-markup";
 import { cn } from "./lib/utils";
-import { toHtml } from "./markdown";
 import {
   type DocumentInteractionMode,
   type DocumentSaveController,
   type DocumentSaveState,
   PageCard,
 } from "./PageCard";
+import { RobotsHighFiveToy } from "./RobotsHighFiveToy";
 import type { CompleteReviewOptions, Page, StorageBackend } from "./storage";
+import { useReviewLayoutShiftAnimation } from "./useReviewLayoutShiftAnimation";
 
 type DiskChangeState = "clean" | "changed" | "conflict" | "paused";
 type ReviewHandoffState =
@@ -52,6 +57,59 @@ type ReviewHandoffState =
   | "undelivered"
   | "error";
 type FileCopyAction = "path" | "filename" | "markdown" | "rich-text";
+const FILE_COPY_PREVIEW_MAX_LENGTH = 34;
+const reviewCompleteTitles = [
+  "Great work!",
+  "Nice one!",
+  "Well done!",
+  "All set!",
+  "Review complete!",
+  "That’ll do!",
+  "Lovely stuff!",
+  "Job done!",
+  "Done and dusted!",
+  "Nailed it!",
+  "Good stuff!",
+  "Sorted!",
+  "Cracking work!",
+  "Top work!",
+  "Brilliant!",
+  "Ace!",
+  "Spot on!",
+  "Beauty!",
+  "Too easy!",
+  "Good on ya!",
+  "You’re golden!",
+  "That’s the ticket!",
+  "And that’s that!",
+  "Wrapped!",
+  "In the bag!",
+  "Shipshape!",
+  "Right as rain!",
+] as const;
+type ReviewCompleteTitle = (typeof reviewCompleteTitles)[number];
+
+function buildReviewHandoffCopyMessage(documentPath: string) {
+  return `I am done reviewing this file: ${documentPath}`;
+}
+
+function getRandomReviewCompleteTitle(random: () => number = Math.random) {
+  const index = Math.floor(random() * reviewCompleteTitles.length);
+  return reviewCompleteTitles[Math.min(index, reviewCompleteTitles.length - 1)];
+}
+
+function getRandomReviewCompleteTitleExcept(
+  currentTitle: ReviewCompleteTitle,
+  random: () => number = Math.random,
+): ReviewCompleteTitle {
+  const otherTitles = reviewCompleteTitles.filter(
+    (title) => title !== currentTitle,
+  );
+  if (otherTitles.length === 0) return currentTitle;
+
+  const index = Math.floor(random() * otherTitles.length);
+  return otherTitles[Math.min(index, otherTitles.length - 1)];
+}
 
 const documentInteractionModeOptions = [
   { value: "editing", label: "Editing", Icon: PencilLine },
@@ -85,35 +143,88 @@ const conflictNoticeCopy: Record<
 };
 
 const fileCopyMenuOptions = [
-  { action: "path", label: "Copy path" },
-  { action: "filename", label: "Copy filename" },
-  { action: "markdown", label: "Copy markdown" },
-  { action: "rich-text", label: "Copy rich text" },
+  { action: "path", label: "Path" },
+  { action: "filename", label: "Filename" },
+  { action: "markdown", label: "Markdown" },
+  { action: "rich-text", label: "Rich text" },
 ] satisfies {
   action: FileCopyAction;
   label: string;
 }[];
 
+function formatFileCopyPreview(value: string) {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= FILE_COPY_PREVIEW_MAX_LENGTH) return normalized;
+  return `${normalized.slice(0, FILE_COPY_PREVIEW_MAX_LENGTH - 1)}...`;
+}
+
 async function writePlainTextToClipboard(text: string) {
   await navigator.clipboard.writeText(text);
+}
+
+function markdownToPlainText(markdown: string) {
+  const template = document.createElement("template");
+  template.innerHTML = markdownToCleanRichHtml(markdown);
+  return (template.content.textContent ?? "").trimEnd();
+}
+
+function unwrapElement(element: HTMLElement) {
+  element.replaceWith(...element.childNodes);
+}
+
+function markdownToCleanRichHtml(markdown: string) {
+  const template = document.createElement("template");
+  template.innerHTML = criticMarkdownToRenderedHtml(markdown).html;
+
+  for (const element of Array.from(
+    template.content.querySelectorAll<HTMLElement>(
+      "[data-comment-anchorless='true']",
+    ),
+  )) {
+    element.remove();
+  }
+
+  for (const element of Array.from(
+    template.content.querySelectorAll<HTMLElement>("[data-comment-ids]"),
+  )) {
+    unwrapElement(element);
+  }
+
+  for (const element of Array.from(
+    template.content.querySelectorAll<HTMLElement>(
+      "[data-critic-change-kind='addition'], [data-critic-change-kind='substitution-new']",
+    ),
+  )) {
+    element.remove();
+  }
+
+  for (const element of Array.from(
+    template.content.querySelectorAll<HTMLElement>("[data-critic-change-kind]"),
+  )) {
+    unwrapElement(element);
+  }
+
+  return template.innerHTML;
 }
 
 async function writeRichTextToClipboard(markdown: string) {
   const clipboardWithRichText = navigator.clipboard as Clipboard & {
     write?: Clipboard["write"];
   };
+  const html = markdownToCleanRichHtml(markdown);
+  const plainText = markdownToPlainText(markdown);
 
   if (clipboardWithRichText.write && typeof ClipboardItem !== "undefined") {
     await clipboardWithRichText.write([
       new ClipboardItem({
-        "text/html": new Blob([toHtml(markdown)], { type: "text/html" }),
-        "text/plain": new Blob([markdown], { type: "text/plain" }),
+        "text/html": new Blob([html], { type: "text/html" }),
+        "text/plain": new Blob([plainText], { type: "text/plain" }),
       }),
     ]);
     return;
   }
 
-  await writePlainTextToClipboard(markdown);
+  await writePlainTextToClipboard(plainText);
 }
 
 function getSaveStatusViewModel(
@@ -238,9 +349,38 @@ export function isReviewHandoffDisabled({
   );
 }
 
+export function getReviewHandoffButtonLabel({
+  reviewHandoffState,
+  documentChangedSinceOpen,
+}: {
+  reviewHandoffState: ReviewHandoffState;
+  documentChangedSinceOpen: boolean;
+}) {
+  return reviewHandoffState === "notifying"
+    ? "Sending"
+    : reviewHandoffState === "notified"
+      ? "Sent"
+      : reviewHandoffState === "error" || reviewHandoffState === "undelivered"
+        ? "Not sent"
+        : documentChangedSinceOpen
+          ? "I'm done"
+          : "Approve";
+}
+
+export function shouldLatchDocumentChangedSinceOpen({
+  isDirty,
+  documentChangeTrackingReady,
+}: {
+  isDirty: boolean;
+  documentChangeTrackingReady: boolean;
+}) {
+  return isDirty && documentChangeTrackingReady;
+}
+
 interface DocumentWorkspaceProps {
   documentPage: Page | null;
   activeDocumentPath: string | null;
+  documentCopyPath: string | null;
   documentFilenameLabel: string;
   documentEditorViewMode: DocumentEditorViewMode;
   onDocumentEditorViewModeChange: (mode: DocumentEditorViewMode) => void;
@@ -262,6 +402,7 @@ interface DocumentWorkspaceProps {
 export function DocumentWorkspace({
   documentPage,
   activeDocumentPath,
+  documentCopyPath,
   documentFilenameLabel,
   documentEditorViewMode,
   onDocumentEditorViewModeChange,
@@ -278,19 +419,26 @@ export function DocumentWorkspace({
   backend,
 }: DocumentWorkspaceProps) {
   const [documentInteractionMode, setDocumentInteractionMode] =
-    useState<DocumentInteractionMode>("editing");
+    useState<DocumentInteractionMode>("suggesting");
   const [saveState, setSaveState] = useState<DocumentSaveState>("saved");
   const [reviewHandoffState, setReviewHandoffState] =
     useState<ReviewHandoffState>("idle");
   const [reviewWatcherCount, setReviewWatcherCount] = useState(0);
   const [reviewHandoffPopoverOpen, setReviewHandoffPopoverOpen] =
     useState(false);
+  const [reviewCompleteTitle, setReviewCompleteTitle] = useState(() =>
+    getRandomReviewCompleteTitle(),
+  );
   const [fileCopyMenuOpen, setFileCopyMenuOpen] = useState(false);
   const [copiedFileAction, setCopiedFileAction] =
     useState<FileCopyAction | null>(null);
   const [overallComment, setOverallComment] = useState("");
+  const [documentChangedSinceOpen, setDocumentChangedSinceOpen] =
+    useState(false);
   const sawNoWatcherAfterNotifiedRef = useRef(false);
+  const copiedFileActionTimeoutRef = useRef<number | null>(null);
   const saveControllerRef = useRef<DocumentSaveController | null>(null);
+  const documentChangeTrackingReadyRef = useRef(false);
 
   const handleSaveStateChange = useCallback(
     (state: DocumentSaveState) => {
@@ -305,6 +453,8 @@ export function DocumentWorkspace({
       !!documentPage?.content &&
       criticMarkdownHasReviewRail(documentPage.content),
   );
+  const documentHeaderRef =
+    useReviewLayoutShiftAnimation<HTMLDivElement>(documentHasComments);
 
   useEffect(() => {
     setDocumentHasComments(
@@ -316,7 +466,14 @@ export function DocumentWorkspace({
   useEffect(() => {
     const documentIdentity = `${activeDocumentPath ?? ""}:${documentPage?.id ?? ""}`;
     if (!documentIdentity) return;
+    documentChangeTrackingReadyRef.current = false;
     setReviewHandoffState("idle");
+    setReviewHandoffPopoverOpen(false);
+    setDocumentChangedSinceOpen(false);
+    const readyTimer = window.setTimeout(() => {
+      documentChangeTrackingReadyRef.current = true;
+    }, 0);
+    return () => window.clearTimeout(readyTimer);
   }, [activeDocumentPath, documentPage?.id]);
 
   useEffect(() => {
@@ -368,6 +525,22 @@ export function DocumentWorkspace({
       setReviewHandoffState("idle");
     }
   }, [reviewHandoffState, reviewWatcherCount]);
+
+  useEffect(() => {
+    if (reviewHandoffState === "notified") {
+      setReviewCompleteTitle((currentTitle) =>
+        getRandomReviewCompleteTitleExcept(currentTitle),
+      );
+    }
+  }, [reviewHandoffState]);
+
+  useEffect(() => {
+    return () => {
+      if (copiedFileActionTimeoutRef.current !== null) {
+        window.clearTimeout(copiedFileActionTimeoutRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!documentPage) return;
@@ -427,6 +600,21 @@ export function DocumentWorkspace({
     [activeDocumentPath, onCompleteReview, reviewHandoffState],
   );
 
+  const handleDocumentDirtyStateChange = useCallback(
+    (isDirty: boolean) => {
+      if (
+        shouldLatchDocumentChangedSinceOpen({
+          isDirty,
+          documentChangeTrackingReady: documentChangeTrackingReadyRef.current,
+        })
+      ) {
+        setDocumentChangedSinceOpen(true);
+      }
+      onDocumentDirtyStateChange(isDirty);
+    },
+    [onDocumentDirtyStateChange],
+  );
+
   const handleCopyFileMenuAction = useCallback(
     async (action: FileCopyAction) => {
       if (!documentPage) return;
@@ -435,7 +623,7 @@ export function DocumentWorkspace({
         Exclude<FileCopyAction, "rich-text">,
         string
       > = {
-        path: activeDocumentPath ?? documentFilenameLabel,
+        path: documentCopyPath ?? activeDocumentPath ?? documentFilenameLabel,
         filename: documentFilenameLabel,
         markdown: documentPage.content,
       };
@@ -448,19 +636,34 @@ export function DocumentWorkspace({
         }
 
         setCopiedFileAction(action);
-        window.setTimeout(() => setCopiedFileAction(null), 1400);
-        setFileCopyMenuOpen(false);
+        if (copiedFileActionTimeoutRef.current !== null) {
+          window.clearTimeout(copiedFileActionTimeoutRef.current);
+        }
+        copiedFileActionTimeoutRef.current = window.setTimeout(() => {
+          setCopiedFileAction(null);
+          copiedFileActionTimeoutRef.current = null;
+        }, 3000);
       } catch (error) {
         console.error("Failed to copy document data:", error);
       }
     },
-    [activeDocumentPath, documentFilenameLabel, documentPage],
+    [activeDocumentPath, documentCopyPath, documentFilenameLabel, documentPage],
   );
 
   const editorViewModeToggleLabel =
     documentEditorViewMode === "rich-text"
       ? "Switch to code view"
       : "Switch to rich text view";
+  const fileCopyPreviewByAction: Record<FileCopyAction, string> = {
+    path: formatFileCopyPreview(
+      documentCopyPath ?? activeDocumentPath ?? documentFilenameLabel,
+    ),
+    filename: formatFileCopyPreview(documentFilenameLabel),
+    markdown: formatFileCopyPreview(documentPage?.content ?? ""),
+    "rich-text": formatFileCopyPreview(
+      documentPage ? markdownToPlainText(documentPage.content) : "",
+    ),
+  };
   const activeDocumentInteractionMode = documentInteractionModeOptions.find(
     (option) => option.value === documentInteractionMode,
   );
@@ -473,14 +676,10 @@ export function DocumentWorkspace({
   const showReviewHandoffButton =
     !!activeDocumentPath &&
     (reviewWatcherCount > 0 || reviewHandoffState !== "idle");
-  const reviewHandoffButtonLabel =
-    reviewHandoffState === "notifying"
-      ? "Sending"
-      : reviewHandoffState === "notified"
-        ? "Sent"
-        : reviewHandoffState === "error" || reviewHandoffState === "undelivered"
-          ? "Not sent"
-          : "I'm done";
+  const reviewHandoffButtonLabel = getReviewHandoffButtonLabel({
+    reviewHandoffState,
+    documentChangedSinceOpen,
+  });
   const ReviewHandoffButtonIcon =
     reviewHandoffState === "notifying"
       ? Loader2
@@ -492,18 +691,23 @@ export function DocumentWorkspace({
       ? "No agent is watching now"
       : reviewHandoffState === "error"
         ? "Could not notify agent"
-        : "Your agent is now working";
+        : reviewCompleteTitle;
   const reviewHandoffStatusBody =
     reviewHandoffState === "undelivered"
       ? "The handoff was not delivered because the watcher is no longer connected."
       : reviewHandoffState === "error"
         ? "Roughdraft could not send the handoff. Check that the local server is still running."
-        : "It will take the appropriate next action, including replying to comments, questions, and suggestions, and/or directly editing the doc.";
+        : null;
+  const reviewHandoffCopyMessage = buildReviewHandoffCopyMessage(
+    activeDocumentPath ?? documentFilenameLabel,
+  );
   const reviewHandoffDisabled = isReviewHandoffDisabled({
     saveState,
     documentDiskChangeState,
     reviewHandoffState,
   });
+  const reviewHandoffButtonDisabled =
+    reviewHandoffDisabled && reviewHandoffState !== "notified";
   const trimmedOverallComment = overallComment.trim();
 
   return (
@@ -514,6 +718,17 @@ export function DocumentWorkspace({
       )}
     >
       <RemoteSessionBanner backend={backend} />
+      {documentPage ? (
+        <div
+          className="fixed top-3 left-3 z-[60]"
+          data-testid="document-save-status-corner"
+        >
+          <DocumentSaveStatusIndicator
+            saveState={saveState}
+            diskChangeState={documentDiskChangeState}
+          />
+        </div>
+      ) : null}
       <div
         className={cn(
           "fixed right-3 z-[60] flex max-w-[min(16rem,calc(100vw-1rem))] flex-col items-end gap-1.5",
@@ -528,20 +743,32 @@ export function DocumentWorkspace({
               open={reviewHandoffPopoverOpen}
               onOpenChange={setReviewHandoffPopoverOpen}
             >
-              <div className="relative flex items-center overflow-hidden rounded-[7px] shadow-[0_10px_28px_rgba(0,0,0,0.18)] after:pointer-events-none after:absolute after:top-px after:right-8 after:bottom-px after:z-10 after:w-px after:bg-[#444] after:content-[''] dark:after:bg-[#444]">
+              <div
+                data-testid="review-handoff-split-button"
+                className={cn(
+                  "relative flex items-center overflow-hidden rounded-[7px] shadow-[0_10px_28px_rgba(0,0,0,0.18)] transition-opacity after:pointer-events-none after:absolute after:top-px after:right-8 after:bottom-px after:z-10 after:w-px after:bg-[#4a4038] after:content-[''] dark:after:bg-slate-600",
+                  reviewHandoffDisabled && "opacity-50",
+                )}
+              >
                 <Button
                   type="button"
                   data-testid="review-handoff-button"
                   size="lg"
-                  className="h-9 rounded-r-none rounded-l-[7px] border-0 bg-black px-3 text-sm font-bold text-white hover:bg-black/85 focus-visible:ring-black/25 dark:bg-black dark:text-white dark:hover:bg-black/85 dark:focus-visible:ring-white/30"
-                  disabled={reviewHandoffDisabled}
-                  onClick={() =>
+                  className="h-9 rounded-r-none rounded-l-[7px] border-0 bg-[#2B2420] px-3 text-sm font-bold text-white hover:bg-[#3a322b] focus-visible:ring-slate-300 disabled:opacity-100 dark:bg-slate-700 dark:text-slate-100 dark:hover:bg-slate-600 dark:focus-visible:ring-slate-600"
+                  disabled={reviewHandoffButtonDisabled}
+                  aria-disabled={reviewHandoffButtonDisabled || undefined}
+                  onClick={() => {
+                    if (reviewHandoffState === "notified") {
+                      setReviewHandoffPopoverOpen(true);
+                      return;
+                    }
+
                     void handleCompleteReview(
                       trimmedOverallComment
                         ? { overallComment: trimmedOverallComment }
                         : undefined,
-                    )
-                  }
+                    );
+                  }}
                 >
                   {ReviewHandoffButtonIcon ? (
                     <ReviewHandoffButtonIcon
@@ -559,7 +786,7 @@ export function DocumentWorkspace({
                       type="button"
                       data-testid="review-handoff-comment-trigger"
                       size="icon-lg"
-                      className="h-9 w-8 rounded-l-none rounded-r-[7px] border-0 bg-black text-white hover:bg-black/85 focus-visible:ring-black/25 dark:bg-black dark:text-white dark:hover:bg-black/85 dark:focus-visible:ring-white/30"
+                      className="h-9 w-8 rounded-l-none rounded-r-[7px] border-0 bg-[#2B2420] text-white hover:bg-[#3a322b] focus-visible:ring-slate-300 disabled:opacity-100 dark:bg-slate-700 dark:text-slate-100 dark:hover:bg-slate-600 dark:focus-visible:ring-slate-600"
                       disabled={reviewHandoffDisabled}
                       aria-label="Add overall handoff comment"
                     >
@@ -569,6 +796,7 @@ export function DocumentWorkspace({
                 />
               </div>
               <PopoverContent
+                className={reviewHandoffState === "idle" ? undefined : "pt-0"}
                 aria-label={
                   reviewHandoffState === "idle"
                     ? "Review handoff comment"
@@ -602,7 +830,7 @@ export function DocumentWorkspace({
                         }
                         maxLength={4000}
                         rows={4}
-                        className="min-h-24 resize-y"
+                        className="min-h-24 resize-none"
                       />
                     </div>
                     <Button
@@ -617,24 +845,69 @@ export function DocumentWorkspace({
                     </Button>
                   </form>
                 ) : (
-                  <div className="flex items-start gap-3">
-                    <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full bg-black text-white dark:bg-white dark:text-black">
-                      {reviewHandoffState === "notifying" ? (
-                        <Loader2 className="size-4 animate-spin" />
-                      ) : reviewHandoffState === "error" ||
-                        reviewHandoffState === "undelivered" ? (
-                        <AlertTriangle className="size-4" />
-                      ) : (
-                        <CheckCheck className="size-4" />
-                      )}
-                    </span>
-                    <div>
-                      <div className="text-sm font-semibold text-stone-950 dark:text-slate-50">
-                        {reviewHandoffStatusTitle}
+                  <div>
+                    <div className="mb-3 flex h-[170px] items-center justify-center overflow-hidden">
+                      <RobotsHighFiveToy
+                        onHighFive={() =>
+                          setReviewCompleteTitle((currentTitle) =>
+                            getRandomReviewCompleteTitleExcept(currentTitle),
+                          )
+                        }
+                      />
+                    </div>
+                    <div className="flex items-start gap-3">
+                      {reviewHandoffState === "notifying" ||
+                      reviewHandoffState === "error" ||
+                      reviewHandoffState === "undelivered" ? (
+                        <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full bg-black text-white dark:bg-white dark:text-black">
+                          {reviewHandoffState === "notifying" ? (
+                            <Loader2 className="size-4 animate-spin" />
+                          ) : (
+                            <AlertTriangle className="size-4" />
+                          )}
+                        </span>
+                      ) : null}
+                      <div>
+                        <div className="text-xl font-semibold leading-6 text-stone-950 dark:text-slate-50">
+                          {reviewHandoffStatusTitle}
+                        </div>
+                        {reviewHandoffStatusBody ? (
+                          <p className="mt-1 text-sm leading-6 text-stone-600 dark:text-slate-300">
+                            {reviewHandoffStatusBody}
+                          </p>
+                        ) : (
+                          <div className="mt-1">
+                            <p className="text-sm leading-[1.32rem] text-stone-500 dark:text-slate-400">
+                              Your agent is now working in the background on
+                              this, in all likelihood. If our signal didn't make
+                              it, just{" "}
+                              <button
+                                type="button"
+                                data-testid="review-handoff-copy-message"
+                                className="font-normal text-inherit underline decoration-stone-300 underline-offset-4 hover:decoration-stone-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-stone-950/25 dark:decoration-slate-600 dark:hover:decoration-slate-200 dark:focus-visible:ring-slate-50/30"
+                                onClick={() =>
+                                  void writePlainTextToClipboard(
+                                    reviewHandoffCopyMessage,
+                                  )
+                                }
+                              >
+                                click here
+                              </button>{" "}
+                              to copy a line you can send it to keep going.
+                            </p>
+                            <Button
+                              type="button"
+                              data-testid="review-handoff-close-window"
+                              size="lg"
+                              variant="outline"
+                              className="mt-4 w-full rounded-[7px] text-sm font-semibold"
+                              onClick={() => window.close()}
+                            >
+                              Close window
+                            </Button>
+                          </div>
+                        )}
                       </div>
-                      <p className="mt-1 text-sm leading-6 text-stone-600 dark:text-slate-300">
-                        {reviewHandoffStatusBody}
-                      </p>
                     </div>
                   </div>
                 )}
@@ -706,14 +979,15 @@ export function DocumentWorkspace({
       <div className="mx-auto min-h-full max-w-[1080px]">
         {documentPage ? (
           <div
+            ref={documentHeaderRef}
             data-testid="document-page-header"
             className={cn(
-              "document-page-shell mb-2 flex flex-col gap-6 text-[0.62rem] font-medium tracking-[0.01em] text-stone-400 min-[1100px]:grid min-[1100px]:grid-cols-[minmax(0,46.5rem)_minmax(24rem,1fr)] min-[1100px]:items-start min-[1100px]:justify-between min-[1100px]:gap-8",
+              "review-layout-grid document-page-shell mb-2 text-[0.62rem] font-medium tracking-[0.01em] text-stone-400",
               !documentHasComments &&
-                "document-page-shell-no-comments min-[1100px]:grid-cols-[minmax(0,46.5rem)] min-[1100px]:justify-center",
+                "review-layout-grid--centered document-page-shell-no-comments",
             )}
           >
-            <div className="document-page-main w-full max-w-[46.5rem] min-w-0">
+            <div className="review-layout-main document-page-main w-full max-w-[46.5rem] min-w-0">
               <div className="flex w-full flex-wrap items-center gap-1.5 px-1">
                 <Tooltip>
                   <TooltipTrigger
@@ -721,12 +995,12 @@ export function DocumentWorkspace({
                       <button
                         type="button"
                         data-testid="document-editor-view-toggle"
-                        className="grid shrink-0 grid-cols-2 rounded-[999px] bg-[#E8E3DB] dark:bg-slate-700 px-[2px] pt-[3px] pb-[2px] shadow-[inset_0_1px_0_rgba(255,251,245,0.72)] dark:shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]"
+                        className="grid shrink-0 grid-cols-2 rounded-[999px] bg-[#E8E3DB] dark:bg-slate-800 px-[2px] pt-[3px] pb-[2px] shadow-[inset_0_1px_0_rgba(255,251,245,0.72)] dark:border-b dark:border-b-slate-800 dark:shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]"
                       >
                         <span
                           className={`flex w-[1.375rem] items-center justify-center rounded-full py-[2px] transition ${
                             documentEditorViewMode === "rich-text"
-                              ? "bg-[#FFFDFC] dark:bg-slate-500 text-stone-700 dark:text-white shadow-[0_1px_2px_rgba(41,37,36,0.12)]"
+                              ? "bg-[#FFFDFC] dark:bg-slate-600 text-stone-700 dark:text-white shadow-[0_1px_2px_rgba(41,37,36,0.12)]"
                               : "text-stone-500 dark:text-slate-400"
                           }`}
                         >
@@ -735,7 +1009,7 @@ export function DocumentWorkspace({
                         <span
                           className={`flex w-[1.375rem] items-center justify-center rounded-full py-[2px] transition ${
                             documentEditorViewMode === "code"
-                              ? "bg-[#FFFDFC] dark:bg-slate-500 text-stone-700 dark:text-white shadow-[0_1px_2px_rgba(41,37,36,0.12)]"
+                              ? "bg-[#FFFDFC] dark:bg-slate-600 text-stone-700 dark:text-white shadow-[0_1px_2px_rgba(41,37,36,0.12)]"
                               : "text-stone-500 dark:text-slate-400"
                           }`}
                         >
@@ -763,7 +1037,7 @@ export function DocumentWorkspace({
                       <button
                         type="button"
                         data-testid="document-file-menu-trigger"
-                        className="inline-flex min-w-0 max-w-full items-center gap-1 rounded-full px-1 py-0.5 font-mono text-[0.7rem] tracking-[0.01em] text-stone-400 outline-none transition hover:bg-[#EEE9E1] hover:text-stone-600 focus-visible:ring-2 focus-visible:ring-stone-300/70 dark:text-stone-500 dark:hover:bg-slate-800 dark:hover:text-stone-300 dark:focus-visible:ring-slate-600/70"
+                        className="inline-flex min-w-0 max-w-full items-center gap-1 rounded-full px-1 py-0.5 text-[0.8rem] font-medium tracking-[0.01em] text-stone-400 outline-none transition hover:text-stone-500 focus-visible:ring-2 focus-visible:ring-stone-300/70 dark:text-slate-400 dark:hover:text-slate-300 dark:focus-visible:ring-slate-600/70"
                         title={documentFilenameLabel}
                         aria-label="Document file actions"
                       >
@@ -780,8 +1054,9 @@ export function DocumentWorkspace({
                   <PopoverContent
                     aria-label="Document file actions"
                     data-testid="document-file-menu"
-                    className="w-44 p-1"
+                    className="w-56 p-1"
                     align="start"
+                    sideOffset={4}
                   >
                     <div className="flex flex-col">
                       {fileCopyMenuOptions.map(({ action, label }) => (
@@ -789,22 +1064,29 @@ export function DocumentWorkspace({
                           key={action}
                           type="button"
                           data-testid={`document-file-menu-${action}`}
-                          className="flex h-8 items-center justify-between rounded-md px-2 text-left text-[0.72rem] leading-none text-stone-700 outline-none transition hover:bg-[#EEE9E1] focus-visible:bg-[#EEE9E1] dark:text-stone-300 dark:hover:bg-slate-700 dark:focus-visible:bg-slate-700"
+                          className="flex items-start gap-2 rounded-md px-2 py-1.5 text-left text-[0.72rem] leading-none text-stone-700 outline-none transition hover:bg-[#EEE9E1] focus-visible:bg-[#EEE9E1] dark:text-stone-300 dark:hover:bg-slate-700 dark:focus-visible:bg-slate-700"
                           onClick={() => void handleCopyFileMenuAction(action)}
                         >
-                          <span>{label}</span>
+                          <Copy
+                            className="mt-[0.06rem] size-4 shrink-0 text-stone-500 dark:text-slate-400"
+                            aria-hidden="true"
+                          />
+                          <span className="grid min-w-0 flex-1 gap-1">
+                            <span className="truncate font-medium">
+                              {copiedFileAction === action ? "Copied!" : label}
+                            </span>
+                            <span className="truncate text-[0.66rem] leading-none text-stone-400 dark:text-slate-500">
+                              {fileCopyPreviewByAction[action]}
+                            </span>
+                          </span>
                           {copiedFileAction === action ? (
-                            <Check className="size-3 text-stone-500 dark:text-stone-400" />
+                            <Check className="mt-[0.06rem] ml-auto size-3 shrink-0 text-stone-500 dark:text-stone-400" />
                           ) : null}
                         </button>
                       ))}
                     </div>
                   </PopoverContent>
                 </Popover>
-                <DocumentSaveStatusIndicator
-                  saveState={saveState}
-                  diskChangeState={documentDiskChangeState}
-                />
                 <Tooltip>
                   <TooltipTrigger
                     render={
@@ -834,9 +1116,9 @@ export function DocumentWorkspace({
                     <SelectTrigger
                       data-testid="document-mode-trigger"
                       aria-label="Document mode"
-                      className="h-[1.5rem] px-1 font-mono text-[0.7rem] leading-[1.25rem] font-normal tracking-[0.01em] text-stone-400 dark:text-stone-500 hover:text-stone-500 dark:hover:text-stone-400"
+                      className="h-[1.5rem] gap-1.5 px-1 text-[0.8rem] leading-[1.25rem] font-medium tracking-[0.01em] text-stone-400 dark:text-slate-400 hover:text-stone-500 dark:hover:text-slate-300"
                     >
-                      <ActiveDocumentInteractionModeIcon className="size-[0.68rem]" />
+                      <ActiveDocumentInteractionModeIcon className="size-[0.8rem]" />
                       <span className="truncate">
                         {activeDocumentInteractionMode?.label}
                       </span>
@@ -844,9 +1126,16 @@ export function DocumentWorkspace({
                     <SelectContent>
                       {documentInteractionModeOptions.map(
                         ({ value, label, Icon }) => (
-                          <SelectItem key={value} value={value} label={label}>
-                            <Icon className="size-3 text-stone-500 dark:text-stone-400" />
-                            <SelectItemText>{label}</SelectItemText>
+                          <SelectItem
+                            key={value}
+                            value={value}
+                            label={label}
+                            className="text-[0.8rem]"
+                          >
+                            <Icon className="size-3 text-stone-500 dark:text-slate-400" />
+                            <SelectItemText className="font-medium">
+                              {label}
+                            </SelectItemText>
                           </SelectItem>
                         ),
                       )}
@@ -855,12 +1144,6 @@ export function DocumentWorkspace({
                 </div>
               </div>
             </div>
-            {documentHasComments ? (
-              <div
-                className="document-comment-rail pointer-events-none invisible hidden min-[1100px]:block"
-                aria-hidden="true"
-              />
-            ) : null}
           </div>
         ) : null}
         {documentPage ? (
@@ -876,7 +1159,7 @@ export function DocumentWorkspace({
               interactionMode={documentInteractionMode}
               backend={backend}
               onCommentRailPresenceChange={setDocumentHasComments}
-              onDirtyStateChange={onDocumentDirtyStateChange}
+              onDirtyStateChange={handleDocumentDirtyStateChange}
               onLocalContentChange={onDocumentLocalContentChange}
               onSaveControllerChange={(controller) => {
                 saveControllerRef.current = controller;
