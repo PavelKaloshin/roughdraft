@@ -21,6 +21,18 @@ Roughdraft is a local-first markdown editor and viewer that runs on your compute
 Its job is to make markdown files easy to open, read, edit, review, and discuss with your AI agent without moving them into a proprietary format or a hosted app.
 
 Roughdraft opens a single markdown file directly for CriticMarkup comments and suggested changes.
+## What's different in this fork
+This is a fork of [Lex-Inc/roughdraft](https://github.com/Lex-Inc/roughdraft). It keeps everything upstream does and adds directory browsing plus read-only viewing for non-Markdown files, so you can review a whole folder — not just one file at a time.
+
+- **Directory review mode** — `roughdraft open <dir>` opens a folder and shows a persistent sidebar tree, so you can move between files without re-invoking the CLI. The tree live-refreshes while you browse.
+- **Browse every file, not just Markdown** — the tree lists all files. Markdown still opens in the full review/comment/edit workspace; every other file opens **read-only**: code with syntax highlighting, plain text as-is, images as a preview, and other binaries as a "preview unavailable" stub. Non-Markdown files can't be commented on, edited, or saved.
+- **Reload from disk** — an always-available button in the document header re-reads the open file from disk, and file reads are no longer HTTP-cached, so external edits (e.g. by your agent) show up reliably.
+- **Mermaid diagrams** — fenced ` ```mermaid ` blocks render as diagrams in the rich-text view.
+
+Bug fixes carried in this fork:
+
+- Files now load for projects opened under a dot-directory (e.g. `~/.claude/skills/...`); upstream's `/api/files` 404'd every file in such projects.
+- Tables whose rows contain two or more code-span links no longer disappear from the rich-text view.
 ## How it works
 - **Local-first markdown editor** — Open normal `.md` files from your machine and edit them directly
   
