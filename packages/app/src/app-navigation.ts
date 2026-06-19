@@ -228,8 +228,15 @@ export function buildLocationForLinkedMarkdownDocument({
   const targetPath = decodeURI(targetUrl.pathname);
   const url = new URL(window.location.href);
 
+  // Preserve directory-review mode so following a sibling link keeps the
+  // sidebar tree and the directory's path boundary instead of dropping into
+  // single-file mode.
+  const currentDir = url.searchParams.get("dir");
   url.pathname = "/";
   url.search = "";
+  if (currentDir) {
+    url.searchParams.set("dir", currentDir);
+  }
   url.searchParams.set("path", targetPath);
   url.hash = linkedPath.hash;
 

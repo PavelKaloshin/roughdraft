@@ -30,7 +30,10 @@ import {
 } from "./editor-extensions";
 import { cn } from "./lib/utils";
 import { MarkdownCodeEditor } from "./MarkdownCodeEditor";
-import { buildLocationForLinkedMarkdownDocument } from "./app-navigation";
+import {
+  buildLocationForLinkedMarkdownDocument,
+  joinPath,
+} from "./app-navigation";
 import { toHtml } from "./markdown";
 import type { Page, StorageBackend } from "./storage";
 import { useCommentAnchorLayout } from "./useCommentAnchorLayout";
@@ -1444,6 +1447,96 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
       }
     };
   }, [editor]);
+
+  // Make rendered links clickable. Links to sibling markdown files navigate
+  // in-app (staying in directory mode when active); same-document anchors
+  // scroll; external links and raw files open in a new tab. The Link extension
+  // keeps `openOnClick: false` so this handler stays the single source of
+  // truth for link behavior.
+  useEffect(() => {
+    if (!editor) return;
+
+    const dom = editor.view.dom;
+    const currentAbsolutePath =
+      backend.info.projectPath && activeDocumentPath
+        ? joinPath(backend.info.projectPath, activeDocumentPath)
+        : null;
+
+    const scrollToAnchor = (rawId: string) => {
+      if (!rawId) return;
+      const id = decodeURIComponent(rawId);
+      const escaped =
+        typeof CSS !== "undefined" && CSS.escape ? CSS.escape(id) : id;
+      const target =
+        dom.querySelector(`#${escaped}`) ??
+        dom.querySelector(`[name="${escaped}"]`);
+      target?.scrollIntoView({ behavior: "smooth", block: "start" });
+    };
+
+    const handleClick = (event: MouseEvent) => {
+      if (event.defaultPrevented || event.button !== 0) return;
+      // Let modified clicks fall through so the browser can open a new tab.
+      if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+        return;
+      }
+
+      const target = event.target as HTMLElement | null;
+      const anchor = target?.closest("a[href]") as HTMLAnchorElement | null;
+      if (!anchor || !dom.contains(anchor)) return;
+
+      const href = anchor.getAttribute("href");
+      if (!href) return;
+
+      if (href.startsWith("#")) {
+        event.preventDefault();
+        scrollToAnchor(href.slice(1));
+        return;
+      }
+
+      let url: URL;
+      try {
+        url = new URL(href, window.location.origin);
+      } catch {
+        return;
+      }
+
+      if (url.origin !== window.location.origin) {
+        event.preventDefault();
+        window.open(href, "_blank", "noopener,noreferrer");
+        return;
+      }
+
+      // Raw files/assets served by the backend (e.g. images, attachments).
+      if (url.pathname.startsWith("/api/")) {
+        event.preventDefault();
+        window.open(href, "_blank", "noopener,noreferrer");
+        return;
+      }
+
+      event.preventDefault();
+
+      // Same-document anchor: scroll instead of reloading the document.
+      const targetPath = url.searchParams.get("path");
+      if (url.hash && targetPath && targetPath === currentAbsolutePath) {
+        scrollToAnchor(url.hash.slice(1));
+        return;
+      }
+
+      if (url.searchParams.get("dir")) {
+        // SPA navigation that keeps the directory sidebar mounted.
+        window.history.pushState(null, "", href);
+        window.dispatchEvent(new PopStateEvent("popstate"));
+        return;
+      }
+
+      window.location.assign(href);
+    };
+
+    dom.addEventListener("click", handleClick);
+    return () => {
+      dom.removeEventListener("click", handleClick);
+    };
+  }, [editor, backend, activeDocumentPath]);
 
   useEffect(() => {
     const handleDocumentPointerDown = (event: PointerEvent) => {

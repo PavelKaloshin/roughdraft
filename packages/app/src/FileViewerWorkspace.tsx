@@ -1,8 +1,13 @@
-import { Eye, FileWarning, Loader2 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { Eye, FileWarning, Loader2, Maximize2, Minimize2 } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
 import { CodeFileViewer } from "./CodeFileViewer";
 import type { FileKind } from "./file-types";
+import { cn } from "./lib/utils";
 import type { StorageBackend } from "./storage";
+import {
+  readFullWidthPreference,
+  writeFullWidthPreference,
+} from "./view-preferences";
 
 interface FileViewerWorkspaceProps {
   backend: StorageBackend;
@@ -145,13 +150,26 @@ export function FileViewerWorkspace({
 }: FileViewerWorkspaceProps) {
   const imageUrl =
     kind === "image" ? backend.resolveFileUrl(relativePath) : null;
+  const [fullWidth, setFullWidth] = useState(readFullWidthPreference);
+  const toggleFullWidth = useCallback(() => {
+    setFullWidth((current) => {
+      const next = !current;
+      writeFullWidthPreference(next);
+      return next;
+    });
+  }, []);
 
   return (
     <div
       data-testid="file-viewer-workspace"
       className="min-h-0 flex-1 overflow-y-auto px-8 pt-10 pb-8 sm:px-12"
     >
-      <div className="mx-auto min-h-full max-w-[1080px]">
+      <div
+        className={cn(
+          "mx-auto min-h-full",
+          fullWidth ? "max-w-none" : "max-w-[1080px]",
+        )}
+      >
         <div className="mb-4 flex items-center gap-1.5 px-1 text-[0.62rem] font-medium tracking-[0.01em] text-stone-400">
           <span
             className="min-w-0 truncate font-mono text-[0.7rem] text-stone-400 dark:text-stone-500"
@@ -159,9 +177,29 @@ export function FileViewerWorkspace({
           >
             {fileLabel}
           </span>
+          <button
+            type="button"
+            data-testid="file-viewer-full-width-toggle"
+            aria-pressed={fullWidth}
+            aria-label={fullWidth ? "Fit width" : "Full width"}
+            title={fullWidth ? "Fit width" : "Full width"}
+            onClick={toggleFullWidth}
+            className={cn(
+              "ml-auto inline-flex size-7 shrink-0 items-center justify-center rounded-full outline-none transition focus-visible:ring-2 focus-visible:ring-stone-300/70 dark:focus-visible:ring-slate-600/70",
+              fullWidth
+                ? "bg-[#E8E3DB] text-stone-700 dark:bg-slate-700 dark:text-white"
+                : "text-stone-400 hover:bg-[#EEE9E1] hover:text-stone-600 dark:text-stone-500 dark:hover:bg-slate-800 dark:hover:text-stone-300",
+            )}
+          >
+            {fullWidth ? (
+              <Minimize2 className="size-[0.68rem]" aria-hidden="true" />
+            ) : (
+              <Maximize2 className="size-[0.68rem]" aria-hidden="true" />
+            )}
+          </button>
           <span
             data-testid="file-viewer-readonly-badge"
-            className="ml-auto inline-flex items-center gap-1 font-mono text-[0.7rem] text-stone-400 dark:text-stone-500"
+            className="inline-flex items-center gap-1 font-mono text-[0.7rem] text-stone-400 dark:text-stone-500"
           >
             <Eye className="size-[0.68rem]" aria-hidden="true" />
             Read-only

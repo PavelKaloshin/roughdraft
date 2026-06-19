@@ -7,7 +7,9 @@ import {
   Copy,
   Eye,
   Loader2,
+  Maximize2,
   MessageSquarePlus,
+  Minimize2,
   PencilLine,
   RefreshCcw,
   Upload,
@@ -48,6 +50,10 @@ import {
 import { RobotsHighFiveToy } from "./RobotsHighFiveToy";
 import type { CompleteReviewOptions, Page, StorageBackend } from "./storage";
 import { useReviewLayoutShiftAnimation } from "./useReviewLayoutShiftAnimation";
+import {
+  readFullWidthPreference,
+  writeFullWidthPreference,
+} from "./view-preferences";
 
 type DiskChangeState = "clean" | "changed" | "conflict" | "paused";
 type ReviewHandoffState =
@@ -420,6 +426,14 @@ export function DocumentWorkspace({
 }: DocumentWorkspaceProps) {
   const [documentInteractionMode, setDocumentInteractionMode] =
     useState<DocumentInteractionMode>("suggesting");
+  const [fullWidth, setFullWidth] = useState(readFullWidthPreference);
+  const toggleFullWidth = useCallback(() => {
+    setFullWidth((current) => {
+      const next = !current;
+      writeFullWidthPreference(next);
+      return next;
+    });
+  }, []);
   const [saveState, setSaveState] = useState<DocumentSaveState>("saved");
   const [reviewHandoffState, setReviewHandoffState] =
     useState<ReviewHandoffState>("idle");
@@ -976,18 +990,29 @@ export function DocumentWorkspace({
           </div>
         </div>
       ) : null}
-      <div className="mx-auto min-h-full max-w-[1080px]">
+      <div
+        className={cn(
+          "mx-auto min-h-full",
+          fullWidth ? "max-w-none" : "max-w-[1080px]",
+        )}
+      >
         {documentPage ? (
           <div
             ref={documentHeaderRef}
             data-testid="document-page-header"
             className={cn(
               "review-layout-grid document-page-shell mb-2 text-[0.62rem] font-medium tracking-[0.01em] text-stone-400",
+              fullWidth && "review-layout-grid--full-width",
               !documentHasComments &&
                 "review-layout-grid--centered document-page-shell-no-comments",
             )}
           >
-            <div className="review-layout-main document-page-main w-full max-w-[46.5rem] min-w-0">
+            <div
+              className={cn(
+                "review-layout-main document-page-main w-full min-w-0",
+                fullWidth ? "max-w-none" : "max-w-[46.5rem]",
+              )}
+            >
               <div className="flex w-full flex-wrap items-center gap-1.5 px-1">
                 <Tooltip>
                   <TooltipTrigger
@@ -1027,6 +1052,40 @@ export function DocumentWorkspace({
                     }
                   />
                   <TooltipContent>{editorViewModeToggleLabel}</TooltipContent>
+                </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <button
+                        type="button"
+                        data-testid="document-full-width-toggle"
+                        aria-pressed={fullWidth}
+                        className={cn(
+                          "inline-flex size-7 shrink-0 items-center justify-center rounded-full outline-none transition focus-visible:ring-2 focus-visible:ring-stone-300/70 dark:focus-visible:ring-slate-600/70",
+                          fullWidth
+                            ? "bg-[#E8E3DB] text-stone-700 dark:bg-slate-700 dark:text-white"
+                            : "text-stone-400 hover:bg-[#EEE9E1] hover:text-stone-600 dark:text-stone-500 dark:hover:bg-slate-800 dark:hover:text-stone-300",
+                        )}
+                      >
+                        {fullWidth ? (
+                          <Minimize2
+                            className="size-[0.8rem]"
+                            aria-hidden="true"
+                          />
+                        ) : (
+                          <Maximize2
+                            className="size-[0.8rem]"
+                            aria-hidden="true"
+                          />
+                        )}
+                      </button>
+                    }
+                    aria-label={fullWidth ? "Fit width" : "Full width"}
+                    onClick={toggleFullWidth}
+                  />
+                  <TooltipContent>
+                    {fullWidth ? "Fit width" : "Full width"}
+                  </TooltipContent>
                 </Tooltip>
                 <Popover
                   open={fileCopyMenuOpen}

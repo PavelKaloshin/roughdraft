@@ -1,0 +1,93 @@
+import { expect, test } from "@playwright/test";
+import {
+  createMarkdownProject,
+  removeMarkdownProject,
+  richTextEditor,
+  writeProjectFile,
+} from "./helpers";
+
+test.describe("markdown links and layout", () => {
+  let projectDir: string;
+
+  test.beforeEach(() => {
+    projectDir = createMarkdownProject("links-and-layout");
+  });
+
+  test.afterEach(() => {
+    removeMarkdownProject(projectDir);
+  });
+
+  test("clicking a sibling markdown link navigates and keeps directory mode @smoke", async ({
+    page,
+  }) => {
+    writeProjectFile(
+      projectDir,
+      "alpha.md",
+      "# Alpha\n\nSee [the beta doc](beta.md) for more.\n",
+    );
+    writeProjectFile(projectDir, "beta.md", "# Beta\n\nBeta body text.\n");
+
+    await page.goto(`/?${new URLSearchParams({ dir: projectDir }).toString()}`);
+    await page.getByTestId("directory-file-alpha.md").click();
+
+    const editor = richTextEditor(page);
+    await expect(editor).toContainText("See the beta doc for more.");
+
+    // The link is clickable and navigates to the sibling document.
+    await editor.getByRole("link", { name: "the beta doc" }).click();
+    await expect(editor).toContainText("Beta body text.");
+
+    // Navigation stays in directory mode (sidebar preserved) and points at beta.
+    await expect(page).toHaveURL(/[?&]dir=/);
+    await expect(page).toHaveURL(/[?&]path=.*beta\.md/);
+    await expect(page.getByTestId("directory-file-beta.md")).toBeVisible();
+  });
+
+  test("a sibling link inside a table cell is clickable @smoke", async ({
+    page,
+  }) => {
+    writeProjectFile(
+      projectDir,
+      "index.md",
+      [
+        "# Index",
+        "",
+        "| ID | Ref |",
+        "|----|-----|",
+        "| R1 | see [the beta doc](beta.md) |",
+        "",
+      ].join("\n"),
+    );
+    writeProjectFile(projectDir, "beta.md", "# Beta\n\nBeta body text.\n");
+
+    await page.goto(`/?${new URLSearchParams({ dir: projectDir }).toString()}`);
+    await page.getByTestId("directory-file-index.md").click();
+
+    const editor = richTextEditor(page);
+    await expect(editor.locator("table")).toBeVisible();
+
+    await editor.getByRole("link", { name: "the beta doc" }).click();
+    await expect(editor).toContainText("Beta body text.");
+    await expect(page).toHaveURL(/[?&]path=.*beta\.md/);
+  });
+
+  test("full-width toggle persists across reloads @smoke", async ({ page }) => {
+    writeProjectFile(projectDir, "alpha.md", "# Alpha\n\nAlpha body.\n");
+
+    await page.goto(`/?${new URLSearchParams({ dir: projectDir }).toString()}`);
+    await page.getByTestId("directory-file-alpha.md").click();
+
+    const toggle = page.getByTestId("document-full-width-toggle");
+    await expect(toggle).toHaveAttribute("aria-pressed", "false");
+
+    await toggle.click();
+    await expect(toggle).toHaveAttribute("aria-pressed", "true");
+
+    // The preference survives a full reload (persisted in localStorage).
+    await page.reload();
+    await page.getByTestId("directory-file-alpha.md").click();
+    await expect(
+      page.getByTestId("document-full-width-toggle"),
+    ).toHaveAttribute("aria-pressed", "true");
+  });
+});

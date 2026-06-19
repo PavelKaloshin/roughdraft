@@ -846,6 +846,13 @@
     column-gap: 0rem;
   }
 
+  /* full-width: let the document column fill the available space instead of
+     capping at the readable 46.5rem measure */
+  .review-layout-grid.review-layout-grid--full-width {
+    grid-template-columns: minmax(0, 1fr) var(--review-rail-width);
+    justify-content: stretch;
+  }
+
   .review-layout-grid > .review-layout-main {
     grid-column: 1;
   }

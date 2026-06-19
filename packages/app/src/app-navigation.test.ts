@@ -85,6 +85,24 @@ describe("app navigation", () => {
     ).toBe("/?path=%2FUsers%2Fme%2Fproject%2Findex.md#summary");
   });
 
+  it("keeps directory mode when linking to a sibling document", () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/?dir=%2FUsers%2Fme%2Fproject&path=%2FUsers%2Fme%2Fproject%2Fnotes%2Fsource.md",
+    );
+
+    expect(
+      buildLocationForLinkedMarkdownDocument({
+        projectPath: "/Users/me/project",
+        currentDocumentPath: "notes/source.md",
+        href: "../index.md#summary",
+      }),
+    ).toBe(
+      "/?dir=%2FUsers%2Fme%2Fproject&path=%2FUsers%2Fme%2Fproject%2Findex.md#summary",
+    );
+  });
+
   it("leaves non-markdown links for the file resolver", () => {
     expect(
       buildLocationForLinkedMarkdownDocument({
