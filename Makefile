@@ -29,6 +29,10 @@ install: ## Install workspace dependencies
 build: ## Build rfm, app, and server
 	pnpm build
 
+.PHONY: build-app
+build-app: ## Build only the app package
+	pnpm --filter @roughdraft/app build
+
 .PHONY: build-global
 build-global: build ## Build and restart the global roughdraft server
 			-roughdraft stop
@@ -93,6 +97,13 @@ rd-open: ## Open a file or directory in Roughdraft (PATH=/abs/path)
 	@test -n "$(PATH_)" || { echo "Usage: make rd-open PATH_=/abs/path"; exit 2; }
 	"$(RD)" open "$(PATH_)"
 
+.PHONY: rd-restart
+rd-restart: ## Stop (incl. an unmanaged process on :7373) and start the dev server
+	-"$(RD)" stop
+	@pids="$$(lsof -ti tcp:7373 2>/dev/null)"; if [ -n "$$pids" ]; then kill $$pids; fi
+	@sleep 1
+	"$(RD)" start
+
 # --- Git (read-only) ---------------------------------------------------------
 
 .PHONY: status
@@ -109,3 +120,16 @@ diff: ## Show diff (F=path to scope, default unstaged tree)
 api-files: ## Fetch a file via the running dev server (P=relative/path)
 	@test -n "$(P)" || { echo "Usage: make api-files P=relative/path"; exit 2; }
 	curl -s "http://localhost:7373/api/files?projectPath=$(WORKTREE_ROOT)&path=$(P)"
+
+.PHONY: api
+api: ## GET an API path on the dev server (Q='/api/...'); prints status + body head
+	@test -n "$(Q)" || { echo "Usage: make api Q='/api/file-tree?projectPath=/abs/dir'"; exit 2; }
+	@curl -s -o /dev/null -w "status=%{http_code} type=%{content_type}\n" "http://localhost:7373$(Q)"
+	@curl -s "http://localhost:7373$(Q)" | head -20
+
+# --- Browser checks ----------------------------------------------------------
+
+.PHONY: verify-ui
+verify-ui: ## Headless browser check of a URL (URL=..., optional TESTIDS=a,b)
+	@test -n "$(URL)" || { echo "Usage: make verify-ui URL=http://localhost:7373/... [TESTIDS=a,b]"; exit 2; }
+	node scripts/dev/verify-ui.mjs "$(URL)" "$(TESTIDS)"

@@ -1,0 +1,40 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(make:*)",
+      "Bash(grep:*)",
+      "Bash(rg:*)",
+      "Bash(cat:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(wc:*)",
+      "Bash(ls:*)",
+      "Bash(sed -n:*)",
+      "Bash(lsof:*)",
+      "Bash(ps:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git rev-parse:*)",
+      "Bash(git rev-list:*)",
+      "Bash(git check-ignore:*)",
+      "Bash(git merge-base:*)",
+      "Bash(git branch:*)",
+      "Bash(git remote -v)",
+      "Bash(git fetch:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)"
+    ],
+    "deny": [
+      "Bash(awk:*)",
+      "Bash(sed -i:*)",
+      "Edit(./Makefile)",
+      "Write(./Makefile)",
+      "MultiEdit(./Makefile)",
+      "Edit(./scripts/dev/verify-ui.mjs)",
+      "Write(./scripts/dev/verify-ui.mjs)",
+      "MultiEdit(./scripts/dev/verify-ui.mjs)"
+    ]
+  }
+}

@@ -3,6 +3,7 @@
   "files": {
     "includes": [
       "**",
+      "!.claude",
       "!.context",
       "!.roughdraft-state",
       "!**/coverage",

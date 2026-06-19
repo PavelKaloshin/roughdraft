@@ -125,6 +125,44 @@ pnpm dev:install-cli
 
 Then recompute `roughdraft_cmd` and use it.
 
+## Trusted Commands (avoid permission prompts)
+
+`.claude/settings.json` defines a small trusted command surface so routine work
+runs without prompts. Prefer these paths over raw equivalents — the raw forms
+are intentionally left prompting (or denied), so reaching for them just stalls
+on a confirmation:
+
+- **Tests / build / lint / typecheck** — use the `Makefile`: `make check`,
+  `make test`, `make test-app`, `make test-server`, `make lint`, `make typecheck`,
+  `make build`, `make build-app`. Run raw `pnpm`/`vitest` only for something the
+  Makefile does not cover.
+- **Dev server** — `make rd-start` / `make rd-stop` / `make rd-status` /
+  `make rd-restart` (the last one also clears an unmanaged process on `:7373`).
+- **Browser checks** — `make verify-ui URL=... [TESTIDS=a,b]` (wraps
+  `scripts/dev/verify-ui.mjs`). Don't hand-write one-off `node *.mjs` playwright
+  scripts.
+- **Dev-server API** — `make api Q='/api/...'` or `make api-files P=relative/path`
+  instead of raw `curl`.
+- **Search / read** — `grep`/`rg`, `cat`/`head`/`tail`, `ls`, `sed -n`,
+  `lsof`/`ps`, and `git` (`status`, `diff`, `log`, `show`, `rev-parse`, `add`,
+  `commit`, …) are allowed.
+
+Permission rules match the **command-string prefix**, so invocation form matters:
+- Run `git` bare from the repo root (`git commit …`, `git add …`), not
+  `git -C <path> …` — the latter starts with `git -C`, misses the `git commit`
+  prefix, and re-prompts. (Allowing `git -C:*` is rejected: it would permit any
+  git subcommand in any repo.)
+- Don't chain an allowed command with an un-allowed one (`make … && echo …`):
+  each segment of a `;`/`&&`/`|` chain is checked separately, so one
+  un-allowlisted segment (e.g. bare `echo`) re-prompts the whole line.
+
+Deliberately **denied** (do not attempt — wrap the safe intent in a Makefile
+target or `scripts/dev/` helper instead): `awk` (can `system()`), `sed -i`
+(in-place mutation). The `Makefile` and `scripts/dev/verify-ui.mjs` are
+**write-denied** so the trusted surface can't be silently widened — to add a
+target or edit the script, ask the user to lift that deny for the one edit, then
+restore it. When you add a new target or wrapper, update this section too.
+
 ## Pull Request Workflow
 
 Before creating or updating a PR:

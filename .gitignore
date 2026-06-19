@@ -10,7 +10,10 @@ sandbox
 !.codex/skills/
 !.codex/skills/**
 .conductor/
-.claude/
+.claude/*
+# Keep the shared permission policy under version control; everything else in
+# .claude/ (settings.local.json, transcripts, etc.) stays ignored.
+!.claude/settings.json
 .agents/
 .mcp.json
 .roughdraft-state
