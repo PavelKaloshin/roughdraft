@@ -464,6 +464,15 @@ export function createTurndownService(): TurndownService {
     filter: "a",
     replacement(content, node) {
       const element = node as HTMLAnchorElement;
+
+      // Empty in-document anchors (`<a id="REQ-11"></a>`, no href) are scroll
+      // targets, not links — preserve them as raw HTML instead of turning them
+      // into an empty `[](./)` link.
+      const anchorId = element.getAttribute("id");
+      if (anchorId && !element.getAttribute("href")) {
+        return `<a id="${anchorId}"></a>`;
+      }
+
       const href =
         element.getAttribute("data-markdown-src") ||
         element.getAttribute("href") ||

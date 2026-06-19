@@ -93,6 +93,37 @@ test.describe("markdown links and layout", () => {
     await expect(page).toHaveURL(/[?&]path=.*beta\.md/);
   });
 
+  test("a link to an anchor in another document scrolls to it @smoke", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    const filler = Array.from(
+      { length: 60 },
+      (_, i) => `Filler line ${i}.`,
+    ).join("\n\n");
+    writeProjectFile(
+      projectDir,
+      "index.md",
+      "# Index\n\nGo to [the rule](target.md#REQ-11).\n",
+    );
+    writeProjectFile(
+      projectDir,
+      "target.md",
+      `# Target\n\n${filler}\n\n**<a id="REQ-11"></a>REQ-11** is the rule.\n`,
+    );
+
+    await page.goto(`/?${new URLSearchParams({ dir: projectDir }).toString()}`);
+    await page.getByTestId("directory-file-index.md").click();
+
+    const editor = richTextEditor(page);
+    await editor.getByRole("link", { name: "the rule" }).click();
+    await expect(page).toHaveURL(/[?&]path=.*target\.md/);
+
+    // The anchor target exists and the view scrolled to it.
+    await expect(editor.locator("#REQ-11")).toHaveCount(1);
+    await expect(editor.getByText("REQ-11 is the rule.")).toBeInViewport();
+  });
+
   test("full-width toggle widens the document and persists @smoke", async ({
     page,
   }) => {

@@ -776,6 +776,45 @@ const RawMarkdownBlock = Node.create({
   },
 });
 
+// Preserve empty in-document anchors like `<a id="REQ-11"></a>` so they survive
+// the round-trip and exist in the rendered DOM as scroll targets for `#REQ-11`
+// links. Real links (`a[href]`) stay with the link mark.
+const AnchorTarget = Node.create({
+  name: "anchorTarget",
+  group: "inline",
+  inline: true,
+  atom: true,
+  selectable: false,
+
+  addAttributes() {
+    return {
+      anchorId: {
+        default: null,
+        parseHTML: (element) => element.getAttribute("id"),
+        renderHTML: (attributes) =>
+          attributes.anchorId ? { id: attributes.anchorId } : {},
+      },
+    };
+  },
+
+  parseHTML() {
+    return [
+      {
+        tag: "a[id]",
+        priority: 1100,
+        getAttrs: (element) =>
+          element.getAttribute("href")
+            ? false
+            : { anchorId: element.getAttribute("id") },
+      },
+    ];
+  },
+
+  renderHTML({ HTMLAttributes }) {
+    return ["a", mergeAttributes(HTMLAttributes, { class: "anchor-target" })];
+  },
+});
+
 export function createEditorExtensions(placeholder: string) {
   return [
     StarterKit.configure({
@@ -795,6 +834,7 @@ export function createEditorExtensions(placeholder: string) {
       linkOnPaste: true,
     }),
     MarkdownCode,
+    AnchorTarget,
     Table.configure({
       resizable: true,
     }),

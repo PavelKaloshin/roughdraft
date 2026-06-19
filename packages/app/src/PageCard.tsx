@@ -1448,6 +1448,36 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
     };
   }, [editor]);
 
+  const scrollToAnchor = useCallback((dom: HTMLElement, rawId: string) => {
+    if (!rawId) return;
+    let id = rawId;
+    try {
+      id = decodeURIComponent(rawId);
+    } catch {
+      // Use the raw value if it is not valid percent-encoding.
+    }
+    const escaped =
+      typeof CSS !== "undefined" && CSS.escape ? CSS.escape(id) : id;
+    const target =
+      dom.querySelector(`#${escaped}`) ??
+      dom.querySelector(`[name="${escaped}"]`);
+    target?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, []);
+
+  // Scroll to the URL hash once a document renders, so following a
+  // `doc.md#REQ-11` link to another file lands on the matching anchor (the
+  // anchorTarget node preserves those ids). Same-document anchor clicks are
+  // handled directly in the click handler below.
+  useEffect(() => {
+    if (!editor) return;
+    const hash = window.location.hash.slice(1);
+    if (!hash) return;
+
+    const dom = editor.view.dom;
+    const frame = requestAnimationFrame(() => scrollToAnchor(dom, hash));
+    return () => cancelAnimationFrame(frame);
+  }, [editor, scrollToAnchor]);
+
   // Make rendered links clickable. Links to sibling markdown files navigate
   // in-app (staying in directory mode when active); same-document anchors
   // scroll; external links and raw files open in a new tab. The Link extension
@@ -1461,17 +1491,6 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
       backend.info.projectPath && activeDocumentPath
         ? joinPath(backend.info.projectPath, activeDocumentPath)
         : null;
-
-    const scrollToAnchor = (rawId: string) => {
-      if (!rawId) return;
-      const id = decodeURIComponent(rawId);
-      const escaped =
-        typeof CSS !== "undefined" && CSS.escape ? CSS.escape(id) : id;
-      const target =
-        dom.querySelector(`#${escaped}`) ??
-        dom.querySelector(`[name="${escaped}"]`);
-      target?.scrollIntoView({ behavior: "smooth", block: "start" });
-    };
 
     const handleClick = (event: MouseEvent) => {
       if (event.defaultPrevented || event.button !== 0) return;
@@ -1489,7 +1508,7 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
 
       if (href.startsWith("#")) {
         event.preventDefault();
-        scrollToAnchor(href.slice(1));
+        scrollToAnchor(dom, href.slice(1));
         return;
       }
 
@@ -1518,7 +1537,7 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
       // Same-document anchor: scroll instead of reloading the document.
       const targetPath = url.searchParams.get("path");
       if (url.hash && targetPath && targetPath === currentAbsolutePath) {
-        scrollToAnchor(url.hash.slice(1));
+        scrollToAnchor(dom, url.hash.slice(1));
         return;
       }
 
@@ -1536,7 +1555,7 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
     return () => {
       dom.removeEventListener("click", handleClick);
     };
-  }, [editor, backend, activeDocumentPath]);
+  }, [editor, backend, activeDocumentPath, scrollToAnchor]);
 
   useEffect(() => {
     const handleDocumentPointerDown = (event: PointerEvent) => {
