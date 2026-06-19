@@ -712,7 +712,10 @@ const MarkdownLink = Link.extend({
 });
 
 const MarkdownCode = Code.extend({
-  excludes: "bold italic strike link",
+  // Keep `link` out of the exclusion list so an inline-code link such as
+  // [`AC-E`](doc.md#AC-E) keeps its link mark (and stays clickable) instead of
+  // collapsing to a bare <code> span. Bold/italic/strike stay excluded.
+  excludes: "bold italic strike",
 });
 
 const MarkdownCodeBlock = CodeBlock.extend({

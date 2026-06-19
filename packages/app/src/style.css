@@ -829,6 +829,12 @@
   transform: translateX(var(--review-layout-shift-x));
 }
 
+/* Full-width mode drops the readable-measure cap on the document column at all
+   widths (the grid-template override below handles the >=1100px grid). */
+[data-full-width="true"] .review-layout-main {
+  max-width: none;
+}
+
 @media (min-width: 1100px) {
   .review-layout-grid {
     display: grid;
@@ -847,8 +853,10 @@
   }
 
   /* full-width: let the document column fill the available space instead of
-     capping at the readable 46.5rem measure */
-  .review-layout-grid.review-layout-grid--full-width {
+     capping at the readable 46.5rem measure. Scoped to a `data-full-width`
+     ancestor so it covers both the header row and the PageCard body, which
+     share the review-layout-grid / review-layout-main classes. */
+  [data-full-width="true"] .review-layout-grid {
     grid-template-columns: minmax(0, 1fr) var(--review-rail-width);
     justify-content: stretch;
   }

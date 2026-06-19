@@ -71,17 +71,50 @@ test.describe("markdown links and layout", () => {
     await expect(page).toHaveURL(/[?&]path=.*beta\.md/);
   });
 
-  test("full-width toggle persists across reloads @smoke", async ({ page }) => {
+  test("a code-span sibling link with an anchor resolves @smoke", async ({
+    page,
+  }) => {
+    writeProjectFile(
+      projectDir,
+      "index.md",
+      "# Index\n\nSee ([`AC-E`](beta.md#AC-E)) for details.\n",
+    );
+    writeProjectFile(projectDir, "beta.md", "# Beta\n\nBeta body text.\n");
+
+    await page.goto(`/?${new URLSearchParams({ dir: projectDir }).toString()}`);
+    await page.getByTestId("directory-file-index.md").click();
+
+    const editor = richTextEditor(page);
+    const link = editor.getByRole("link", { name: "AC-E" });
+    await expect(link).toBeVisible();
+
+    await link.click();
+    await expect(editor).toContainText("Beta body text.");
+    await expect(page).toHaveURL(/[?&]path=.*beta\.md/);
+  });
+
+  test("full-width toggle widens the document and persists @smoke", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1280, height: 900 });
     writeProjectFile(projectDir, "alpha.md", "# Alpha\n\nAlpha body.\n");
 
     await page.goto(`/?${new URLSearchParams({ dir: projectDir }).toString()}`);
     await page.getByTestId("directory-file-alpha.md").click();
 
+    const editor = page.getByTestId("rich-text-editor");
+    await expect(editor).toBeVisible();
     const toggle = page.getByTestId("document-full-width-toggle");
     await expect(toggle).toHaveAttribute("aria-pressed", "false");
 
+    const cappedWidth = (await editor.boundingBox())?.width ?? 0;
+
+    // Enabling full width actually widens the document body, not just the chip.
     await toggle.click();
     await expect(toggle).toHaveAttribute("aria-pressed", "true");
+    await expect
+      .poll(async () => (await editor.boundingBox())?.width ?? 0)
+      .toBeGreaterThan(cappedWidth + 40);
 
     // The preference survives a full reload (persisted in localStorage).
     await page.reload();
@@ -89,5 +122,8 @@ test.describe("markdown links and layout", () => {
     await expect(
       page.getByTestId("document-full-width-toggle"),
     ).toHaveAttribute("aria-pressed", "true");
+    await expect
+      .poll(async () => (await editor.boundingBox())?.width ?? 0)
+      .toBeGreaterThan(cappedWidth + 40);
   });
 });

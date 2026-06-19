@@ -991,6 +991,7 @@ export function DocumentWorkspace({
         </div>
       ) : null}
       <div
+        data-full-width={fullWidth ? "true" : undefined}
         className={cn(
           "mx-auto min-h-full",
           fullWidth ? "max-w-none" : "max-w-[1080px]",
@@ -1002,17 +1003,11 @@ export function DocumentWorkspace({
             data-testid="document-page-header"
             className={cn(
               "review-layout-grid document-page-shell mb-2 text-[0.62rem] font-medium tracking-[0.01em] text-stone-400",
-              fullWidth && "review-layout-grid--full-width",
               !documentHasComments &&
                 "review-layout-grid--centered document-page-shell-no-comments",
             )}
           >
-            <div
-              className={cn(
-                "review-layout-main document-page-main w-full min-w-0",
-                fullWidth ? "max-w-none" : "max-w-[46.5rem]",
-              )}
-            >
+            <div className="review-layout-main document-page-main w-full max-w-[46.5rem] min-w-0">
               <div className="flex w-full flex-wrap items-center gap-1.5 px-1">
                 <Tooltip>
                   <TooltipTrigger
