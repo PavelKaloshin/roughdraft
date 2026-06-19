@@ -260,7 +260,7 @@ describe("cli", () => {
     fs.writeFileSync(documentPath, "# Draft\n");
 
     const exitCode = await runCli(
-      ["open", documentPath, "--no-watch"],
+      ["open", "--open", documentPath, "--no-watch"],
       test.deps,
     );
     const persisted = JSON.parse(
@@ -275,12 +275,35 @@ describe("cli", () => {
     expect(fs.existsSync(getServerStateFilePath(test.deps.env))).toBeTruthy();
   });
 
+  it("prints the URL without launching a browser by default", async () => {
+    const test = createTestDependencies();
+    const documentPath = path.join(projectDir, "draft.md");
+    fs.writeFileSync(documentPath, "# Draft\n");
+
+    const exitCode = await runCli(
+      ["open", documentPath, "--no-watch"],
+      test.deps,
+    );
+    const persisted = JSON.parse(
+      fs.readFileSync(getServerStateFilePath(test.deps.env), "utf8"),
+    ) as { port: number };
+
+    expect(exitCode).toBe(0);
+    expect(test.getLastOpenedUrl()).toBeNull();
+    expect(test.logs).toContain(
+      `Roughdraft is running at ${expectedOpenUrl(
+        `http://localhost:${persisted.port}`,
+        documentPath,
+      )}`,
+    );
+  });
+
   it("opens a directory with a dir-scoped URL", async () => {
     const test = createTestDependencies();
     fs.mkdirSync(path.join(projectDir, "sub"), { recursive: true });
     fs.writeFileSync(path.join(projectDir, "draft.md"), "# Draft\n");
 
-    const exitCode = await runCli(["open", projectDir], test.deps);
+    const exitCode = await runCli(["open", "--open", projectDir], test.deps);
     const persisted = JSON.parse(
       fs.readFileSync(getServerStateFilePath(test.deps.env), "utf8"),
     ) as { port: number };
@@ -424,7 +447,10 @@ describe("cli", () => {
       error: () => {},
     });
 
-    const exitCode = await runCli(["open", documentPath, "--no-watch"], deps);
+    const exitCode = await runCli(
+      ["open", "--open", documentPath, "--no-watch"],
+      deps,
+    );
 
     expect(exitCode).toBe(0);
     expect(postedOpenRequest).toEqual({
@@ -702,7 +728,10 @@ describe("cli", () => {
       error: () => {},
     });
 
-    const exitCode = await runCli(["open", documentPath, "--no-watch"], deps);
+    const exitCode = await runCli(
+      ["open", "--open", documentPath, "--no-watch"],
+      deps,
+    );
 
     expect(exitCode).toBe(0);
     expect(spawnCount).toBe(0);
@@ -798,7 +827,7 @@ describe("cli", () => {
     });
 
     const exitCode = await runCli(
-      ["open", documentPath, "--json", "--batch-window", "0"],
+      ["open", "--open", documentPath, "--json", "--batch-window", "0"],
       deps,
     );
 
@@ -831,7 +860,7 @@ describe("cli", () => {
 
     const test = createTestDependencies();
     const exitCode = await runCli(
-      ["open", documentPath, "--no-watch"],
+      ["open", "--open", documentPath, "--no-watch"],
       test.deps,
     );
     const persisted = JSON.parse(
@@ -906,7 +935,10 @@ describe("cli", () => {
       error: () => {},
     });
 
-    const exitCode = await runCli(["open", documentPath, "--no-watch"], deps);
+    const exitCode = await runCli(
+      ["open", "--open", documentPath, "--no-watch"],
+      deps,
+    );
 
     expect(exitCode).toBe(0);
     expect(spawnCount).toBe(0);
@@ -1088,7 +1120,7 @@ describe("cli", () => {
     };
 
     const watchPromise = runCli(
-      ["open", documentPath, "--json", "--batch-window", "0"],
+      ["open", "--open", documentPath, "--json", "--batch-window", "0"],
       deps,
     );
 
@@ -1224,7 +1256,7 @@ describe("cli", () => {
 
     const statusExitCode = await runCli(["status"], deps);
     const openExitCode = await runCli(
-      ["open", documentPath, "--no-watch"],
+      ["open", "--open", documentPath, "--no-watch"],
       deps,
     );
 
@@ -1508,7 +1540,7 @@ describe("cli", () => {
 
     expect(exitCode).toBe(0);
     expect(test.logs).toContain(
-      "  roughdraft open <path> [--no-open] [--no-watch] [--print-url] [--port <port>]",
+      "  roughdraft open <path> [--open] [--no-watch] [--print-url] [--port <port>]",
     );
     expect(test.logs).toContain(
       "  --no-watch           Open the file without waiting",
@@ -1825,7 +1857,7 @@ describe("runCli open in remote mode", () => {
     const logs: string[] = [];
     const errors: string[] = [];
 
-    const exitCode = await runCli(["open", filePath], {
+    const exitCode = await runCli(["open", "--open", filePath], {
       env: { ROUGHDRAFT_HOST: "http://127.0.0.1:1" },
       cwd: projectDir,
       log: (m) => logs.push(m),
@@ -1851,7 +1883,7 @@ describe("runCli open in remote mode", () => {
     const errors: string[] = [];
     let fetchCalls = 0;
 
-    const exitCode = await runCli(["open", filePath], {
+    const exitCode = await runCli(["open", "--open", filePath], {
       env: { ROUGHDRAFT_HOST: "http://127.0.0.1:1" },
       cwd: projectDir,
       log: () => {},
@@ -1887,7 +1919,7 @@ describe("runCli open in remote mode", () => {
       const errors: string[] = [];
       let openedUrl: string | null = null;
 
-      const cliPromise = runCli(["open", filePath], {
+      const cliPromise = runCli(["open", "--open", filePath], {
         env: { ROUGHDRAFT_HOST: remote.url },
         cwd: projectDir,
         log: (m) => logs.push(m),
@@ -1964,7 +1996,7 @@ describe("runCli open in remote mode", () => {
       const errors: string[] = [];
       let openedUrl: string | null = null;
 
-      const cliPromise = runCli(["open", filePath], {
+      const cliPromise = runCli(["open", "--open", filePath], {
         env: {
           ROUGHDRAFT_HOST: remote.url,
           ROUGHDRAFT_TOKEN: "secret-token",
@@ -2075,7 +2107,7 @@ describe("runCli open in remote mode", () => {
       const errors: string[] = [];
       let openedUrl: string | null = null;
 
-      const cliPromise = runCli(["open", filePath], {
+      const cliPromise = runCli(["open", "--open", filePath], {
         env: { ROUGHDRAFT_HOST: remote.url },
         cwd: projectDir,
         log: (m) => logs.push(m),
@@ -2161,7 +2193,7 @@ describe("runCli open in remote mode", () => {
       let openedUrl: string | null = null;
       let cliSettled = false;
 
-      const cliPromise = runCli(["open", filePath], {
+      const cliPromise = runCli(["open", "--open", filePath], {
         env: { ROUGHDRAFT_HOST: remote.url },
         cwd: projectDir,
         log: (m) => logs.push(m),

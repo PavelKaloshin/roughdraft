@@ -240,6 +240,10 @@ Preferred flow:
 "$roughdraft_cmd" open "/absolute/path/to/file.md"
 ```
 
+`open` prints the document URL and waits for Done Reviewing; it does **not**
+launch a browser by default (the user opens the printed URL themselves). Pass
+`--open` to launch a browser, or `--print-url` to print the URL and exit.
+
 4. After the user finishes reviewing in Roughdraft, read the markdown file from disk and make the requested changes there.
 
 Useful commands:

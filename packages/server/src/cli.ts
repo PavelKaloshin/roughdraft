@@ -274,7 +274,9 @@ function parseCommandOptions(
     batchWindowSeconds: 0.25,
     help: false,
     json: false,
-    noOpen: false,
+    // Default to NOT launching a browser: `open` prints the URL and the user
+    // opens it themselves. Pass `--open` to launch a browser.
+    noOpen: true,
     noWatch: false,
     positionals: [],
     printUrl: false,
@@ -309,6 +311,12 @@ function parseCommandOptions(
     if (arg === "--no-open") {
       if (!options.allowOpen) throw new Error(`Unknown flag: ${arg}`);
       parsed.noOpen = true;
+      continue;
+    }
+
+    if (arg === "--open") {
+      if (!options.allowOpen) throw new Error(`Unknown flag: ${arg}`);
+      parsed.noOpen = false;
       continue;
     }
 
@@ -848,7 +856,7 @@ function printHelp(log: (message: string) => void) {
   log("");
   log("Commands:");
   log(
-    "  open <path>        Open a Markdown file (waits for Done Reviewing) or a directory to browse",
+    "  open <path>        Print the URL for a Markdown file (waits for Done Reviewing) or directory; pass --open to launch a browser",
   );
   log("  start              Start or reuse the background server");
   log("  status             Show server status");
@@ -869,6 +877,7 @@ function printHelp(log: (message: string) => void) {
   log("");
   log("Examples:");
   log("  roughdraft open ./draft.md");
+  log("  roughdraft open ./draft.md --open");
   log("  roughdraft open ./draft.md --print-url");
   log("  roughdraft open ./draft.md --json");
   log("  roughdraft open ./draft.md --no-watch");
@@ -887,11 +896,14 @@ function printCommandHelp(
   if (command === "open") {
     log("Usage:");
     log(
-      "  roughdraft open <path> [--no-open] [--no-watch] [--print-url] [--port <port>]",
+      "  roughdraft open <path> [--open] [--no-watch] [--print-url] [--port <port>]",
     );
     log("");
     log(
-      "Opens one Markdown file and waits for Done Reviewing. Starts Roughdraft if needed.",
+      "Prints the document URL and waits for Done Reviewing. Starts Roughdraft if needed.",
+    );
+    log(
+      "Does NOT launch a browser by default — open the printed URL yourself, or pass --open.",
     );
     log(
       "If <path> is a directory, opens a browsable tree of its Markdown files instead.",
@@ -899,10 +911,11 @@ function printCommandHelp(
     log("");
     log("Flags:");
     log(
-      "  --no-open            Start/reuse the server without opening a browser",
+      "  --open               Also launch a browser (default: just print the URL)",
     );
+    log("  --no-open            Do not launch a browser (already the default)");
     log(
-      "  --print-url          Print only the document URL and do not open it",
+      "  --print-url          Print only the document URL and exit (no watch)",
     );
     log("  --no-watch           Open the file without waiting");
     log("  --timeout <seconds>  Maximum watch time; omitted means no timeout");
@@ -925,7 +938,10 @@ function printCommandHelp(
     log("                        Required when the hosted server binds to a");
     log("                        non-loopback host. Must match the value the");
     log("                        hosted server was started with.");
-    log("  ROUGHDRAFT_NO_OPEN    Set to 1 to suppress browser launch.");
+    log(
+      "  ROUGHDRAFT_NO_OPEN    Set to 1 to force-suppress browser launch even",
+    );
+    log("                        when --open is passed.");
     log("  ROUGHDRAFT_BIND_HOST  Comma-separated bind hosts for the hosted");
     log(
       "                        server (default: loopback). Set to 0.0.0.0 or",
