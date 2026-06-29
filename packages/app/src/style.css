@@ -418,6 +418,14 @@
     color: var(--code-block-foreground);
   }
 
+  .math-block {
+    @apply my-5 overflow-x-auto text-center;
+  }
+
+  .math-inline {
+    @apply inline-block;
+  }
+
   .tiptap blockquote {
     @apply border-l-4 border-slate-300 dark:border-slate-600 pl-4 text-slate-600 dark:text-slate-400;
     margin: 1.3em 0;

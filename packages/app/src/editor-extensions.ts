@@ -18,7 +18,13 @@ import { Plugin, PluginKey } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import { ReactNodeViewRenderer } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
-import { rawMarkdownBlockAttribute } from "./markdown";
+import {
+  mathBlockAttribute,
+  mathInlineAttribute,
+  mathLatexAttribute,
+  rawMarkdownBlockAttribute,
+} from "./markdown";
+import { MathView } from "./MathView";
 import { MermaidCodeBlockView } from "./MermaidCodeBlockView";
 
 declare module "@tiptap/core" {
@@ -776,6 +782,85 @@ const RawMarkdownBlock = Node.create({
   },
 });
 
+// Inline LaTeX math (`$…$`). The KaTeX render is an opaque atom; the LaTeX
+// source lives in `latex` and round-trips back to `$…$`.
+const MathInline = Node.create({
+  name: "mathInline",
+  group: "inline",
+  inline: true,
+  atom: true,
+  selectable: true,
+
+  addAttributes() {
+    return {
+      latex: {
+        default: "",
+        parseHTML: (element) => element.getAttribute(mathLatexAttribute) ?? "",
+        renderHTML: (attributes) => ({
+          [mathLatexAttribute]: attributes.latex ?? "",
+        }),
+      },
+    };
+  },
+
+  parseHTML() {
+    return [{ tag: `span[${mathInlineAttribute}]`, priority: 1000 }];
+  },
+
+  // The LaTeX source is emitted as text content (not just an attribute) so the
+  // serialized element is not "blank" — otherwise Turndown collapses it before
+  // the math rule can turn it back into `$…$`.
+  renderHTML({ node, HTMLAttributes }) {
+    return [
+      "span",
+      mergeAttributes(HTMLAttributes, { [mathInlineAttribute]: "" }),
+      (node.attrs.latex as string) ?? "",
+    ];
+  },
+
+  addNodeView() {
+    return ReactNodeViewRenderer(MathView);
+  },
+});
+
+// Block LaTeX math (`$$…$$`).
+const MathBlock = Node.create({
+  name: "mathBlock",
+  group: "block",
+  atom: true,
+  selectable: true,
+
+  addAttributes() {
+    return {
+      latex: {
+        default: "",
+        parseHTML: (element) => element.getAttribute(mathLatexAttribute) ?? "",
+        renderHTML: (attributes) => ({
+          [mathLatexAttribute]: attributes.latex ?? "",
+        }),
+      },
+    };
+  },
+
+  parseHTML() {
+    return [{ tag: `div[${mathBlockAttribute}]`, priority: 1000 }];
+  },
+
+  // See MathInline: emit the LaTeX as text so Turndown does not treat the node
+  // as blank and drop it before the math rule runs.
+  renderHTML({ node, HTMLAttributes }) {
+    return [
+      "div",
+      mergeAttributes(HTMLAttributes, { [mathBlockAttribute]: "" }),
+      (node.attrs.latex as string) ?? "",
+    ];
+  },
+
+  addNodeView() {
+    return ReactNodeViewRenderer(MathView);
+  },
+});
+
 // Preserve empty in-document anchors like `<a id="REQ-11"></a>` so they survive
 // the round-trip and exist in the rendered DOM as scroll targets for `#REQ-11`
 // links. Real links (`a[href]`) stay with the link mark.
@@ -847,6 +932,8 @@ export function createEditorExtensions(placeholder: string) {
     }),
     CommentRef,
     CriticChange,
+    MathInline,
+    MathBlock,
     RawMarkdownBlock,
     MarkdownCodeBlock,
     CommentHighlight,
