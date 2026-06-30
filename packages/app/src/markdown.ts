@@ -1,7 +1,13 @@
 import { tables, taskListItems } from "@joplin/turndown-plugin-gfm";
+import katex from "katex";
 import { marked } from "marked";
+import type { TokenizerAndRendererExtension, Tokens } from "marked";
 import TurndownService from "turndown";
 import { parse as parseYaml } from "yaml";
+
+export const mathInlineAttribute = "data-math-inline";
+export const mathBlockAttribute = "data-math-block";
+export const mathLatexAttribute = "data-latex";
 
 export const rawMarkdownBlockAttribute = "data-markdown-raw-block";
 
@@ -314,6 +320,98 @@ export function appendYamlEndmatter(
     : markdown;
 }
 
+interface MathToken extends Tokens.Generic {
+  latex: string;
+  display: boolean;
+}
+
+/**
+ * Render LaTeX to self-contained HTML+MathML. `throwOnError: false` makes KaTeX
+ * emit an inline error node instead of throwing, so a malformed formula never
+ * breaks the whole document render.
+ */
+export function renderKatex(latex: string, displayMode: boolean): string {
+  try {
+    return katex.renderToString(latex, {
+      displayMode,
+      throwOnError: false,
+      output: "htmlAndMathml",
+    });
+  } catch {
+    return escapeHtml(latex);
+  }
+}
+
+/**
+ * `marked` extensions that recognise TeX math: `$$…$$` as a standalone block
+ * and `$…$` inline. The rendered output keeps the raw LaTeX in a data
+ * attribute so the Tiptap editor can re-render it and round-trip back to
+ * markdown without depending on the KaTeX HTML.
+ */
+export function createMathExtensions(): TokenizerAndRendererExtension[] {
+  return [
+    {
+      name: "mathBlock",
+      level: "block",
+      start(src: string) {
+        const index = src.indexOf("$$");
+        return index < 0 ? undefined : index;
+      },
+      tokenizer(src: string) {
+        const match = /^\$\$[ \t]*\n?([\s\S]+?)\n?[ \t]*\$\$(?:\n|$)/.exec(src);
+        if (!match) return undefined;
+        const latex = match[1].trim();
+        if (!latex) return undefined;
+        return {
+          type: "mathBlock",
+          raw: match[0],
+          latex,
+          display: true,
+        } satisfies MathToken;
+      },
+      renderer(token) {
+        const math = token as MathToken;
+        return `<div ${mathBlockAttribute} ${mathLatexAttribute}="${escapeHtml(
+          math.latex,
+        )}">${renderKatex(math.latex, true)}</div>\n`;
+      },
+    },
+    {
+      name: "mathInline",
+      level: "inline",
+      start(src: string) {
+        const index = src.indexOf("$");
+        return index < 0 ? undefined : index;
+      },
+      tokenizer(src: string) {
+        // A single `$…$` with no `$$`, no surrounding whitespace just inside the
+        // delimiters, and support for escaped characters such as `\$` and `\{`.
+        const match = /^\$(?!\$)((?:\\.|[^$\\])+?)\$(?!\$)/.exec(src);
+        if (!match) return undefined;
+        const latex = match[1];
+        if (/^\s|\s$/.test(latex)) return undefined;
+        return {
+          type: "mathInline",
+          raw: match[0],
+          latex,
+          display: false,
+        } satisfies MathToken;
+      },
+      renderer(token) {
+        const math = token as MathToken;
+        return `<span ${mathInlineAttribute} ${mathLatexAttribute}="${escapeHtml(
+          math.latex,
+        )}">${renderKatex(math.latex, false)}</span>`;
+      },
+    },
+  ];
+}
+
+// Register math support on the shared `marked` singleton used by `toHtml`.
+// `createCriticMarked` builds its own `Marked` instance and registers the same
+// extensions there.
+marked.use({ extensions: createMathExtensions() });
+
 export function createMarkedRenderer(options?: MarkdownOptions) {
   const renderer = new marked.Renderer();
   const baseRenderer = new marked.Renderer();
@@ -526,6 +624,28 @@ export function createTurndownService(): TurndownService {
       node.nodeName === "STRIKE",
     replacement(content) {
       return `~~${content}~~`;
+    },
+  });
+
+  service.addRule("mathInline", {
+    filter: (node) =>
+      node.nodeType === 1 &&
+      (node as HTMLElement).hasAttribute(mathInlineAttribute),
+    replacement(_content, node) {
+      const latex =
+        (node as HTMLElement).getAttribute(mathLatexAttribute) ?? "";
+      return `$${latex}$`;
+    },
+  });
+
+  service.addRule("mathBlock", {
+    filter: (node) =>
+      node.nodeType === 1 &&
+      (node as HTMLElement).hasAttribute(mathBlockAttribute),
+    replacement(_content, node) {
+      const latex =
+        (node as HTMLElement).getAttribute(mathLatexAttribute) ?? "";
+      return `\n\n$$\n${latex}\n$$\n\n`;
     },
   });
 

@@ -16,6 +16,7 @@ import {
 } from "../editor-extensions";
 import {
   createMarkedRenderer,
+  createMathExtensions,
   createTurndownService,
   normalizeBlockSpacing,
   appendYamlEndmatter,
@@ -1263,6 +1264,7 @@ function createCriticMarked(
 
   parser.use({
     extensions: [
+      ...createMathExtensions(),
       {
         name: "criticCommentAnchor",
         level: "inline",

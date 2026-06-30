@@ -66,6 +66,15 @@ Paragraph with **bold**, [link](https://example.com), `inline code`.
 ```markdown
 # Fenced examples This page should not show a review rail just because examples appear inside code fences. ```text example {++inserted++} {--deleted--} {~~old~>new~~} ```
 ```
+### Math Document
+```markdown
+# Math rendering
+Inline LaTeX such as $BP \cdot \exp(\sum_{n=1}^{N} w_n \ln p_n)$ renders via KaTeX, while a lone $5 stays literal text.
+
+$$
+F = \frac{(1 + \beta^2) \cdot P \cdot R}{R + \beta^2 \cdot P}
+$$
+```
 ## Capture Matrix
 | Area | State | How to reach it | Useful selectors | Notes |
 | --- | --- | --- | --- | --- |
@@ -110,6 +119,7 @@ Paragraph with **bold**, [link](https://example.com), `inline code`.
 | Editor | Selection menu on suggestion | Select existing suggestion text | `selection-menu-action-accept-suggestion`, `selection-menu-action-reject-suggestion` | Requires review fixture. |
 | Editor | Link popover | Click a link or choose Link from selection menu | `link-popover`, `link-url-input`, `link-action-open`, `link-action-delete` | Use the plain fixture link. |
 | Editor | Context menu | Right-click in rich editor | `editor-context-menu` | Capture comment, suggestion, paste, and paste-markdown actions. |
+| Editor | LaTeX math | Open the Math fixture in rich and code modes | `math-inline`, `math-block` | Inline `$…$` and block `$$…$$` render via KaTeX; a lone `$5` stays literal. Capture rich-text rendering and the raw `$…$` source in the code editor. |
 | Review rail | Comments | Open review fixture in rich mode | `document-review-rail`, `comment-thread-root` | Thread containers use `data-comment-thread-container="true"`. |
 | Review rail | Suggestions | Open review fixture in rich mode | `suggestion-thread-s1`, `suggestion-thread-s2`, `suggestion-thread-s3` | Thread containers use `data-suggestion-thread-container="true"`. |
 | Review rail | Draft suggestion | Select text and choose a suggestion action | `draft-suggestion-thread`, `draft-suggestion-editor` | Capture dismiss/cancel/apply actions. |
