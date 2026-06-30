@@ -64,7 +64,8 @@ test.describe("markdown links and layout", () => {
     await page.getByTestId("directory-file-index.md").click();
 
     const editor = richTextEditor(page);
-    await expect(editor.locator("table")).toBeVisible();
+    // A markdown-rendered <table> has no data-testid by design.
+    await expect(editor.locator("table")).toBeVisible(); // selector-check-ignore
 
     await editor.getByRole("link", { name: "the beta doc" }).click();
     await expect(editor).toContainText("Beta body text.");
@@ -119,8 +120,9 @@ test.describe("markdown links and layout", () => {
     await editor.getByRole("link", { name: "the rule" }).click();
     await expect(page).toHaveURL(/[?&]path=.*target\.md/);
 
-    // The anchor target exists and the view scrolled to it.
-    await expect(editor.locator("#REQ-11")).toHaveCount(1);
+    // The anchor target exists and the view scrolled to it. The in-document
+    // anchor is addressed by its id, which is the behavior under test.
+    await expect(editor.locator("#REQ-11")).toHaveCount(1); // selector-check-ignore
     await expect(editor.getByText("REQ-11 is the rule.")).toBeInViewport();
   });
 
