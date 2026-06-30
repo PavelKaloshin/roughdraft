@@ -65,8 +65,6 @@ import {
   type Page,
   type StorageBackend,
 } from "./storage";
-import { UpdateNotice } from "./UpdateNotice";
-import { fetchUpdateStatus, type UpdateStatus } from "./update-status";
 
 export type DocumentDiskChangeState =
   | "clean"
@@ -310,13 +308,7 @@ function getHomepageWorkflowDocumentScale(element: HTMLElement | null) {
   return matrix?.a || 1;
 }
 
-export function Homepage({
-  message,
-  updateStatus,
-}: {
-  message: ReactNode;
-  updateStatus: UpdateStatus | null;
-}) {
+export function Homepage({ message }: { message: ReactNode }) {
   const [copyState, setCopyState] = useState<"idle" | "copied" | "error">(
     "idle",
   );
@@ -405,11 +397,6 @@ export function Homepage({
       className="flex min-h-screen items-start justify-center bg-[#FCFCFC] dark:bg-background px-6 pt-8 pb-12 text-slate-950 dark:text-slate-50"
       data-testid="homepage"
     >
-      {updateStatus ? (
-        <div className="absolute top-4 right-4 max-w-sm">
-          <UpdateNotice updateStatus={updateStatus} />
-        </div>
-      ) : null}
       <div className="w-full">
         <div className="font-die-grotesk-a mx-auto max-w-[100rem] text-left">
           <p
@@ -1511,7 +1498,6 @@ export function App() {
   >(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
   const [documentEditorViewMode, setDocumentEditorViewMode] = useState(() =>
     getDocumentEditorViewModeFromLocation("rich-text"),
   );
@@ -1566,23 +1552,6 @@ export function App() {
     },
     [loadDocument],
   );
-
-  useEffect(() => {
-    let cancelled = false;
-
-    const loadUpdateStatus = async () => {
-      const nextUpdateStatus = await fetchUpdateStatus();
-      if (!cancelled) {
-        setUpdateStatus(nextUpdateStatus);
-      }
-    };
-
-    void loadUpdateStatus();
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   useEffect(() => {
     const sourceUrl = new URL("/api/open-requests", window.location.origin);
@@ -2106,12 +2075,7 @@ export function App() {
   }
 
   if ((!requestedPathState.rawPath && !isDirectoryMode) || loadError) {
-    return (
-      <Homepage
-        message={loadError ?? <HomepageSubtitle />}
-        updateStatus={updateStatus}
-      />
-    );
+    return <Homepage message={loadError ?? <HomepageSubtitle />} />;
   }
 
   const documentAbsolutePath =
@@ -2120,14 +2084,6 @@ export function App() {
       : requestedPathState.rawPath;
   const documentFilenameLabel =
     getPathLeaf(documentAbsolutePath ?? activeDocumentPath) ?? "Untitled.md";
-
-  const updateNotice = updateStatus ? (
-    <div className="pointer-events-none absolute top-4 right-4 z-40 max-w-sm">
-      <div className="pointer-events-auto">
-        <UpdateNotice updateStatus={updateStatus} />
-      </div>
-    </div>
-  ) : null;
 
   const hasOpenDocument = Boolean(documentPage && activeDocumentPath);
   const documentWorkspace = hasOpenDocument ? (
@@ -2177,7 +2133,6 @@ export function App() {
           onSelect={handleSelectDirectoryFile}
         />
         <div className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
-          {updateNotice}
           {documentWorkspace ?? fileViewer ?? <DirectoryEmptyState />}
         </div>
       </main>
@@ -2186,7 +2141,6 @@ export function App() {
 
   return (
     <main className="relative flex h-screen min-w-0 flex-col overflow-hidden bg-[#FCFCFC] dark:bg-background text-slate-950 dark:text-slate-50">
-      {updateNotice}
       {documentWorkspace}
     </main>
   );

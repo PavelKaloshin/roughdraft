@@ -63,9 +63,7 @@ function getByTestId<T extends Element = HTMLElement>(
 
 async function renderHomepage(root: Root) {
   await act(async () => {
-    root.render(
-      <Homepage message={<HomepageSubtitle />} updateStatus={null} />,
-    );
+    root.render(<Homepage message={<HomepageSubtitle />} />);
     await Promise.resolve();
   });
 }
