@@ -47,6 +47,7 @@ import {
   type DocumentSaveState,
   PageCard,
 } from "./PageCard";
+import type { OutlineJumpRequest } from "./outline-navigation";
 import { RobotsHighFiveToy } from "./RobotsHighFiveToy";
 import type { CompleteReviewOptions, Page, StorageBackend } from "./storage";
 import { useReviewLayoutShiftAnimation } from "./useReviewLayoutShiftAnimation";
@@ -403,6 +404,7 @@ interface DocumentWorkspaceProps {
     options?: CompleteReviewOptions,
   ) => Promise<{ delivered: boolean }>;
   backend: StorageBackend | null;
+  outlineJumpRequest?: OutlineJumpRequest | null;
 }
 
 export function DocumentWorkspace({
@@ -423,6 +425,7 @@ export function DocumentWorkspace({
   onOverwriteDocumentOnDisk,
   onCompleteReview,
   backend,
+  outlineJumpRequest = null,
 }: DocumentWorkspaceProps) {
   const [documentInteractionMode, setDocumentInteractionMode] =
     useState<DocumentInteractionMode>("suggesting");
@@ -1220,6 +1223,7 @@ export function DocumentWorkspace({
               }}
               saveBlocked={documentDiskChangeState !== "clean"}
               forceResetKey={documentForceResetKey}
+              outlineJumpRequest={outlineJumpRequest}
             />
           ) : null
         ) : (

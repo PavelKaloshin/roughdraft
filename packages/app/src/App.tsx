@@ -45,6 +45,7 @@ import {
   DialogTrigger,
 } from "./components/ui/dialog";
 import { DirectoryEmptyState, DirectorySidebar } from "./DirectoryWorkspace";
+import { DocumentOutlineRail } from "./DocumentOutline";
 import { DocumentWorkspace } from "./DocumentWorkspace";
 import { classifyFile, type FileKind } from "./file-types";
 import { FileViewerWorkspace } from "./FileViewerWorkspace";
@@ -56,6 +57,14 @@ import {
   resolveAnchoredRailLayouts,
 } from "./document-comments";
 import { cn } from "./lib/utils";
+import {
+  extractMarkdownOutline,
+  type OutlineHeading,
+} from "./markdown-outline";
+import {
+  createOutlineJumpRequest,
+  type OutlineJumpRequest,
+} from "./outline-navigation";
 import type { DocumentSaveState } from "./PageCard";
 import { PreviewBackend } from "./preview-backend";
 import { RoughdraftFormatDemo } from "./RoughdraftFormatDemo";
@@ -65,6 +74,10 @@ import {
   type Page,
   type StorageBackend,
 } from "./storage";
+import {
+  readOutlineRailPreference,
+  writeOutlineRailPreference,
+} from "./view-preferences";
 
 export type DocumentDiskChangeState =
   | "clean"
@@ -1496,6 +1509,12 @@ export function App() {
   const [documentForceResetKey, setDocumentForceResetKey] = useState<
     string | null
   >(null);
+  const [outlineJumpRequest, setOutlineJumpRequest] =
+    useState<OutlineJumpRequest | null>(null);
+  const [outlineRailExpanded, setOutlineRailExpanded] = useState(
+    readOutlineRailPreference,
+  );
+  const outlineJumpIdRef = useRef(0);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [documentEditorViewMode, setDocumentEditorViewMode] = useState(() =>
@@ -1997,6 +2016,51 @@ export function App() {
     [directoryPath, openDirectoryFile],
   );
 
+  const requestOutlineJump = useCallback((heading: OutlineHeading) => {
+    outlineJumpIdRef.current += 1;
+    setOutlineJumpRequest(
+      createOutlineJumpRequest(heading, outlineJumpIdRef.current),
+    );
+  }, []);
+
+  // A heading in another file opens that file first; the request survives the
+  // switch, and the newly mounted document scrolls to it once it renders.
+  const handleSelectTreeHeading = useCallback(
+    (relativePath: string, heading: OutlineHeading) => {
+      if (relativePath === activeDocumentPathRef.current) {
+        requestOutlineJump(heading);
+        return;
+      }
+
+      void handleSelectDirectoryFile(relativePath).then(() => {
+        requestOutlineJump(heading);
+      });
+    },
+    [handleSelectDirectoryFile, requestOutlineJump],
+  );
+
+  const readMarkdownFileForOutline = useMemo(() => {
+    if (!backend) return null;
+    const readTextFile = backend.readTextFile?.bind(backend);
+    if (readTextFile) return readTextFile;
+    const getMarkdownFile = backend.getMarkdownFile.bind(backend);
+    return async (relativePath: string) =>
+      (await getMarkdownFile(relativePath)).content;
+  }, [backend]);
+
+  const handleOutlineRailExpandedChange = useCallback((expanded: boolean) => {
+    setOutlineRailExpanded(expanded);
+    writeOutlineRailPreference(expanded);
+  }, []);
+
+  const singleFileOutline = useMemo(
+    () =>
+      documentPage && !isDirectoryMode
+        ? extractMarkdownOutline(documentPage.content)
+        : [],
+    [documentPage, isDirectoryMode],
+  );
+
   useEffect(() => {
     if (!isDirectoryMode) return;
 
@@ -2105,6 +2169,7 @@ export function App() {
       onOverwriteDocumentOnDisk={handleOverwriteDocumentOnDisk}
       onCompleteReview={handleCompleteReview}
       backend={backend}
+      outlineJumpRequest={outlineJumpRequest}
     />
   ) : null;
 
@@ -2131,6 +2196,11 @@ export function App() {
           paths={fileTreePaths}
           activePath={activeDocumentPath ?? activeViewerFile?.path ?? null}
           onSelect={handleSelectDirectoryFile}
+          activeMarkdownPath={activeDocumentPath}
+          activeMarkdownContent={documentPage?.content ?? null}
+          readMarkdownFile={readMarkdownFileForOutline}
+          outlineRefreshMs={DIRECTORY_TREE_REFRESH_MS}
+          onSelectHeading={handleSelectTreeHeading}
         />
         <div className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
           {documentWorkspace ?? fileViewer ?? <DirectoryEmptyState />}
@@ -2139,9 +2209,21 @@ export function App() {
     );
   }
 
+  // Single-file mode has no tree, so the outline gets its own rail. It only
+  // appears once the document actually has headings to jump between.
   return (
-    <main className="relative flex h-screen min-w-0 flex-col overflow-hidden bg-[#FCFCFC] dark:bg-background text-slate-950 dark:text-slate-50">
-      {documentWorkspace}
+    <main className="relative flex h-screen min-w-0 overflow-hidden bg-[#FCFCFC] dark:bg-background text-slate-950 dark:text-slate-50">
+      {hasOpenDocument && singleFileOutline.length > 0 ? (
+        <DocumentOutlineRail
+          headings={singleFileOutline}
+          expanded={outlineRailExpanded}
+          onExpandedChange={handleOutlineRailExpandedChange}
+          onSelectHeading={requestOutlineJump}
+        />
+      ) : null}
+      <div className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
+        {documentWorkspace}
+      </div>
     </main>
   );
 }

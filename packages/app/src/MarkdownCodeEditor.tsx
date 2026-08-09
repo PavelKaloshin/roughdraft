@@ -13,6 +13,11 @@ interface MarkdownCodeEditorProps {
   readOnly?: boolean;
   className?: string;
   testId?: string;
+  /**
+   * Scrolls a 1-based source line to the top of the editor. A new `requestId`
+   * re-runs the scroll, so clicking the same outline heading twice works.
+   */
+  scrollToLine?: { line: number; requestId: number } | null;
 }
 
 export function createMarkdownCodeEditorExtensions(
@@ -91,6 +96,7 @@ export function MarkdownCodeEditor({
   readOnly = false,
   className,
   testId,
+  scrollToLine = null,
 }: MarkdownCodeEditorProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const editorViewRef = useRef<EditorView | null>(null);
@@ -150,6 +156,23 @@ export function MarkdownCodeEditor({
       },
     });
   }, [value]);
+
+  useEffect(() => {
+    if (!scrollToLine) return;
+    const view = editorViewRef.current;
+    if (!view) return;
+
+    const lineNumber = Math.min(
+      Math.max(scrollToLine.line, 1),
+      view.state.doc.lines,
+    );
+    const position = view.state.doc.line(lineNumber).from;
+
+    view.dispatch({
+      selection: { anchor: position },
+      effects: EditorView.scrollIntoView(position, { y: "start" }),
+    });
+  }, [scrollToLine]);
 
   return (
     <div

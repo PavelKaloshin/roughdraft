@@ -35,6 +35,10 @@ import {
   joinPath,
 } from "./app-navigation";
 import { toHtml } from "./markdown";
+import {
+  type OutlineJumpRequest,
+  scrollToOutlineHeading,
+} from "./outline-navigation";
 import type { Page, StorageBackend } from "./storage";
 import { useCommentAnchorLayout } from "./useCommentAnchorLayout";
 import { useReviewLayoutShiftAnimation } from "./useReviewLayoutShiftAnimation";
@@ -71,6 +75,7 @@ interface PageCardProps {
   onSaveControllerChange?: (controller: DocumentSaveController | null) => void;
   saveBlocked?: boolean;
   forceResetKey?: string | null;
+  outlineJumpRequest?: OutlineJumpRequest | null;
 }
 
 interface PageCardEditorSurfaceProps {
@@ -91,6 +96,7 @@ interface PageCardEditorSurfaceProps {
   onSaveControllerChange?: (controller: DocumentSaveController | null) => void;
   saveBlocked?: boolean;
   forceResetKey?: string | null;
+  outlineJumpRequest: OutlineJumpRequest | null;
 }
 
 interface RichTextEditorSurfaceProps {
@@ -113,6 +119,7 @@ interface CodeEditorSurfaceProps {
   interactionMode: DocumentInteractionMode;
   layout: "default" | "embedded-demo";
   onMarkdownChange: (markdown: string) => void;
+  outlineJumpRequest: OutlineJumpRequest | null;
 }
 
 export interface DraftSuggestionState {
@@ -2147,7 +2154,19 @@ const CodeEditorSurface = memo(function CodeEditorSurface({
   interactionMode,
   layout,
   onMarkdownChange,
+  outlineJumpRequest,
 }: CodeEditorSurfaceProps) {
+  // The code editor jumps by source line, which the outline already carries.
+  const scrollToLine = useMemo(
+    () =>
+      outlineJumpRequest
+        ? {
+            line: outlineJumpRequest.line,
+            requestId: outlineJumpRequest.requestId,
+          }
+        : null,
+    [outlineJumpRequest],
+  );
   const documentShellClass = cn(
     "document-page-shell",
     layout === "embedded-demo"
@@ -2193,6 +2212,7 @@ const CodeEditorSurface = memo(function CodeEditorSurface({
                 onChange={onMarkdownChange}
                 readOnly={interactionMode === "viewing"}
                 autoFocus
+                scrollToLine={scrollToLine}
               />
             </div>
           </div>
@@ -2227,6 +2247,7 @@ const PageCardEditorSurface = memo(function PageCardEditorSurface({
   onSaveControllerChange,
   saveBlocked = false,
   forceResetKey = null,
+  outlineJumpRequest,
 }: PageCardEditorSurfaceProps) {
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const inFlightSaveRef = useRef<Promise<ManualSaveResult> | null>(null);
@@ -2463,6 +2484,7 @@ const PageCardEditorSurface = memo(function PageCardEditorSurface({
         interactionMode={interactionMode}
         layout={layout}
         onMarkdownChange={handleMarkdownChange}
+        outlineJumpRequest={outlineJumpRequest}
       />
     );
   }
@@ -2510,15 +2532,48 @@ export function PageCard({
   onSaveControllerChange,
   saveBlocked,
   forceResetKey,
+  outlineJumpRequest = null,
 }: PageCardProps) {
   const [saveState, setSaveState] = useState<DocumentSaveState>("saved");
+  const containerRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     onSaveStateChange?.(saveState);
   }, [onSaveStateChange, saveState]);
 
+  // Rich-text jumps scroll the rendered heading itself. The retry loop covers
+  // the cross-file case, where the request arrives before the newly opened
+  // document has rendered. The code editor scrolls by line instead, inside
+  // MarkdownCodeEditor.
+  useEffect(() => {
+    if (!outlineJumpRequest || editorViewMode === "code") return;
+
+    let cancelled = false;
+    let attemptsLeft = 30;
+    let frame = 0;
+
+    const attemptScroll = () => {
+      if (cancelled) return;
+      const container = containerRef.current;
+      if (container && scrollToOutlineHeading(container, outlineJumpRequest)) {
+        return;
+      }
+      attemptsLeft -= 1;
+      if (attemptsLeft > 0) {
+        frame = requestAnimationFrame(attemptScroll);
+      }
+    };
+
+    attemptScroll();
+
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(frame);
+    };
+  }, [editorViewMode, outlineJumpRequest]);
+
   return (
-    <div className="w-full">
+    <div className="w-full" ref={containerRef}>
       <PageCardEditorSurface
         page={page}
         activeDocumentPath={activeDocumentPath}
@@ -2537,6 +2592,7 @@ export function PageCard({
         onSaveControllerChange={onSaveControllerChange}
         saveBlocked={saveBlocked}
         forceResetKey={forceResetKey}
+        outlineJumpRequest={outlineJumpRequest}
       />
     </div>
   );

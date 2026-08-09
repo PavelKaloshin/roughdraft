@@ -137,6 +137,12 @@ $$
 | Directory | Binary stub | In directory mode, click a binary (e.g. `.pdf`/`.zip`) | `file-viewer-workspace`, `file-viewer-stub` | Stub copy: `Preview unavailable`. |
 | Directory | Nested folder expanded | In directory mode with nested files | `role=navigation[name="Directory files"]` | Folders toggle open/closed; capture an expanded subfolder with a highlighted active file. |
 | Directory | Empty directory | Open `?dir=<dir>` with no files | `role=navigation[name="Directory files"]` | Sidebar copy: `No files here.` |
+| Directory | Outline collapsed in tree | Open `?dir=<dir>` with `.md` files, leave outlines closed | `directory-outline-toggle-<path>` | Every `.md` row carries a heading chevron; non-markdown rows carry only a spacer. |
+| Directory | Outline expanded in tree | Click the chevron on a `.md` row (or open the file, which expands it) | `directory-outline-<path>`, `directory-outline-<path>-heading-0` | Tinted, accent-bordered box bound to the file row; entries indented by heading level. |
+| Directory | Outline empty / unreadable | Expand a `.md` file with no headings, and one that fails to read | `directory-outline-<path>` | Copy: `No headings.` / `Could not read headings.` (`Reading headings…` while loading). |
+| Single file | Outline rail expanded | Open a single `.md` file with 2+ headings | `document-outline-rail`, `document-outline-box`, `document-outline-heading-0` | Rail sits left of the document; heading click scrolls the document. |
+| Single file | Outline rail collapsed | Click `document-outline-toggle` | `document-outline-rail`, `document-outline-toggle` | Thin strip with only the toggle; preference persists via `roughdraft:outline-rail`. |
+| Single file | No outline rail | Open a single `.md` file with no headings | absence of `document-outline-rail` | Rail is not rendered at all when there is nothing to jump to. |
 | Error/home fallback | Non-Markdown path | Open URL with `?path=/tmp/file.txt` | homepage error message | Copy: `Roughdraft now opens one .md file at a time.` |
 | Error/home fallback | Missing/unloadable path | Open URL with invalid markdown path through local backend | homepage error message | Captures load-error homepage variant. |
 ## Playwright Capture Skeleton ```ts import { chromium, devices } from "playwright"; const baseUrl = process.env.ROUGHDRAFT_BASE_URL ?? "[http://127.0.0.1:5173](http://127.0.0.1:5173)"; const outDir = process.env.ROUGHDRAFT_SCREENSHOT_DIR ?? ".context/ui-state-screenshots/manual";
