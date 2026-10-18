@@ -4,6 +4,7 @@ import type {
   CommentEventResult,
   CommentEventType,
 } from "./comment-agent";
+import { getLiveConnection, type LiveConnection } from "./live-connection";
 import {
   type BackendInfo,
   type CompleteReviewOptions,
@@ -20,9 +21,11 @@ import {
 export class ApiBackend implements StorageBackend {
   info: BackendInfo;
   canManageProjects = true;
+  private readonly live: LiveConnection;
 
-  constructor(info: BackendInfo) {
+  constructor(info: BackendInfo, live: LiveConnection = getLiveConnection()) {
     this.info = info;
+    this.live = live;
   }
 
   private updateProjectInfo(projectPath?: string): void {
@@ -120,28 +123,24 @@ export class ApiBackend implements StorageBackend {
     onChange: (event: MarkdownFileChangeEvent) => void,
     knownVersion?: string,
   ): () => void {
-    const source = new EventSource(
-      this.buildUrl("/api/markdown-file/events", {
+    // The newest version this subscription has seen. A reconnect re-sends
+    // it, so a write that landed while the socket was down is reported.
+    let latestVersion = knownVersion;
+    const projectPath = this.info.projectPath;
+    return this.live.subscribe(
+      "markdown-file",
+      () => ({
+        projectPath,
         path: relativePath,
-        ...(knownVersion ? { version: knownVersion } : {}),
+        ...(latestVersion ? { version: latestVersion } : {}),
       }),
+      (event, data) => {
+        if (event !== "change") return;
+        const change = data as MarkdownFileChangeEvent;
+        if (typeof change.version === "string") latestVersion = change.version;
+        onChange(change);
+      },
     );
-
-    source.addEventListener("change", (event) => {
-      try {
-        onChange(JSON.parse((event as MessageEvent<string>).data));
-      } catch (error) {
-        console.error("Failed to read markdown file change event:", error);
-      }
-    });
-
-    source.onerror = (error) => {
-      console.error("Markdown file event stream failed:", error);
-    };
-
-    return () => {
-      source.close();
-    };
   }
 
   async completeReview(
@@ -236,25 +235,14 @@ export class ApiBackend implements StorageBackend {
     relativePath: string,
     onStatus: (status: AgentStatusSnapshot) => void,
   ): () => void {
-    const source = new EventSource(
-      this.buildUrl("/api/agent/events", { path: relativePath }),
+    const projectPath = this.info.projectPath;
+    return this.live.subscribe(
+      "agent-status",
+      () => ({ projectPath, path: relativePath }),
+      (event, data) => {
+        if (event === "status") onStatus(parseAgentStatusSnapshot(data));
+      },
     );
-
-    source.addEventListener("status", (event) => {
-      try {
-        onStatus(
-          parseAgentStatusSnapshot(
-            JSON.parse((event as MessageEvent<string>).data),
-          ),
-        );
-      } catch (error) {
-        console.error("Failed to read agent status event:", error);
-      }
-    });
-
-    return () => {
-      source.close();
-    };
   }
 
   async saveAsset(file: File): Promise<StoredAsset> {

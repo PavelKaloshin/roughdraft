@@ -57,6 +57,7 @@ import {
   resolveAnchoredRailLayouts,
 } from "./document-comments";
 import { cn } from "./lib/utils";
+import { getLiveConnection } from "./live-connection";
 import {
   extractMarkdownOutline,
   type OutlineHeading,
@@ -1584,23 +1585,18 @@ export function App() {
   );
 
   useEffect(() => {
-    const sourceUrl = new URL("/api/open-requests", window.location.origin);
+    // The static web preview has no server to ask.
+    if (import.meta.env.VITE_PREVIEW_WEB === "1") return;
     // In directory mode the CLI sends an open request keyed on the directory,
     // so register this window under the directory path; otherwise use the file.
     const registrationPath =
       requestedPathState.mode === "directory"
         ? requestedPathState.directoryPath
         : requestedPathState.rawPath;
-    if (registrationPath) {
-      sourceUrl.searchParams.set("path", registrationPath);
-    }
 
-    const source = new EventSource(`${sourceUrl.pathname}${sourceUrl.search}`);
-    const handleOpenRequest = (event: Event) => {
+    const handleOpenRequest = (data: unknown) => {
       try {
-        const payload = JSON.parse((event as MessageEvent<string>).data) as {
-          url?: unknown;
-        };
+        const payload = (data ?? {}) as { url?: unknown };
         if (typeof payload.url !== "string" || !payload.url.trim()) return;
 
         const nextUrl = new URL(payload.url, window.location.origin);
@@ -1627,12 +1623,13 @@ export function App() {
       }
     };
 
-    source.addEventListener("open-request", handleOpenRequest);
-
-    return () => {
-      source.removeEventListener("open-request", handleOpenRequest);
-      source.close();
-    };
+    return getLiveConnection().subscribe(
+      "open-requests",
+      () => (registrationPath ? { path: registrationPath } : {}),
+      (event, data) => {
+        if (event === "open-request") handleOpenRequest(data);
+      },
+    );
   }, [
     requestedPathState.directoryPath,
     requestedPathState.mode,
@@ -1942,8 +1939,15 @@ export function App() {
     [applyDocumentPage],
   );
 
+  // Subscribe once the page is loaded, so the subscription can start from
+  // the version the tab shows. (On first load the path is known from the URL
+  // before the file is read; subscribing then started from "whatever is on
+  // disk when the server gets the subscription", and a write landing before
+  // that was never reported.)
+  const documentLoaded = documentPage !== null;
   useEffect(() => {
-    if (!backend?.watchMarkdownFile || !activeDocumentPath) return;
+    if (!backend?.watchMarkdownFile || !activeDocumentPath || !documentLoaded)
+      return;
 
     let disposed = false;
     const loadedPage = documentPageRef.current;
@@ -2017,7 +2021,13 @@ export function App() {
       disposed = true;
       stopWatching();
     };
-  }, [activeDocumentPath, applyDocumentPage, backend, documentDiskChangeState]);
+  }, [
+    activeDocumentPath,
+    applyDocumentPage,
+    backend,
+    documentDiskChangeState,
+    documentLoaded,
+  ]);
 
   const handleDocumentEditorViewModeChange = useCallback(
     (nextMode: DocumentEditorViewMode) => {

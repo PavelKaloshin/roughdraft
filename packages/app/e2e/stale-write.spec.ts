@@ -2,6 +2,7 @@ import fs from "node:fs";
 import { expect, test } from "@playwright/test";
 import {
   appendInCodeEditor,
+  blockMarkdownFileEvents,
   codeEditor,
   createMarkdownProject,
   documentSaveStatus,
@@ -27,7 +28,7 @@ test.describe("stale writes", () => {
   test("surfaces a save conflict when the file changed externally @smoke", async ({
     page,
   }) => {
-    await page.route("**/api/markdown-file/events**", (route) => route.abort());
+    await blockMarkdownFileEvents(page);
 
     const filePath = writeProjectFile(
       projectDir,
@@ -76,7 +77,7 @@ test.describe("stale writes", () => {
   test("auto-merges a non-overlapping external change on save conflict @smoke", async ({
     page,
   }) => {
-    await page.route("**/api/markdown-file/events**", (route) => route.abort());
+    await blockMarkdownFileEvents(page);
 
     const filePath = writeProjectFile(
       projectDir,
@@ -108,7 +109,7 @@ test.describe("stale writes", () => {
   test("overwrite after conflict marks the current draft saved", async ({
     page,
   }) => {
-    await page.route("**/api/markdown-file/events**", (route) => route.abort());
+    await blockMarkdownFileEvents(page);
 
     const filePath = writeProjectFile(
       projectDir,
@@ -156,7 +157,7 @@ test.describe("stale writes", () => {
   test("manual save preserves expected-version conflict behavior", async ({
     page,
   }) => {
-    await page.route("**/api/markdown-file/events**", (route) => route.abort());
+    await blockMarkdownFileEvents(page);
 
     const filePath = writeProjectFile(
       projectDir,
@@ -229,7 +230,7 @@ test.describe("stale writes", () => {
   test("keeps explanatory conflict choices visible while scrolled in a long document", async ({
     page,
   }) => {
-    await page.route("**/api/markdown-file/events**", (route) => route.abort());
+    await blockMarkdownFileEvents(page);
 
     const longBody = Array.from(
       { length: 120 },
@@ -275,7 +276,7 @@ test.describe("stale writes", () => {
   test("keeps conflict banner and save status stack from overlapping", async ({
     page,
   }) => {
-    await page.route("**/api/markdown-file/events**", (route) => route.abort());
+    await blockMarkdownFileEvents(page);
 
     const filePath = writeProjectFile(
       projectDir,
