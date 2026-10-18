@@ -1,6 +1,9 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
-import { createServer as createHttpServer } from "node:http";
+import {
+  createServer as createHttpServer,
+  type Server as HttpServer,
+} from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -33,6 +36,16 @@ import {
   type ReviewEventType,
 } from "./review-events.js";
 import { resolveUpdateStatus } from "./update-status.js";
+import {
+  fileVersionFromContent,
+  fileVersionFromFile,
+  subscribeMarkdownFileChanges,
+} from "./file-watch.js";
+import {
+  createLiveSocketServer,
+  type LiveChannelOpener,
+  type LiveSocketServer,
+} from "./live-socket.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const staticDir = path.resolve(__dirname, "../../app/dist");
@@ -85,17 +98,22 @@ interface CreateAppOptions {
   remoteDocumentToken?: string;
   /** How long an agent listener stays "present" between long-poll rounds. */
   agentListenerGraceMs?: number;
+  /** Live-socket heartbeat interval (tests shorten it). */
+  liveSocketHeartbeatMs?: number;
 }
 
 interface CreateAppResult {
   app: Express;
   port: number;
+  /** Serves the per-tab live WebSocket (`/api/live`) on an HTTP server. */
+  attachLiveSocket: (server: HttpServer) => void;
+  liveSocket: LiveSocketServer;
 }
 
 interface OpenRequestClient {
   id: number;
   path: string | null;
-  response: Response;
+  deliver: (payload: { path: string; url: string }) => void;
 }
 
 interface OpenRequestPayload {
@@ -176,97 +194,6 @@ function listMdFiles(projectDir: string): string[] {
 function titleFromContent(content: string, fallback: string): string {
   const firstLine = content.split("\n")[0] || "";
   return firstLine.replace(/^#*\s*/, "").trim() || fallback;
-}
-
-function fileVersionFromContent(
-  stats: fs.Stats,
-  content: string | Buffer,
-): string {
-  const contentHash = crypto.createHash("sha256").update(content).digest("hex");
-  return `${stats.mtimeMs}:${stats.size}:${contentHash}`;
-}
-
-function fileVersionFromFile(filePath: string): string {
-  const content = fs.readFileSync(filePath);
-  const stats = fs.statSync(filePath);
-  return fileVersionFromContent(stats, content);
-}
-
-function fileVersionOrNull(filePath: string): string | null {
-  try {
-    return fileVersionFromFile(filePath);
-  } catch {
-    return null;
-  }
-}
-
-/** Coalesces the burst of notifications one save produces. */
-const FILE_WATCH_DEBOUNCE_MS = 50;
-/** Stat-polling fallback when native watching is unavailable. */
-const FILE_WATCH_POLL_INTERVAL_MS = 500;
-
-/**
- * Calls `onChange` (debounced) when `filePath` may have changed. Watches the
- * containing directory rather than the file: editors and agents often save
- * atomically (write a temp file, rename it over the target), which replaces
- * the inode a file watcher would be attached to. Falls back to stat polling
- * if native watching fails (unsupported filesystem, watcher limits, the
- * directory going away). Callers dedupe by content version.
- */
-function watchFileForChanges(
-  filePath: string,
-  onChange: () => void,
-): () => void {
-  const directory = path.dirname(filePath);
-  const fileName = path.basename(filePath);
-  let timer: NodeJS.Timeout | null = null;
-  let watcher: fs.FSWatcher | null = null;
-  let polling = false;
-  let stopped = false;
-
-  const schedule = () => {
-    if (stopped) return;
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(() => {
-      timer = null;
-      if (!stopped) onChange();
-    }, FILE_WATCH_DEBOUNCE_MS);
-  };
-  const poll = (current: fs.Stats, previous: fs.Stats) => {
-    if (
-      current.mtimeMs !== previous.mtimeMs ||
-      current.size !== previous.size ||
-      current.nlink !== previous.nlink
-    ) {
-      schedule();
-    }
-  };
-  const fallBackToPolling = () => {
-    watcher?.close();
-    watcher = null;
-    if (stopped || polling) return;
-    polling = true;
-    fs.watchFile(filePath, { interval: FILE_WATCH_POLL_INTERVAL_MS }, poll);
-    // Do not miss a change that happened while switching.
-    schedule();
-  };
-
-  try {
-    watcher = fs.watch(directory, { persistent: false }, (_event, name) => {
-      // Some platforms omit the name; then any entry may be ours.
-      if (name === null || name.toString() === fileName) schedule();
-    });
-    watcher.on("error", fallBackToPolling);
-  } catch {
-    fallBackToPolling();
-  }
-
-  return () => {
-    stopped = true;
-    if (timer) clearTimeout(timer);
-    watcher?.close();
-    if (polling) fs.unwatchFile(filePath, poll);
-  };
 }
 
 function normalizeOverallComment(input: unknown): string | undefined {
@@ -667,6 +594,109 @@ export function createApp(options: CreateAppOptions = {}): CreateAppResult {
 
   app.use(express.json({ limit: "50mb" }));
 
+  /**
+   * Snapshot now, then one per change. instanceId lets the tab tell a server
+   * restart (thread status and queued events gone) from a reconnect to the
+   * same process.
+   */
+  function subscribeAgentStatus(
+    absolutePath: string,
+    send: (status: object) => void,
+  ): () => void {
+    const withInstance = (status: object) => send({ ...status, instanceId });
+    withInstance(agentRegistry.status(absolutePath));
+    return agentRegistry.subscribe(absolutePath, withInstance);
+  }
+
+  /**
+   * Resolves a markdown document from untrusted channel params the same way
+   * the HTTP routes do (projectPath must exist, path must stay inside it).
+   */
+  function resolveLiveMarkdownTarget(
+    params: Record<string, unknown>,
+  ):
+    | { ok: true; absolutePath: string; relativePath: string }
+    | { ok: false; status: number; error: string } {
+    const projectPath =
+      typeof params.projectPath === "string" ? params.projectPath.trim() : "";
+    if (!projectPath) {
+      return { ok: false, status: 400, error: "projectPath is required" };
+    }
+    const projectDir = path.resolve(projectPath);
+    if (!isExistingDirectory(projectDir)) {
+      return { ok: false, status: 404, error: "Project directory not found" };
+    }
+    const relativePath = typeof params.path === "string" ? params.path : "";
+    const absolutePath = ensureProjectPath(projectDir, relativePath);
+    if (
+      !absolutePath?.toLowerCase().endsWith(".md") ||
+      !fs.existsSync(absolutePath)
+    ) {
+      return { ok: false, status: 404, error: "Markdown file not found" };
+    }
+    return { ok: true, absolutePath, relativePath };
+  }
+
+  // The live socket carries the same events as the SSE routes below, which
+  // stay for the CLI and older tabs.
+  const openLiveChannel: LiveChannelOpener = (channel, params, sink) => {
+    if (channel === "open-requests") {
+      const requestedPath =
+        typeof params.path === "string" && params.path.trim().length > 0
+          ? params.path.trim()
+          : null;
+      const client: OpenRequestClient = {
+        id: nextOpenRequestClientId,
+        path: requestedPath,
+        deliver: (payload) => sink.send("open-request", payload),
+      };
+      nextOpenRequestClientId += 1;
+      openRequestClients.add(client);
+      sink.send("connected", { id: client.id });
+      return { ok: true, close: () => openRequestClients.delete(client) };
+    }
+
+    if (channel === "markdown-file") {
+      const target = resolveLiveMarkdownTarget(params);
+      if (!target.ok) return target;
+      const knownVersion =
+        typeof params.version === "string" && params.version.length > 0
+          ? params.version
+          : null;
+      const close = subscribeMarkdownFileChanges(
+        target.absolutePath,
+        target.relativePath,
+        knownVersion,
+        (change) => sink.send("change", change),
+      );
+      return { ok: true, close };
+    }
+
+    if (channel === "agent-status") {
+      const target = resolveLiveMarkdownTarget(params);
+      if (!target.ok) return target;
+      const close = subscribeAgentStatus(target.absolutePath, (status) =>
+        sink.send("status", status),
+      );
+      return { ok: true, close };
+    }
+
+    return { ok: false, status: 400, error: `Unknown channel: ${channel}` };
+  };
+
+  const liveSocket = createLiveSocketServer({
+    token: remoteDocumentToken,
+    openChannel: openLiveChannel,
+    heartbeatMs: options.liveSocketHeartbeatMs,
+  });
+
+  function attachLiveSocket(server: HttpServer): void {
+    server.on("upgrade", (req, socket, head) => {
+      if (!liveSocket.handleUpgrade(req, socket, head)) socket.destroy();
+    });
+    server.on("close", () => liveSocket.close());
+  }
+
   function requestedProjectPath(req: Request): string | null {
     const queryPath =
       typeof req.query.projectPath === "string"
@@ -816,32 +846,18 @@ export function createApp(options: CreateAppOptions = {}): CreateAppResult {
     res.flushHeaders?.();
     res.write("retry: 1000\n\n");
 
-    // One event per distinct on-disk state: the watcher may report a single
-    // write several times, and the tab recognizes its own saves by version.
-    // Start from the version the tab loaded (`?version=`), not from "now":
-    // a write between the tab's load and this subscription (or during a
-    // reconnect) is then reported right away instead of being lost.
     const knownVersion =
       typeof req.query.version === "string" && req.query.version.length > 0
         ? req.query.version
         : null;
-    let lastVersion: string | null =
-      knownVersion ?? fileVersionOrNull(absolutePath);
-    const sendIfChanged = () => {
-      const version = fileVersionOrNull(absolutePath);
-      if (version === lastVersion) return;
-      lastVersion = version;
-      res.write(
-        `event: change\ndata: ${JSON.stringify({
-          path: relativePath,
-          exists: version !== null,
-          version,
-        })}\n\n`,
-      );
-    };
-
-    const stopWatching = watchFileForChanges(absolutePath, sendIfChanged);
-    if (knownVersion) sendIfChanged();
+    const stopWatching = subscribeMarkdownFileChanges(
+      absolutePath,
+      relativePath,
+      knownVersion,
+      (change) => {
+        res.write(`event: change\ndata: ${JSON.stringify(change)}\n\n`);
+      },
+    );
     req.on("close", stopWatching);
   });
 
@@ -1112,15 +1128,9 @@ export function createApp(options: CreateAppOptions = {}): CreateAppResult {
     res.flushHeaders?.();
     res.write("retry: 1000\n\n");
 
-    // instanceId lets the tab tell a server restart (thread status and queued
-    // events gone) from a reconnect to the same process.
-    const send = (status: object) => {
-      res.write(
-        `event: status\ndata: ${JSON.stringify({ ...status, instanceId })}\n\n`,
-      );
-    };
-    send(agentRegistry.status(target.absolutePath));
-    const unsubscribe = agentRegistry.subscribe(target.absolutePath, send);
+    const unsubscribe = subscribeAgentStatus(target.absolutePath, (status) => {
+      res.write(`event: status\ndata: ${JSON.stringify(status)}\n\n`);
+    });
     const keepalive = setInterval(() => {
       res.write(": keepalive\n\n");
     }, AGENT_EVENTS_KEEPALIVE_MS);
@@ -1381,7 +1391,9 @@ export function createApp(options: CreateAppOptions = {}): CreateAppResult {
     const client: OpenRequestClient = {
       id: nextOpenRequestClientId,
       path: requestedPath,
-      response: res,
+      deliver: (payload) => {
+        res.write(`event: open-request\ndata: ${JSON.stringify(payload)}\n\n`);
+      },
     };
     nextOpenRequestClientId += 1;
 
@@ -1429,12 +1441,7 @@ export function createApp(options: CreateAppOptions = {}): CreateAppResult {
       return;
     }
 
-    matchingClient.response.write(
-      `event: open-request\ndata: ${JSON.stringify({
-        path: targetPath,
-        url: targetUrl,
-      })}\n\n`,
-    );
+    matchingClient.deliver({ path: targetPath, url: targetUrl });
     res.json({ delivered: true });
   });
 
@@ -1792,7 +1799,7 @@ export function createApp(options: CreateAppOptions = {}): CreateAppResult {
     res.sendFile(path.join(staticDirPath, "index.html"));
   });
 
-  return { app, port };
+  return { app, port, attachLiveSocket, liveSocket };
 }
 
 export const ROUGHDRAFT_TOKEN_ENV = "ROUGHDRAFT_TOKEN";
@@ -1816,7 +1823,7 @@ export async function createServer(
     );
   }
 
-  const { app } = createApp({
+  const { app, attachLiveSocket } = createApp({
     port,
     projectDir,
     remoteDocumentToken:
@@ -1829,6 +1836,7 @@ export async function createServer(
       (host) =>
         new Promise<void>((resolve, reject) => {
           const server = createHttpServer(app);
+          attachLiveSocket(server);
 
           server.once("error", (error: NodeJS.ErrnoException) => {
             if (
