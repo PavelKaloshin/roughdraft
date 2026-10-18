@@ -603,6 +603,24 @@ export function createNextChangeId(
   return `s${maxId + 1}`;
 }
 
+function endmatterOwnedIds(
+  endmatter: ParsedEndmatter | undefined,
+): Array<Pick<CriticComment, "id">> {
+  if (!endmatter) return [];
+  return [...endmatter.comments.keys(), ...endmatter.suggestions.keys()].map(
+    (id) => ({ id }),
+  );
+}
+
+function endmatterOwnedChangeIds(
+  endmatter: ParsedEndmatter | undefined,
+): Array<Pick<CriticChangeAttrs, "changeId">> {
+  if (!endmatter) return [];
+  return [...endmatter.suggestions.keys(), ...endmatter.comments.keys()].map(
+    (changeId) => ({ changeId }),
+  );
+}
+
 function parseCommentBlockMatch(
   match: RegExpMatchArray,
   endmatter: ParsedEndmatter | undefined,
@@ -627,7 +645,9 @@ function parseCommentBlockMatch(
       ),
       content: commentText,
     },
-    existingComments,
+    // A metadata-less comment gets a generated id; never one that endmatter
+    // already owns (an agent's reply, say), or it would replace that entry.
+    [...existingComments, ...endmatterOwnedIds(endmatter)],
   );
   const referenceId = referenceMetadataText?.match(
     metadataReferencePattern,
@@ -1020,7 +1040,7 @@ function tokenizeCriticChange(
     const change = createChangeWithContext(
       "addition",
       parseChangeMetadata(metadata.metadataText, endmatter),
-      existingChanges,
+      [...existingChanges, ...endmatterOwnedChangeIds(endmatter)],
     );
 
     return {
@@ -1049,7 +1069,7 @@ function tokenizeCriticChange(
     const change = createChangeWithContext(
       "deletion",
       parseChangeMetadata(metadata.metadataText, endmatter),
-      existingChanges,
+      [...existingChanges, ...endmatterOwnedChangeIds(endmatter)],
     );
 
     return {
@@ -1081,7 +1101,7 @@ function tokenizeCriticChange(
     const change = createChangeWithContext(
       "substitution-old",
       parseChangeMetadata(metadata.metadataText, endmatter),
-      existingChanges,
+      [...existingChanges, ...endmatterOwnedChangeIds(endmatter)],
     );
 
     return {

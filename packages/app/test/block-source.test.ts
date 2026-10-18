@@ -109,14 +109,9 @@ function corpusFiles(): string[] {
     .split("\n")
     .filter(Boolean)
     .map((file) => path.join(repoRoot, file));
-  const contextDir = path.join(repoRoot, ".context");
-  const context = fs.existsSync(contextDir)
-    ? fs
-        .readdirSync(contextDir)
-        .filter((file) => file.endsWith(".md"))
-        .map((file) => path.join(contextDir, file))
-    : [];
-  return [...tracked, ...context];
+  // Only tracked files: the result must not depend on what happens to be in
+  // a developer's untracked .context/ folder.
+  return tracked;
 }
 
 function specFixtureMarkdown(): Array<[string, string]> {
@@ -136,6 +131,80 @@ function specFixtureMarkdown(): Array<[string, string]> {
       ];
     });
 }
+
+describe("agent replies in endmatter", () => {
+  const withReply = (body: string) =>
+    [
+      body,
+      "",
+      "---",
+      "comments:",
+      "  c1:",
+      "    by: user",
+      '    at: "2026-10-18T12:00:00.000Z"',
+      "    intent: ask",
+      "  c2:",
+      "    body: |-",
+      "      First line.",
+      "",
+      "      Second paragraph.",
+      "    by: AI",
+      '    at: "2026-10-18T12:01:00.000Z"',
+      "    re: c1",
+      "",
+    ].join("\n");
+
+  it("keeps a reply whose id a metadata-less comment would otherwise take", () => {
+    // The bare comment gets a generated id at parse time; it must not reuse
+    // an id that endmatter already owns (here the agent's reply c2).
+    const source = withReply(
+      "Some {==text==}{>>Why?<<}{#c1} here.\n\nA bare note {>>no metadata<<} too.",
+    );
+    const opened = openInEditor(source);
+    try {
+      expect(opened.save()).toBe(source);
+      expect(opened.comments.get("c2")?.parentCommentId).toBe("c1");
+    } finally {
+      opened.editor.destroy();
+    }
+  });
+
+  it("keeps an endmatter suggestion whose id a metadata-less suggestion would otherwise take", () => {
+    const source = [
+      "Add {++that++} first and {++this++}{#s1} after.",
+      "",
+      "---",
+      "suggestions:",
+      "  s1:",
+      "    by: AI",
+      '    at: "2026-10-18T12:00:00.000Z"',
+      "",
+    ].join("\n");
+    const opened = openInEditor(source);
+    try {
+      const saved = opened.save();
+      expect(saved).toContain("{++this++}{#s1}");
+      expect(saved).toContain("  s1:\n    by: AI\n");
+      expect(saved).not.toMatch(/\{\+\+that\+\+\}\{#s1\}/);
+    } finally {
+      opened.editor.destroy();
+    }
+  });
+
+  it.each([
+    ["a paragraph", "Some {==text==}{>>Why?<<}{#c1} here."],
+    ["a heading", "# Title {==text==}{>>Why?<<}{#c1} here\n\nBody."],
+    ["a list item", "- item {==text==}{>>Why?<<}{#c1} here"],
+  ])("keeps the reply to a comment anchored in %s", (_where, body) => {
+    const source = withReply(body);
+    const opened = openInEditor(source);
+    try {
+      expect(opened.save()).toBe(source);
+    } finally {
+      opened.editor.destroy();
+    }
+  });
+});
 
 describe("block source preservation: unedited documents", () => {
   it.each(
