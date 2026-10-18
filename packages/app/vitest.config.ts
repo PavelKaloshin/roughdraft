@@ -26,6 +26,7 @@ export default defineConfig({
       },
     },
     environment: "jsdom",
+    setupFiles: ["./test/setup/jsdom-web-storage.ts"],
     include: [
       "src/**/*.test.ts",
       "src/**/*.test.tsx",
