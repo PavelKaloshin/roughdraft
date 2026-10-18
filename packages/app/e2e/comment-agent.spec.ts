@@ -52,7 +52,7 @@ test.describe("Ask / Change comments", () => {
 
     await openMarkdownFile(page, filePath);
     await expect(page.getByTestId("agent-connection-indicator")).toHaveText(
-      "No Claude session listening",
+      "Claude · No session",
     );
 
     // An agent-style watcher for comment events (no listener id, so the UI
@@ -174,7 +174,7 @@ test.describe("Ask / Change comments", () => {
 
     await openMarkdownFile(page, filePath);
     await expect(page.getByTestId("agent-connection-indicator")).toHaveText(
-      "Claude listening · session abcd1234",
+      "Claude · abcd1234",
     );
 
     await selectRichText(page, "this sentence");

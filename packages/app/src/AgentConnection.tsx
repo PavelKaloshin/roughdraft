@@ -1,5 +1,6 @@
 import { Check, Copy, TerminalSquare } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { AgentSessionMenu } from "./AgentSessionMenu";
 import type { CommentAgentContextValue } from "./comment-agent";
 import { Alert, AlertDescription, AlertTitle } from "./components/ui/alert";
 import { Button } from "./components/ui/button";
@@ -108,11 +109,18 @@ export function AgentConnectionIndicator({
   agent,
 }: {
   agent: Pick<CommentAgentContextValue, "available" | "status"> &
-    Partial<Pick<CommentAgentContextValue, "threadSummary">>;
+    Partial<
+      Pick<
+        CommentAgentContextValue,
+        "threadSummary" | "connectSession" | "documentAbsolutePath"
+      >
+    >;
 }) {
   if (!agent.available) return null;
   const listening = agent.status?.listening === true;
   const sessionId = agent.status?.sessionId;
+  // Servers with document ownership (ADR 0007) say who owns the file.
+  const hasOwnership = agent.status?.owner !== undefined;
 
   return (
     <>
@@ -125,7 +133,11 @@ export function AgentConnectionIndicator({
           {agent.threadSummary}
         </span>
       ) : null}
-      <AgentListeningLabel listening={listening} sessionId={sessionId} />
+      {hasOwnership ? (
+        <AgentSessionMenu agent={agent} />
+      ) : (
+        <AgentListeningLabel listening={listening} sessionId={sessionId} />
+      )}
     </>
   );
 }

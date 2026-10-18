@@ -1,5 +1,7 @@
 import {
   AGENT_THREAD_STATUSES,
+  type AgentSessionOwner,
+  type AgentSessionSummary,
   type AgentStatusSnapshot,
   type AgentThreadStatus,
   type AgentThreadTiming,
@@ -233,6 +235,22 @@ export class ApiBackend implements StorageBackend {
     };
   }
 
+  async connectSession(relativePath: string, sessionId: string): Promise<void> {
+    const res = await fetch(this.buildUrl("/api/sessions/claim"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        projectPath: this.info.projectPath,
+        path: relativePath,
+        sessionId,
+        force: true,
+      }),
+    });
+    if (!res.ok) {
+      throw new Error(`Failed to connect session ${sessionId}: ${res.status}`);
+    }
+  }
+
   watchAgentStatus(
     relativePath: string,
     onStatus: (status: AgentStatusSnapshot) => void,
@@ -324,5 +342,55 @@ export function parseAgentStatusSnapshot(value: unknown): AgentStatusSnapshot {
       : {}),
     threads,
     ...(threadDetails ? { threadDetails } : {}),
+    ...("owner" in record ? { owner: parseSessionOwner(record.owner) } : {}),
+    ...(Array.isArray(record.sessions)
+      ? {
+          sessions: record.sessions.flatMap((entry) => {
+            const session = parseSessionSummary(entry);
+            return session ? [session] : [];
+          }),
+        }
+      : {}),
+  };
+}
+
+function optionalString<K extends string>(
+  record: Record<string, unknown>,
+  key: K,
+): Partial<Record<K, string>> {
+  const value = record[key];
+  return typeof value === "string" && value.length > 0
+    ? ({ [key]: value } as Record<K, string>)
+    : {};
+}
+
+function parseSessionOwner(value: unknown): AgentSessionOwner | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  if (typeof record.sessionId !== "string" || !record.sessionId) return null;
+  return {
+    sessionId: record.sessionId,
+    ...optionalString(record, "title"),
+    ...optionalString(record, "cwd"),
+    live: record.live === true,
+    ...optionalString(record, "lastActiveAt"),
+  };
+}
+
+function parseSessionSummary(value: unknown): AgentSessionSummary | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  if (typeof record.sessionId !== "string" || !record.sessionId) return null;
+  return {
+    sessionId: record.sessionId,
+    ...optionalString(record, "title"),
+    ...optionalString(record, "cwd"),
+    lastActiveAt:
+      typeof record.lastActiveAt === "string" ? record.lastActiveAt : "",
+    documents: Array.isArray(record.documents)
+      ? record.documents.filter(
+          (document): document is string => typeof document === "string",
+        )
+      : [],
   };
 }

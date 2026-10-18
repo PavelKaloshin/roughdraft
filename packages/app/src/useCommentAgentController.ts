@@ -212,6 +212,15 @@ export function useCommentAgentController({
         !isHandledThreadStatus(status?.threads[threadRootId]),
     );
 
+  const canConnectSession = Boolean(backend?.connectSession && documentPath);
+  const connectSession = useCallback(
+    async (sessionId: string) => {
+      if (!backend?.connectSession || !documentPath) return;
+      await backend.connectSession(documentPath, sessionId);
+    },
+    [backend, documentPath],
+  );
+
   return useMemo(
     () => ({
       available,
@@ -224,9 +233,14 @@ export function useCommentAgentController({
       getThreadState,
       submitCommentEvent,
       retryThread,
+      documentAbsolutePath: absolutePath,
+      ...(canConnectSession ? { connectSession } : {}),
     }),
     [
+      absolutePath,
       available,
+      canConnectSession,
+      connectSession,
       getThreadState,
       hasUndeliveredEvents,
       listenCommand,

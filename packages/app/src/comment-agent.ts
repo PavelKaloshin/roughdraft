@@ -55,6 +55,82 @@ export interface AgentStatusSnapshot {
   threads: Record<string, AgentThreadStatus>;
   /** Absent from older servers. */
   threadDetails?: Record<string, AgentThreadTiming>;
+  /**
+   * The Claude Code session that owns the document (ADR 0007): only it
+   * receives the document's comments. Null when unowned; absent from older
+   * servers.
+   */
+  owner?: AgentSessionOwner | null;
+  /** Live sessions the document can be connected to. */
+  sessions?: AgentSessionSummary[];
+}
+
+export interface AgentSessionOwner {
+  sessionId: string;
+  title?: string;
+  cwd?: string;
+  live: boolean;
+  lastActiveAt?: string;
+}
+
+export interface AgentSessionSummary {
+  sessionId: string;
+  title?: string;
+  cwd?: string;
+  /** ISO 8601. */
+  lastActiveAt: string;
+  /** Absolute paths of the documents the session owns. */
+  documents: string[];
+}
+
+export const SETUP_CLAUDE_COMMAND = "roughdraft setup claude";
+
+export function formatShortSessionId(sessionId: string) {
+  return sessionId.slice(0, 8);
+}
+
+/** "auth refactor" or the short id. */
+export function getSessionName(session: { sessionId: string; title?: string }) {
+  return session.title?.trim() || formatShortSessionId(session.sessionId);
+}
+
+/** Last path segment of a session's folder. */
+export function getSessionFolderName(cwd: string | undefined) {
+  if (!cwd) return null;
+  const trimmed = cwd.replace(/[\\/]+$/, "");
+  return trimmed.split(/[\\/]/).at(-1) || trimmed || null;
+}
+
+function isSameOrInside(folder: string, documentPath: string) {
+  const base = folder.replace(/[\\/]+$/, "");
+  return documentPath === base || documentPath.startsWith(`${base}/`);
+}
+
+/**
+ * Sessions for the "Connect session" menu: ones working in the document's
+ * folder (or above it) first, then by most recent activity.
+ */
+export function sortSessionsForDocument(
+  sessions: readonly AgentSessionSummary[],
+  documentPath: string | null,
+): AgentSessionSummary[] {
+  const local = (session: AgentSessionSummary) =>
+    documentPath && session.cwd && isSameOrInside(session.cwd, documentPath)
+      ? 0
+      : 1;
+  return [...sessions].sort(
+    (a, b) =>
+      local(a) - local(b) || b.lastActiveAt.localeCompare(a.lastActiveAt),
+  );
+}
+
+export function isSessionInDocumentFolder(
+  session: { cwd?: string },
+  documentPath: string | null,
+) {
+  return Boolean(
+    documentPath && session.cwd && isSameOrInside(session.cwd, documentPath),
+  );
 }
 
 export interface CommentEventResult {
@@ -300,6 +376,13 @@ export interface CommentAgentContextValue {
     threadRootId: string;
   }) => void;
   retryThread: (threadRootId: string) => void;
+  /** Absolute path of the document, for sorting sessions by folder. */
+  documentAbsolutePath?: string | null;
+  /**
+   * Make a live session the document's owner (ADR 0007). Absent when the
+   * backend cannot reassign.
+   */
+  connectSession?: (sessionId: string) => Promise<void>;
 }
 
 const idleThreadState: CommentAgentThreadState = {
