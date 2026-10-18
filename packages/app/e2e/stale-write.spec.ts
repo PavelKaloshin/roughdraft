@@ -38,7 +38,10 @@ test.describe("stale writes", () => {
     await openMarkdownFile(page, filePath, "code");
     await expect(codeEditor(page)).toContainText("Original body.");
 
-    fs.writeFileSync(filePath, "# Conflict\n\nExternal body.\n");
+    fs.writeFileSync(
+      filePath,
+      "# Conflict\n\nExternal body.\n\nExternal tail.\n",
+    );
     await appendInCodeEditor(page, "\nLocal body.\n");
 
     await expect(documentSaveStatus(page)).toHaveAttribute(
@@ -50,7 +53,7 @@ test.describe("stale writes", () => {
       page.getByTestId("file-conflict-action-keep-editing"),
     ).toBeVisible();
     expect(readProjectFile(projectDir, "conflict.md")).toBe(
-      "# Conflict\n\nExternal body.\n",
+      "# Conflict\n\nExternal body.\n\nExternal tail.\n",
     );
 
     await page.getByTestId("file-conflict-action-keep-editing").click();
@@ -63,11 +66,43 @@ test.describe("stale writes", () => {
     await expect(codeEditor(page)).toContainText("Still local.");
     await expect
       .poll(() => readProjectFile(projectDir, "conflict.md"))
-      .toBe("# Conflict\n\nExternal body.\n");
+      .toBe("# Conflict\n\nExternal body.\n\nExternal tail.\n");
 
     logE2eEvent("stale-write.conflict-surfaced", {
       file: "conflict.md",
     });
+  });
+
+  test("auto-merges a non-overlapping external change on save conflict @smoke", async ({
+    page,
+  }) => {
+    await page.route("**/api/markdown-file/events**", (route) => route.abort());
+
+    const filePath = writeProjectFile(
+      projectDir,
+      "merge-conflict.md",
+      "# Conflict\n\nOriginal body.\n",
+    );
+
+    await openMarkdownFile(page, filePath, "code");
+    await expect(codeEditor(page)).toContainText("Original body.");
+
+    // Another writer changes the body; the local draft only appends. The
+    // save gets a 409, merges the disk version in, and saves the merge.
+    fs.writeFileSync(filePath, "# Conflict\n\nExternal body.\n");
+    await appendInCodeEditor(page, "\nLocal body.\n");
+
+    await expect
+      .poll(() => readProjectFile(projectDir, "merge-conflict.md"))
+      .toBe("# Conflict\n\nExternal body.\n\nLocal body.\n");
+    await expect(codeEditor(page)).toContainText("External body.");
+    await expect(documentSaveStatus(page)).toHaveAttribute(
+      "aria-label",
+      "Saved",
+    );
+    await expect(fileConflictNotice(page)).toHaveCount(0);
+
+    logE2eEvent("stale-write.auto-merged", { file: "merge-conflict.md" });
   });
 
   test("overwrite after conflict marks the current draft saved", async ({
@@ -84,7 +119,10 @@ test.describe("stale writes", () => {
     await openMarkdownFile(page, filePath, "code");
     await expect(codeEditor(page)).toContainText("Original body.");
 
-    fs.writeFileSync(filePath, "# Conflict\n\nExternal body.\n");
+    fs.writeFileSync(
+      filePath,
+      "# Conflict\n\nExternal body.\n\nExternal tail.\n",
+    );
     await appendInCodeEditor(page, "\nLocal overwrite body.\n");
 
     await expect(documentSaveStatus(page)).toHaveAttribute(
@@ -129,7 +167,10 @@ test.describe("stale writes", () => {
     await openMarkdownFile(page, filePath, "code");
     await expect(codeEditor(page)).toContainText("Original body.");
 
-    fs.writeFileSync(filePath, "# Manual Conflict\n\nExternal body.\n");
+    fs.writeFileSync(
+      filePath,
+      "# Manual Conflict\n\nExternal body.\n\nExternal tail.\n",
+    );
     await appendInCodeEditor(page, "\nLocal body.\n");
     await page.keyboard.press(
       process.platform === "darwin" ? "Meta+S" : "Control+S",
@@ -143,7 +184,7 @@ test.describe("stale writes", () => {
       "This file changed on disk while you have unsaved edits.",
     );
     expect(readProjectFile(projectDir, "manual-conflict.md")).toBe(
-      "# Manual Conflict\n\nExternal body.\n",
+      "# Manual Conflict\n\nExternal body.\n\nExternal tail.\n",
     );
 
     logE2eEvent("stale-write.manual-conflict", {
@@ -165,7 +206,10 @@ test.describe("stale writes", () => {
     await openMarkdownFile(page, filePath, "code");
     await expect(codeEditor(page)).toContainText("Original");
 
-    fs.writeFileSync(filePath, "# External\n");
+    // Same size and mtime as the original, so only the content version
+    // differs. The external edit also ends where the local draft appends, so
+    // the two cannot be merged automatically.
+    fs.writeFileSync(filePath, "# Externa\n\n");
     fs.utimesSync(filePath, fixedTimestamp, fixedTimestamp);
     await appendInCodeEditor(page, "\nLocal body.\n");
 
@@ -174,7 +218,7 @@ test.describe("stale writes", () => {
       "Save conflict",
     );
     expect(readProjectFile(projectDir, "metadata-conflict.md")).toBe(
-      "# External\n",
+      "# Externa\n\n",
     );
 
     logE2eEvent("stale-write.metadata-conflict-surfaced", {
@@ -248,7 +292,10 @@ test.describe("stale writes", () => {
       await openMarkdownFile(page, filePath, "code");
       await expect(codeEditor(page)).toContainText("Original body.");
 
-      fs.writeFileSync(filePath, "# Layout conflict\n\nExternal body.\n");
+      fs.writeFileSync(
+        filePath,
+        "# Layout conflict\n\nExternal body.\n\nExternal tail.\n",
+      );
       await appendInCodeEditor(page, `\nLocal body ${viewport.width}.\n`);
 
       const conflictNotice = fileConflictNotice(page);

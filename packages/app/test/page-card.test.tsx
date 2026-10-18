@@ -1617,6 +1617,232 @@ describe("PageCard editor integration", () => {
     expect(rendered.getEditor().getText()).toContain("Start updated");
   });
 
+  describe("live reload of external changes", () => {
+    const liveDoc = (fifth = "Fifth paragraph.") =>
+      [
+        "# Live",
+        "",
+        "First {==alpha==}{>>Comment body<<}{#c1} paragraph.",
+        "",
+        "Second paragraph.",
+        "",
+        "Third paragraph.",
+        "",
+        "Fourth paragraph.",
+        "",
+        fifth,
+        "",
+        "---",
+        "comments:",
+        "  c1:",
+        "    by: Nora",
+        '    at: "2026-05-24T10:45:00.000Z"',
+        "",
+      ].join("\n");
+    const livePage = (content: string) => ({
+      id: "live-doc",
+      title: "Live",
+      content,
+    });
+
+    it("updates a clean document in place: same editor, same selection, same selected comment, no save", async () => {
+      const rendered = await renderPageCard({ page: livePage(liveDoc()) });
+      const editor = rendered.getEditor();
+      const editable = getEditable(rendered.container);
+      await selectText(editor, "alpha");
+      const selection = editor.state.selection;
+      expect(
+        queryByTestId(rendered.container, "document-comment-fallback")
+          ?.textContent,
+      ).toContain("Comment body");
+
+      vi.useFakeTimers();
+      await rendered.rerender({
+        page: livePage(liveDoc("Fifth paragraph, rewritten by the agent.")),
+      });
+
+      expect(rendered.getEditor()).toBe(editor);
+      expect(getEditable(rendered.container)).toBe(editable);
+      expect(editor.getText()).toContain("rewritten by the agent");
+      expect(editor.state.selection.from).toBe(selection.from);
+      expect(editor.state.selection.to).toBe(selection.to);
+      expect(
+        queryByTestId(rendered.container, "document-comment-fallback")
+          ?.textContent,
+      ).toContain("Comment body");
+
+      await act(async () => {
+        vi.advanceTimersByTime(2000);
+        await Promise.resolve();
+      });
+      expect(rendered.onSave).not.toHaveBeenCalled();
+    });
+
+    it("briefly highlights the changed text, then removes the highlight", async () => {
+      const rendered = await renderPageCard({ page: livePage(liveDoc()) });
+      vi.useFakeTimers();
+
+      await rendered.rerender({
+        page: livePage(liveDoc("Fifth paragraph, rewritten by the agent.")),
+      });
+
+      const highlight = queryByTestId(
+        getEditable(rendered.container),
+        "external-change-highlight",
+      );
+      expect(highlight?.textContent).toContain("rewritten by the");
+      expect(highlight?.textContent).not.toContain("First");
+
+      await act(async () => {
+        vi.advanceTimersByTime(1600);
+        await Promise.resolve();
+      });
+      expect(
+        queryByTestId(
+          getEditable(rendered.container),
+          "external-change-highlight",
+        ),
+      ).toBeNull();
+    });
+
+    it("applies an endmatter-only change to the threads without touching the body", async () => {
+      const rendered = await renderPageCard({ page: livePage(liveDoc()) });
+      const editor = rendered.getEditor();
+      await selectText(editor, "alpha");
+      const docBefore = editor.state.doc;
+      const selection = editor.state.selection;
+
+      // Only the YAML endmatter changes (thread metadata), never the body.
+      await rendered.rerender({
+        page: livePage(liveDoc().replace("by: Nora", "by: Nora Agent")),
+      });
+
+      expect(rendered.getEditor()).toBe(editor);
+      expect(editor.state.doc).toBe(docBefore);
+      expect(editor.state.selection.eq(selection)).toBe(true);
+      expect(
+        queryByTestId(rendered.container, "document-comment-fallback")
+          ?.textContent,
+      ).toContain("Nora Agent");
+    });
+
+    it("keeps an open comment draft when the agent edits another paragraph", async () => {
+      const rendered = await renderPageCard({ page: livePage(liveDoc()) });
+      await selectText(rendered.getEditor(), "Third");
+      await addCommentWithShortcut();
+      const draftId = [
+        ...rendered.container.querySelectorAll<HTMLElement>(
+          "[data-testid^='comment-banner-'][data-testid$='-editor']",
+        ),
+      ][0]?.dataset.testid;
+      expect(draftId).toBeDefined();
+
+      await rendered.rerender({
+        page: livePage(liveDoc("Fifth paragraph, rewritten by the agent.")),
+      });
+
+      expect(rendered.getEditor().getText()).toContain(
+        "rewritten by the agent",
+      );
+      expect(
+        queryByTestId(rendered.container, draftId as string),
+      ).not.toBeNull();
+      expect(rendered.getEditor().getHTML()).toMatch(
+        /data-comment-ids="[^"]*c2[^"]*"[^>]*>Third/,
+      );
+    });
+
+    it("merges a dirty draft with a non-overlapping disk change and saves the merge once", async () => {
+      const rendered = await renderPageCard({ page: livePage(liveDoc()) });
+      const editor = rendered.getEditor();
+      vi.useFakeTimers();
+      const secondEnd = (findTextRange(editor, "Second paragraph")?.to ??
+        0) as number;
+      await act(async () => {
+        editor
+          .chain()
+          .focus()
+          .setTextSelection(secondEnd)
+          .insertContent(" typed locally")
+          .run();
+      });
+      await flushReact();
+      const caret = editor.state.selection.from;
+
+      let result: unknown;
+      await act(async () => {
+        result = rendered
+          .getSaveController()
+          .mergeExternalContent(
+            liveDoc("Fifth paragraph, rewritten by the agent."),
+          );
+      });
+
+      expect(result).toEqual({ status: "merged" });
+      expect(editor.getText()).toContain("Second paragraph typed locally");
+      expect(editor.getText()).toContain("rewritten by the agent");
+      expect(editor.state.selection.from).toBe(caret);
+
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+        await Promise.resolve();
+      });
+      expect(rendered.onSave).toHaveBeenCalledTimes(1);
+      const saved = rendered.onSave.mock.calls[0]?.[1] as string;
+      expect(saved).toContain("Second paragraph typed locally.");
+      expect(saved).toContain("Fifth paragraph, rewritten by the agent.");
+    });
+
+    it("reports a conflict for overlapping edits and leaves the draft alone", async () => {
+      const rendered = await renderPageCard({ page: livePage(liveDoc()) });
+      const editor = rendered.getEditor();
+      const fifthEnd = (findTextRange(editor, "Fifth paragraph")?.to ??
+        0) as number;
+      await act(async () => {
+        editor
+          .chain()
+          .focus()
+          .setTextSelection(fifthEnd)
+          .insertContent(" mine")
+          .run();
+      });
+      await flushReact();
+      const textBefore = editor.getText();
+
+      let result: unknown;
+      await act(async () => {
+        result = rendered
+          .getSaveController()
+          .mergeExternalContent(liveDoc("Fifth paragraph, theirs."));
+      });
+
+      expect(result).toEqual({ status: "conflict" });
+      expect(editor.getText()).toBe(textBefore);
+    });
+
+    it("updates the raw code editor in place without re-saving", async () => {
+      const rendered = await renderPageCard({
+        page: livePage(liveDoc()),
+        editorViewMode: "code",
+      });
+      const cmContent = rendered.container.querySelector(".cm-content");
+      expect(cmContent).not.toBeNull();
+
+      vi.useFakeTimers();
+      await rendered.rerender({
+        page: livePage(liveDoc("Fifth paragraph, rewritten by the agent.")),
+      });
+
+      expect(rendered.container.querySelector(".cm-content")).toBe(cmContent);
+      expect(cmContent?.textContent).toContain("rewritten by the agent");
+      await act(async () => {
+        vi.advanceTimersByTime(2000);
+        await Promise.resolve();
+      });
+      expect(rendered.onSave).not.toHaveBeenCalled();
+    });
+  });
+
   it("comment selection still updates fallback UI", async () => {
     const rendered = await renderPageCard({
       page: {

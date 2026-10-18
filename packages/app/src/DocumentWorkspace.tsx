@@ -397,6 +397,9 @@ interface DocumentWorkspaceProps {
   onDocumentLocalContentChange: (markdown: string) => void;
   documentDiskChangeState: DiskChangeState;
   documentForceResetKey: string | null;
+  onDocumentSaveControllerChange?: (
+    controller: DocumentSaveController | null,
+  ) => void;
   onReloadDocumentFromDisk: () => void | Promise<void>;
   onKeepEditingWithoutAutosave: () => void;
   onOverwriteDocumentOnDisk: () => void | Promise<void>;
@@ -420,6 +423,7 @@ export function DocumentWorkspace({
   onDocumentLocalContentChange,
   documentDiskChangeState,
   documentForceResetKey,
+  onDocumentSaveControllerChange,
   onReloadDocumentFromDisk,
   onKeepEditingWithoutAutosave,
   onOverwriteDocumentOnDisk,
@@ -456,6 +460,13 @@ export function DocumentWorkspace({
   const copiedFileActionTimeoutRef = useRef<number | null>(null);
   const saveControllerRef = useRef<DocumentSaveController | null>(null);
   const documentChangeTrackingReadyRef = useRef(false);
+  const handleSaveControllerChange = useCallback(
+    (controller: DocumentSaveController | null) => {
+      saveControllerRef.current = controller;
+      onDocumentSaveControllerChange?.(controller);
+    },
+    [onDocumentSaveControllerChange],
+  );
 
   const handleSaveStateChange = useCallback(
     (state: DocumentSaveState) => {
@@ -1218,9 +1229,7 @@ export function DocumentWorkspace({
               onCommentRailPresenceChange={setDocumentHasComments}
               onDirtyStateChange={handleDocumentDirtyStateChange}
               onLocalContentChange={onDocumentLocalContentChange}
-              onSaveControllerChange={(controller) => {
-                saveControllerRef.current = controller;
-              }}
+              onSaveControllerChange={handleSaveControllerChange}
               saveBlocked={documentDiskChangeState !== "clean"}
               forceResetKey={documentForceResetKey}
               outlineJumpRequest={outlineJumpRequest}

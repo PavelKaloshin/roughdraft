@@ -65,7 +65,7 @@ import {
   createOutlineJumpRequest,
   type OutlineJumpRequest,
 } from "./outline-navigation";
-import type { DocumentSaveState } from "./PageCard";
+import type { DocumentSaveController, DocumentSaveState } from "./PageCard";
 import { PreviewBackend } from "./preview-backend";
 import { RoughdraftFormatDemo } from "./RoughdraftFormatDemo";
 import {
@@ -1526,6 +1526,7 @@ export function App() {
   const documentDirtyRef = useRef(false);
   const documentSaveStateRef = useRef<DocumentSaveState>("saved");
   const documentDraftContentRef = useRef<string | null>(null);
+  const documentSaveControllerRef = useRef<DocumentSaveController | null>(null);
   const activeViewerFileRef = useRef<string | null>(null);
 
   backendRef.current = backend;
@@ -1536,8 +1537,18 @@ export function App() {
 
   const applyDocumentPage = useCallback((nextDocument: Page) => {
     setDocumentPage(nextDocument);
+    // Keep the ref current right away: a save issued before the next render
+    // (for example the re-save of a merged draft) must use this version.
+    documentPageRef.current = nextDocument;
     documentDraftContentRef.current = nextDocument.content;
   }, []);
+
+  const handleDocumentSaveControllerChange = useCallback(
+    (controller: DocumentSaveController | null) => {
+      documentSaveControllerRef.current = controller;
+    },
+    [],
+  );
 
   const loadDocument = useCallback(
     async (nextBackend: StorageBackend, relativePath: string) => {
@@ -1776,6 +1787,17 @@ export function App() {
         );
       } catch (error) {
         if (error instanceof MarkdownFileConflictError) {
+          // The file changed on disk since our last save. Merge the disk
+          // version into the draft first; only overlapping edits need the
+          // conflict banner. A clean merge re-saves the merged draft.
+          const merge = documentSaveControllerRef.current?.mergeExternalContent(
+            error.current.content,
+          );
+          if (merge?.status === "merged") {
+            applyDocumentPage(error.current);
+            setDocumentDiskChangeState("clean");
+            return;
+          }
           setDocumentDiskChangeState("conflict");
         }
         throw error;
@@ -1943,20 +1965,40 @@ export function App() {
           return;
         }
 
-        if (documentDirtyRef.current) {
-          setDocumentDiskChangeState("changed");
-          return;
-        }
-
         void (async () => {
           const currentBackend = backendRef.current;
           const currentPath = activeDocumentPathRef.current;
           if (!currentBackend || !currentPath || disposed) return;
 
           try {
+            // Let an in-flight autosave land first, so its own echo is
+            // recognised by version instead of being merged as a change.
+            if (documentDirtyRef.current) {
+              await documentSaveControllerRef.current?.waitForPendingSave();
+            }
             const nextDocument =
               await currentBackend.getMarkdownFile(currentPath);
             if (disposed) return;
+            if (
+              nextDocument.version &&
+              nextDocument.version === documentPageRef.current?.version
+            ) {
+              return;
+            }
+
+            if (documentDirtyRef.current) {
+              // The user is typing while the file changed (an agent edit):
+              // three-way merge instead of interrupting with the banner.
+              const merge =
+                documentSaveControllerRef.current?.mergeExternalContent(
+                  nextDocument.content,
+                );
+              if (merge?.status !== "merged") {
+                setDocumentDiskChangeState("changed");
+                return;
+              }
+            }
+
             applyDocumentPage(nextDocument);
             setDocumentDiskChangeState("clean");
           } catch (error) {
@@ -2164,6 +2206,7 @@ export function App() {
       onDocumentLocalContentChange={handleDocumentLocalContentChange}
       documentDiskChangeState={documentDiskChangeState}
       documentForceResetKey={documentForceResetKey}
+      onDocumentSaveControllerChange={handleDocumentSaveControllerChange}
       onReloadDocumentFromDisk={handleReloadDocumentFromDisk}
       onKeepEditingWithoutAutosave={handleKeepEditingWithoutAutosave}
       onOverwriteDocumentOnDisk={handleOverwriteDocumentOnDisk}
