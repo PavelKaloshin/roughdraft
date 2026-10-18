@@ -804,3 +804,128 @@ describe("comment intent", () => {
     ]);
   });
 });
+
+// Users may comment on code inside a fenced block (the app anchors a comment
+// on a selection in a code block). Only anchored comment chains are live
+// there; standalone comments, suggestions, and inline code stay literal.
+describe("anchored comments inside fenced code blocks", () => {
+  const fencedComment = [
+    "Run this:",
+    "",
+    "```ts",
+    'const command = "{==roughdraft open==}{>>Why not `watch`?<<}{#c1}";',
+    "const literal = {>>not a comment<<} + {++not a suggestion++};",
+    "```",
+    "",
+    "After `{==code span==}{>>still literal<<}{#c9}` text.",
+    "",
+    "---",
+    "comments:",
+    "  c1:",
+    "    by: user",
+    '    at: "2026-10-18T12:00:00.000Z"',
+    "    intent: ask",
+    "",
+  ].join("\n");
+
+  it("indexes an anchored comment on code and nothing else from the fence", () => {
+    const index = extractRoughdraftReviewIndex(fencedComment);
+
+    expect(index.diagnostics).toEqual([]);
+    expect(index.items).toEqual([
+      expect.objectContaining({
+        id: "c1",
+        kind: "comment",
+        intent: "ask",
+        author: "user",
+        text: "Why not `watch`?",
+        anchorText: "roughdraft open",
+        line: 4,
+      }),
+    ]);
+  });
+
+  it("validates a fenced anchored comment like any other comment", () => {
+    const valid = validateRoughdraftMarkdown(fencedComment);
+    expect(valid.ok).toBe(true);
+    expect(valid.summary).toMatchObject({ comments: 1, suggestions: 0 });
+
+    const missingEntry = codes(
+      ["```js", "{==x==}{>>Why?<<}{#c1}", "```", ""].join("\n"),
+    );
+    expect(missingEntry).toEqual(["missing-endmatter-entry"]);
+  });
+
+  it("does not let a marker inside a fence pair with text after the fence", () => {
+    const index = extractRoughdraftReviewIndex(
+      [
+        "```",
+        "{==unclosed anchor",
+        "```",
+        "",
+        'Prose ==}{>>after<<}{id="c1" by="user" at="2026-10-18T12:00:00.000Z"}',
+        "",
+      ].join("\n"),
+    );
+
+    // The prose comment is a standalone comment, not anchored on fence text.
+    expect(index.items).toEqual([
+      expect.objectContaining({ id: "c1", anchorText: undefined }),
+    ]);
+  });
+
+  it("appends a reply to and resolves a fenced comment", () => {
+    const replied = appendRoughdraftReply(fencedComment, {
+      parentId: "c1",
+      id: "c2",
+      message: "`watch` blocks; `open` returns a URL.",
+      at: "2026-10-18T12:01:00.000Z",
+    });
+    expect(
+      extractRoughdraftReviewIndex(replied).items.map((item) => [
+        item.id,
+        item.parentId,
+      ]),
+    ).toEqual([
+      ["c1", null],
+      ["c2", "c1"],
+    ]);
+
+    const resolved = markRoughdraftResolved(replied, { targetId: "c1" });
+    expect(
+      extractRoughdraftReviewIndex(resolved).items.find(
+        (item) => item.id === "c1",
+      )?.status,
+    ).toBe("resolved");
+  });
+
+  it("splices an inline reply into the fence next to inline-metadata comments", () => {
+    const markdown = [
+      "```sh",
+      'roughdraft {==open==}{>>flags?<<}{id="c1" by="user" at="2026-10-18T12:00:00.000Z"} file.md',
+      "```",
+      "",
+    ].join("\n");
+
+    const replied = appendRoughdraftReply(markdown, {
+      parentId: "c1",
+      id: "c2",
+      message: "Use --print-url.",
+      at: "2026-10-18T12:01:00.000Z",
+    });
+
+    expect(replied).toBe(
+      [
+        "```sh",
+        'roughdraft {==open==}{>>flags?<<}{id="c1" by="user" at="2026-10-18T12:00:00.000Z"}{>>Use --print-url.<<}{id="c2" by="AI" at="2026-10-18T12:01:00.000Z" re="c1"} file.md',
+        "```",
+        "",
+      ].join("\n"),
+    );
+    expect(
+      extractRoughdraftReviewIndex(replied).items.find(
+        (item) => item.id === "c2",
+      ),
+    ).toMatchObject({ kind: "reply", parentId: "c1", anchorText: "open" });
+  });
+});

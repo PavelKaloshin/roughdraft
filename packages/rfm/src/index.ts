@@ -324,21 +324,20 @@ export function validateRoughdraftMarkdown(
 
   let offset = 0;
   const scanEndOffset = endmatter.offset ?? markdown.length;
-  let fence: FenceState | null = null;
 
   while (offset < scanEndOffset) {
     if (isLineStart(markdown, offset)) {
-      const fenceMatch = matchFence(markdown, offset, fence);
-      if (fenceMatch) {
-        fence = fence ? null : fenceMatch.fence;
-        offset = nextLineOffset(markdown, offset);
+      const fenced = matchFencedCodeBlock(markdown, offset, scanEndOffset);
+      if (fenced) {
+        forEachFencedCommentChain(markdown, fenced, (comments) => {
+          for (const parsed of comments) {
+            summary.comments += 1;
+            validateMetadata(parsed.metadata, "comment", parsed.offset);
+          }
+        });
+        offset = fenced.endOffset;
         continue;
       }
-    }
-
-    if (fence) {
-      offset = nextLineOffset(markdown, offset);
-      continue;
     }
 
     const codeSpanEnd = matchInlineCodeSpan(markdown, offset);
@@ -543,21 +542,17 @@ export function extractRoughdraftReviewIndex(markdown: string): RfmReviewIndex {
 
   let offset = 0;
   const scanEndOffset = endmatter.offset ?? markdown.length;
-  let fence: FenceState | null = null;
 
   while (offset < scanEndOffset) {
     if (isLineStart(markdown, offset)) {
-      const fenceMatch = matchFence(markdown, offset, fence);
-      if (fenceMatch) {
-        fence = fence ? null : fenceMatch.fence;
-        offset = nextLineOffset(markdown, offset);
+      const fenced = matchFencedCodeBlock(markdown, offset, scanEndOffset);
+      if (fenced) {
+        forEachFencedCommentChain(markdown, fenced, (comments, anchorText) => {
+          for (const parsed of comments) addComment(parsed, anchorText);
+        });
+        offset = fenced.endOffset;
         continue;
       }
-    }
-
-    if (fence) {
-      offset = nextLineOffset(markdown, offset);
-      continue;
     }
 
     const codeSpanEnd = matchInlineCodeSpan(markdown, offset);
@@ -842,6 +837,93 @@ function matchFence(
   }
 
   return { fence };
+}
+
+interface FencedCodeBlock {
+  /** Offset of the first content line (after the opening fence line). */
+  contentStart: number;
+  /** Offset of the closing fence line, or the scan end for an unclosed fence. */
+  contentEnd: number;
+  /** Offset just after the closing fence line. */
+  endOffset: number;
+}
+
+/** Matches a fenced code block whose opening fence starts at `offset`. */
+function matchFencedCodeBlock(
+  markdown: string,
+  offset: number,
+  scanEndOffset: number,
+): FencedCodeBlock | null {
+  const opening = matchFence(markdown, offset, null);
+  if (!opening) return null;
+
+  const contentStart = Math.min(
+    nextLineOffset(markdown, offset),
+    scanEndOffset,
+  );
+  let lineOffset = contentStart;
+  while (lineOffset < scanEndOffset) {
+    if (matchFence(markdown, lineOffset, opening.fence)) {
+      return {
+        contentStart,
+        contentEnd: lineOffset,
+        endOffset: Math.min(
+          nextLineOffset(markdown, lineOffset),
+          scanEndOffset,
+        ),
+      };
+    }
+    lineOffset = nextLineOffset(markdown, lineOffset);
+  }
+
+  return { contentStart, contentEnd: scanEndOffset, endOffset: scanEndOffset };
+}
+
+/**
+ * Code in a fence is literal, except for one construct: a highlight
+ * immediately followed by one or more comments (`{==code==}{>>note<<}{#c1}`),
+ * which is how a comment is anchored on code. This mirrors the app's
+ * `renderCriticCodeText`: standalone comments, suggestions, unclosed markers,
+ * and highlights without a comment stay literal and produce no diagnostics.
+ * Markers never pair across the fence boundary, and backticks inside a fence
+ * are not code spans.
+ */
+function forEachFencedCommentChain(
+  markdown: string,
+  block: FencedCodeBlock,
+  visit: (comments: ParsedComment[], anchorText: string) => void,
+): void {
+  // Searching a prefix keeps every offset absolute while bounding all
+  // `indexOf` lookups to the fence content.
+  const content = markdown.slice(0, block.contentEnd);
+  const noopDiagnostic = () => {};
+  let offset = block.contentStart;
+
+  while (offset < block.contentEnd) {
+    const start = content.indexOf("{==", offset);
+    if (start === -1) return;
+
+    // The anchor text must be non-empty, like the app's `{==([\s\S]+?)==}`.
+    const close = content.indexOf("==}", start + 4);
+    if (close === -1) {
+      offset = start + 1;
+      continue;
+    }
+
+    const comments: ParsedComment[] = [];
+    let next = close + 3;
+    while (content.startsWith("{>>", next)) {
+      const parsed = parseComment(content, next, noopDiagnostic);
+      if (!parsed) break;
+      comments.push(parsed);
+      next = parsed.endOffset;
+    }
+
+    if (comments.length > 0) {
+      visit(comments, content.slice(start + 3, close));
+    }
+    offset = next;
+  }
 }
 
 function matchInlineCodeSpan(markdown: string, offset: number): number | null {

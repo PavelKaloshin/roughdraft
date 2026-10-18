@@ -1258,8 +1258,9 @@ function printCriticMarkupHelp(log: (message: string) => void) {
   );
   log("");
   log("Code blocks:");
+  log("  To comment on code in a fence, anchor it: {==code==}{>>note<<}{#c1}.");
   log(
-    "  Treat CriticMarkup inside fenced code blocks as literal example text.",
+    "  Any other CriticMarkup inside fenced code blocks is literal example text.",
   );
   log("");
   log("Full spec:");

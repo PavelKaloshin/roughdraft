@@ -1171,8 +1171,8 @@ describe("Markdown rich-text round-trip regressions", () => {
 // Regressions observed in real usage: an agent-written plan file was saved
 // back mangled by an open Roughdraft tab without any user edit. Each test
 // pins one rewrite that ADR 0003 (round-trip contract) and the RFM spec
-// ("review markers inside fenced code blocks are literal example text")
-// forbid for untouched markdown.
+// (raw review marker text inside code contexts is preserved) forbid for
+// untouched markdown.
 describe("Unedited markdown round-trip (agent-authored plan regressions)", () => {
   it("keeps an anchored CriticMarkup example inside a fenced code block literal and byte-for-byte", () => {
     const input = [
@@ -1194,23 +1194,6 @@ describe("Unedited markdown round-trip (agent-authored plan regressions)", () =>
     const { doc, comments } = criticMarkdownToEditorState(input);
 
     expect(editorStateToCriticMarkdown(doc, comments)).toBe(input);
-  });
-
-  // Pending a product decision: the spec says review markers in fences are
-  // literal, but #18 deliberately supports commenting on code inside fences
-  // ("creates a comment anchor when a selection is inside a fenced code block").
-  // The byte-for-byte round-trip above holds either way.
-  it.skip("does not parse CriticMarkup inside a fenced code block as a live comment", () => {
-    const input = [
-      "```markdown",
-      "{==anchor==}{>>Literal example inside a fence<<}{#c3}",
-      "```",
-      "",
-    ].join("\n");
-
-    const { comments } = criticMarkdownToEditorState(input);
-
-    expect([...comments.keys()]).toEqual([]);
   });
 
   it("does not add generated metadata to a bare {>>comment<<} the user did not touch", () => {

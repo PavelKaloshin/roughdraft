@@ -1546,7 +1546,10 @@ describe("cli", () => {
       "  Comment ids are document-local and usually look like `c1`, `c2`, `c3`.",
     );
     expect(test.logs).toContain(
-      "  Treat CriticMarkup inside fenced code blocks as literal example text.",
+      "  To comment on code in a fence, anchor it: {==code==}{>>note<<}{#c1}.",
+    );
+    expect(test.logs).toContain(
+      "  Any other CriticMarkup inside fenced code blocks is literal example text.",
     );
     expect(test.logs).toContain(
       "  https://roughdraft.md/spec/roughdraft-flavored-markdown.md",

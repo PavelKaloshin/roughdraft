@@ -116,6 +116,54 @@ describe("agent comment events", () => {
     expect(response.body.event.sequence).toEqual(expect.any(Number));
   });
 
+  it("emits an ask about code in a fenced block and answers it in the thread", async () => {
+    const app = makeApp();
+    fs.writeFileSync(
+      documentPath,
+      [
+        "# Setup",
+        "",
+        "```sh",
+        "roughdraft {==open --print-url==}{>>Why print instead of opening?<<}{#c1} plan.md",
+        "```",
+        "",
+        "---",
+        "comments:",
+        "  c1:",
+        "    by: pavel",
+        '    at: "2026-10-18T12:00:00.000Z"',
+        "    intent: ask",
+        "",
+      ].join("\n"),
+    );
+
+    const event = await postEvent(app, "comment.ask", "c1");
+    expect(event.status).toBe(201);
+    expect(event.body.event).toMatchObject({
+      commentId: "c1",
+      intent: "ask",
+      anchorText: "open --print-url",
+      body: "Why print instead of opening?",
+    });
+
+    const reply = await request(app)
+      .post("/api/comments/reply")
+      .send({ ...target(), commentId: "c1", body: "An agent has no browser." });
+    expect(reply.status).toBe(201);
+    const resolve = await request(app)
+      .post("/api/comments/resolve")
+      .send({ ...target(), commentId: "c1" });
+    expect(resolve.status).toBe(200);
+
+    const items = extractRoughdraftReviewIndex(
+      fs.readFileSync(documentPath, "utf8"),
+    ).items;
+    expect(items).toMatchObject([
+      { id: "c1", status: "resolved", anchorText: "open --print-url" },
+      { id: reply.body.replyId, parentId: "c1", author: "AI" },
+    ]);
+  });
+
   it("rejects comment events for missing, misplaced, or malformed targets", async () => {
     const app = makeApp();
     appendUserReply("c3", "c1", "And the cache?");
