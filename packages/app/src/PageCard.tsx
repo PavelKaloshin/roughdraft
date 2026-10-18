@@ -663,6 +663,7 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
   );
   const frontmatterRef = useRef<string | null>(parsedContent.frontmatter);
   const endmatterRef = useRef<string | null>(parsedContent.endmatter);
+  const headingSpacingRef = useRef(parsedContent.headingSpacing);
 
   useEffect(() => {
     commentsRef.current = comments;
@@ -691,6 +692,7 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
           {
             frontmatter: frontmatterRef.current,
             endmatter: endmatterRef.current,
+            headingSpacing: headingSpacingRef.current,
           },
         ),
       );
@@ -1227,11 +1229,15 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
           return true;
         },
       },
-      onUpdate: ({ editor: currentEditor }) => {
+      onUpdate: ({ editor: currentEditor, transaction }) => {
         if (suppressNextMarkdownUpdateRef.current) {
           suppressNextMarkdownUpdateRef.current = false;
           return;
         }
+        // Plugins such as TrailingNode append doc changes to meta-only
+        // transactions (highlight refreshes, setEditable). Those are not edits,
+        // and treating them as one re-saves a document nobody touched.
+        if (!transaction.docChanged) return;
 
         emitMarkdownChange(currentEditor.getJSON());
         refreshCriticChanges();
@@ -1291,6 +1297,7 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
 
     frontmatterRef.current = parsedContent.frontmatter;
     endmatterRef.current = parsedContent.endmatter;
+    headingSpacingRef.current = parsedContent.headingSpacing;
     commentsRef.current = parsedContent.comments;
     setComments(parsedContent.comments);
     setSelectedCommentId(null);

@@ -18,6 +18,8 @@ import {
   createMarkedRenderer,
   createMathExtensions,
   createTurndownService,
+  detectHeadingSpacing,
+  type HeadingSpacing,
   normalizeBlockSpacing,
   appendYamlEndmatter,
   prependYamlFrontmatter,
@@ -34,6 +36,13 @@ export interface CriticComment {
   authorId?: string | null;
   parentCommentId?: string | null;
   scope?: "document";
+  /**
+   * Set when the source comment had no usable metadata (a bare `{>>…<<}`, or
+   * a `{#id}` reference with no endmatter entry). While the comment is left
+   * untouched it is written back exactly as it was instead of gaining
+   * generated id/by/at metadata.
+   */
+  verbatimSource?: { metadata: string; content: string };
 }
 
 export interface CriticCommentThread {
@@ -368,6 +377,7 @@ function serializeReviewEndmatter(
   const suggestionEntries = new Map<string, Record<string, unknown>>();
 
   for (const comment of comments.values()) {
+    if (isWrittenVerbatim(comment, comments)) continue;
     commentEntries.set(
       comment.id,
       endmatterEntryForComment(comment, parsed.comments.get(comment.id)),
@@ -439,6 +449,60 @@ export function createNextChangeId(
   }
 
   return `s${maxId + 1}`;
+}
+
+function parseCommentBlockMatch(
+  match: RegExpMatchArray,
+  endmatter: ParsedEndmatter | undefined,
+  existingComments: Iterable<Pick<CriticComment, "id">>,
+): CriticComment {
+  const [
+    ,
+    commentText,
+    ,
+    legacyMetadataText,
+    attributeMetadataText,
+    referenceMetadataText,
+  ] = match;
+  const comment = createCommentWithContext(
+    {
+      ...parseMetadata(
+        legacyMetadataText,
+        attributeMetadataText,
+        referenceMetadataText,
+        endmatter,
+        "comment",
+      ),
+      content: commentText,
+    },
+    existingComments,
+  );
+  const referenceId = referenceMetadataText?.match(
+    metadataReferencePattern,
+  )?.[1];
+  const hasNoMetadata =
+    !legacyMetadataText && !attributeMetadataText && !referenceMetadataText;
+  const hasDanglingReference =
+    referenceId !== undefined && !endmatter?.comments.has(referenceId);
+  if (hasNoMetadata || hasDanglingReference) {
+    comment.verbatimSource = {
+      metadata: referenceMetadataText ?? "",
+      content: commentText ?? "",
+    };
+  }
+  return comment;
+}
+
+function isWrittenVerbatim(
+  comment: CriticComment,
+  comments: ReadonlyMap<string, CriticComment>,
+): boolean {
+  if (!comment.verbatimSource) return false;
+  if (comment.verbatimSource.content !== comment.content) return false;
+  for (const other of comments.values()) {
+    if (other.parentCommentId === comment.id) return false;
+  }
+  return true;
 }
 
 function createCommentWithContext(
@@ -585,6 +649,10 @@ function serializeCommentBlocks(
   let result = "";
 
   for (const comment of orderedComments) {
+    if (isWrittenVerbatim(comment, comments)) {
+      result += `{>>${comment.content}<<}${comment.verbatimSource?.metadata}`;
+      continue;
+    }
     result += `{>>${comment.content}<<}${
       useEndmatter ? `{#${comment.id}}` : serializeMetadata(comment)
     }`;
@@ -654,27 +722,10 @@ function tokenizeCriticCommentAnchor(
     const nextMatch = src.slice(offset).match(criticCommentBlockPattern);
     if (!nextMatch) break;
 
-    const [
-      ,
-      commentText,
-      ,
-      legacyMetadataText,
-      attributeMetadataText,
-      referenceMetadataText,
-    ] = nextMatch;
-    const comment = createCommentWithContext(
-      {
-        ...parseMetadata(
-          legacyMetadataText,
-          attributeMetadataText,
-          referenceMetadataText,
-          endmatter,
-          "comment",
-        ),
-        content: commentText,
-      },
-      [...existingComments, ...parsedComments],
-    );
+    const comment = parseCommentBlockMatch(nextMatch, endmatter, [
+      ...existingComments,
+      ...parsedComments,
+    ]);
     parsedComments.push(comment);
     raw += nextMatch[0];
     offset += nextMatch[0].length;
@@ -731,27 +782,10 @@ function tokenizeCriticCommentBlocks(
     const nextMatch = src.slice(nextOffset).match(criticCommentBlockPattern);
     if (!nextMatch) break;
 
-    const [
-      ,
-      commentText,
-      ,
-      legacyMetadataText,
-      attributeMetadataText,
-      referenceMetadataText,
-    ] = nextMatch;
-    const comment = createCommentWithContext(
-      {
-        ...parseMetadata(
-          legacyMetadataText,
-          attributeMetadataText,
-          referenceMetadataText,
-          endmatter,
-          "comment",
-        ),
-        content: commentText,
-      },
-      [...existingComments, ...parsedComments],
-    );
+    const comment = parseCommentBlockMatch(nextMatch, endmatter, [
+      ...existingComments,
+      ...parsedComments,
+    ]);
     parsedComments.push(comment);
     raw += nextMatch[0];
     nextOffset += nextMatch[0].length;
@@ -947,27 +981,10 @@ function renderCriticCodeText(
         .match(criticCommentBlockPattern);
       if (!commentMatch) break;
 
-      const [
-        ,
-        commentText,
-        ,
-        legacyMetadataText,
-        attributeMetadataText,
-        referenceMetadataText,
-      ] = commentMatch;
-      const comment = createCommentWithContext(
-        {
-          ...parseMetadata(
-            legacyMetadataText,
-            attributeMetadataText,
-            referenceMetadataText,
-            endmatter,
-            "comment",
-          ),
-          content: commentText,
-        },
-        [...comments.values(), ...parsedComments],
-      );
+      const comment = parseCommentBlockMatch(commentMatch, endmatter, [
+        ...comments.values(),
+        ...parsedComments,
+      ]);
       parsedComments.push(comment);
       nextOffset += commentMatch[0].length;
     }
@@ -1080,7 +1097,26 @@ function addCriticCodeBlockRule(service: TurndownService) {
         [...codeElement.classList]
           .find((className) => className.startsWith("language-"))
           ?.slice("language-".length) ?? "";
-      const content = service.turndown(codeElement.innerHTML).trimEnd();
+      // Code text is taken verbatim: running it through Turndown as HTML
+      // collapses newlines and escapes Markdown characters. Only the review
+      // spans inside it are serialized by their Turndown rules.
+      const serializeCode = (parent: Node): string =>
+        Array.from(parent.childNodes)
+          .map((child) => {
+            if (child.nodeType === 3) return child.textContent ?? "";
+            if (child.nodeType !== 1) return "";
+            const element = child as HTMLElement;
+            if (
+              element.matches(
+                "span[data-comment-ids], span[data-critic-change-kind]",
+              )
+            ) {
+              return service.turndown(element.outerHTML);
+            }
+            return serializeCode(element);
+          })
+          .join("");
+      const content = serializeCode(codeElement).replace(/\n+$/, "");
 
       return `\n\n\`\`\`${language}\n${content}\n\`\`\`\n\n`;
     },
@@ -1434,8 +1470,10 @@ export function criticMarkdownToEditorState(
   comments: Map<string, CriticComment>;
   frontmatter: string | null;
   endmatter: string | null;
+  headingSpacing: HeadingSpacing;
 } {
   const { frontmatter, body, endmatter } = splitYamlDocumentMetadata(markdown);
+  const headingSpacing = detectHeadingSpacing(body);
   const parsedEndmatter = parseReviewEndmatter(endmatter);
   const { parser, comments } = createCriticMarked(options, parsedEndmatter);
   const html = parser.parse(protectRichTextRoundTripMarkdown(body)) as string;
@@ -1451,7 +1489,7 @@ export function criticMarkdownToEditorState(
     doc.yamlEndmatter = endmatter;
   }
 
-  return { doc, comments, frontmatter, endmatter };
+  return { doc, comments, frontmatter, endmatter, headingSpacing };
 }
 
 function collectCriticChangesFromDoc(
@@ -1491,9 +1529,16 @@ function collectCriticChangesFromDoc(
 export function editorStateToCriticMarkdown(
   doc: JSONContent,
   comments: Map<string, CriticComment>,
-  options?: { frontmatter?: string | null; endmatter?: string | null },
+  options?: {
+    frontmatter?: string | null;
+    endmatter?: string | null;
+    headingSpacing?: HeadingSpacing;
+  },
 ): string {
   const html = generateHTML(doc, extensions);
+  // Not stored on the doc: PageCard compares doc JSON to decide whether to
+  // reset editor content, and an extra key would force a reset every time.
+  const headingSpacing = options?.headingSpacing;
   const service = createTurndownService();
   const frontmatter =
     options?.frontmatter ??
@@ -1515,7 +1560,10 @@ export function editorStateToCriticMarkdown(
   );
   return appendYamlEndmatter(
     prependYamlFrontmatter(
-      normalizeBlockSpacing(`${service.turndown(html).trimEnd()}\n`),
+      normalizeBlockSpacing(
+        `${service.turndown(html).trimEnd()}\n`,
+        headingSpacing,
+      ),
       frontmatter,
     ),
     endmatter,

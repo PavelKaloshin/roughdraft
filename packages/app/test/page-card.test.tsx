@@ -1373,6 +1373,85 @@ describe("PageCard editor integration", () => {
     ).toBe("true");
   });
 
+  // Real-usage regression: an agent-authored plan open in a tab was saved back
+  // (mangled) every time the agent edited it on disk, and again on Done
+  // Reviewing, although the user never edited it.
+  const agentPlanMarkdown = [
+    "# Title",
+    "",
+    "Intro paragraph right after a heading.",
+    "",
+    "- bullet a",
+    "- bullet b",
+    "",
+    "{>>Agent note without metadata.<<}",
+    "",
+    "```markdown",
+    "{==anchor==}{>>Literal example inside a fence<<}{#c3}",
+    "```",
+    "",
+  ].join("\n");
+
+  it("loading unedited agent-authored markdown does not autosave it", async () => {
+    vi.useFakeTimers();
+    const rendered = await renderPageCard({
+      page: { id: "plan", title: "Plan", content: agentPlanMarkdown },
+      selected: true,
+    });
+
+    await act(async () => {
+      vi.advanceTimersByTime(2000);
+      await Promise.resolve();
+    });
+
+    expect(rendered.onSave).not.toHaveBeenCalled();
+  });
+
+  it("an external disk change to an unedited document does not save it back", async () => {
+    // Initial content ends in a paragraph, so loading it alone does not save;
+    // the agent's on-disk edit then appends a list.
+    const initial = "# Title\n\nIntro paragraph right after a heading.\n";
+    vi.useFakeTimers();
+    const rendered = await renderPageCard({
+      page: { id: "plan", title: "Plan", content: initial },
+      selected: true,
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(2000);
+      await Promise.resolve();
+    });
+    expect(rendered.onSave).not.toHaveBeenCalled();
+
+    await rendered.rerender({
+      page: {
+        id: "plan",
+        title: "Plan",
+        content: `${initial}\n- bullet a\n- bullet b\n`,
+      },
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(2000);
+      await Promise.resolve();
+    });
+
+    expect(rendered.onSave).not.toHaveBeenCalled();
+  });
+
+  it("Done Reviewing (flushSave) on an unedited document does not write it", async () => {
+    const rendered = await renderPageCard({
+      page: { id: "plan", title: "Plan", content: agentPlanMarkdown },
+      selected: true,
+    });
+
+    let result: ManualSaveResult | undefined;
+    await act(async () => {
+      result = await rendered.getSaveController().flushSave();
+    });
+
+    expect(result).toEqual({ status: "saved" });
+    expect(rendered.onSave).not.toHaveBeenCalled();
+  });
+
   it("external page content updates replace editor content when unfocused", async () => {
     const rendered = await renderPageCard({
       page: {

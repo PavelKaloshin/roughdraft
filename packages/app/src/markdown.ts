@@ -505,10 +505,12 @@ export function createTurndownService(): TurndownService {
   service.addRule("compactListItem", {
     filter: "li",
     replacement(content, node, options) {
+      // Indent continuation lines, but leave blank lines empty so a tight
+      // list does not gain whitespace-only separator lines.
       const trimmed = content
         .replace(/^\n+/, "")
-        .replace(/\n+$/, "\n")
-        .replace(/\n/gm, "\n  ");
+        .replace(/\n+$/, "")
+        .replace(/\n(?=[^\n])/g, "\n  ");
 
       let prefix = `${options.bulletListMarker} `;
       const parent = node.parentNode;
@@ -665,15 +667,46 @@ export function createTurndownService(): TurndownService {
 
 const turndown = createTurndownService();
 
+export type HeadingSpacing = "compact" | "blank";
+
 /**
- * Collapse runs of 3+ newlines to 2 and remove the blank line that
- * Turndown inserts before/after ATX headings.  This keeps block
- * separation where it matters (between consecutive paragraphs) while
- * producing a more compact output that round-trips with fewer
- * gratuitous whitespace changes.
+ * Report whether a document puts a blank line after its ATX headings, so a
+ * save can keep the author's style instead of rewriting every heading.
+ * Fenced code is ignored; a document without a clear majority stays compact.
  */
-export function normalizeBlockSpacing(md: string): string {
+export function detectHeadingSpacing(markdown: string): HeadingSpacing {
+  const lines = markdown.split(/\r?\n/);
+  let blank = 0;
+  let compact = 0;
+  let fence: string | null = null;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const fenceMatch = /^\s{0,3}(`{3,}|~{3,})/.exec(line);
+    if (fenceMatch) {
+      if (!fence) fence = fenceMatch[1][0];
+      else if (fenceMatch[1][0] === fence) fence = null;
+      continue;
+    }
+    if (fence || !/^#{1,6} /.test(line)) continue;
+    const next = lines[index + 1];
+    if (next === undefined) continue;
+    if (next.trim() === "") blank += 1;
+    else compact += 1;
+  }
+  return blank > compact ? "blank" : "compact";
+}
+
+/**
+ * Collapse runs of 3+ newlines to 2. In the compact style also remove the
+ * blank line that Turndown inserts before/after ATX headings; the blank
+ * style keeps it.
+ */
+export function normalizeBlockSpacing(
+  md: string,
+  headingSpacing: HeadingSpacing = "compact",
+): string {
   let normalized = md.replace(/\n{3,}/g, "\n\n");
+  if (headingSpacing === "blank") return normalized;
   // Remove blank line immediately before a heading.
   normalized = normalized.replace(/\n\n(#{1,6} )/g, "\n$1");
   // Remove blank line immediately after a heading line.
