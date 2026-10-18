@@ -489,6 +489,95 @@ describe("Ask / Change comments", () => {
     expect(server.diskAtEachEvent[0]).toContain("body: And the model load?");
   });
 
+  const plainThread = [
+    "Cold start {==target==}{>>Plain note<<}{#c1}.",
+    "",
+    "---",
+    "comments:",
+    "  c1:",
+    "    by: user",
+    '    at: "2026-10-18T12:00:00.000Z"',
+    "",
+  ].join("\n");
+
+  it("lets a reply escalate a plain thread to Ask, then sends a follow-up", async () => {
+    const server = createFakeServer({ initialContent: plainThread });
+    await renderWorkspace(server);
+    await click(getThreadPart("c1"));
+    await flush();
+    await click(getThreadPart("c1-action-reply"));
+    await flush();
+
+    // A reply in a plain thread starts as a plain comment.
+    expect(getThreadPart("c2-mode-comment").getAttribute("aria-pressed")).toBe(
+      "true",
+    );
+    await click(getThreadPart("c2-mode-ask"));
+    await typeInto(
+      getThreadPart<HTMLTextAreaElement>("c2-editor"),
+      "Claude, why this?",
+    );
+    await click(getThreadPart("c2-action-save"));
+    await flush(6);
+
+    expect(server.postCommentEvent).toHaveBeenCalledTimes(1);
+    expect(server.postCommentEvent).toHaveBeenCalledWith("plan.md", {
+      type: "comment.followup",
+      commentId: "c2",
+    });
+    // The thread root carried the intent on disk before the event went out.
+    expect(server.diskAtEachEvent[0]).toMatch(
+      / {2}c1:\n( {4}.*\n)* {4}intent: ask\n/,
+    );
+    expect(server.diskAtEachEvent[0]).toContain("body: Claude, why this?");
+    expect(server.diskAtEachEvent[0]).not.toMatch(
+      / {2}c2:\n( {4}.*\n)* {4}intent:/,
+    );
+    expect(getThreadPart("c1-intent").textContent).toBe("Ask");
+  });
+
+  it("keeps a plain reply in a plain thread silent", async () => {
+    const server = createFakeServer({ initialContent: plainThread });
+    await renderWorkspace(server);
+    await click(getThreadPart("c1"));
+    await flush();
+    await click(getThreadPart("c1-action-reply"));
+    await flush();
+    await typeInto(getThreadPart<HTMLTextAreaElement>("c2-editor"), "Noted.");
+    await click(getThreadPart("c2-action-save"));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 700));
+    });
+    await flush();
+
+    expect(server.disk.content).toContain("body: Noted.");
+    expect(server.disk.content).not.toContain("intent");
+    expect(server.postCommentEvent).not.toHaveBeenCalled();
+  });
+
+  it("offers no mode picker when replying in an Ask thread or editing a comment", async () => {
+    const server = createFakeServer({
+      initialContent: plainThread.replace(
+        '    at: "2026-10-18T12:00:00.000Z"\n',
+        '    at: "2026-10-18T12:00:00.000Z"\n    intent: ask\n',
+      ),
+    });
+    await renderWorkspace(server);
+    await click(getThreadPart("c1"));
+    await flush();
+    await click(getThreadPart("c1-action-reply"));
+    await flush();
+    expect(getThreadPart("c2-editor")).not.toBeNull();
+    expect(queryThreadPart("c2-mode")).toBeNull();
+
+    await click(getThreadPart("c2-action-cancel"));
+    await flush();
+    await click(getThreadPart("c1-action-edit"));
+    await flush();
+    expect(getThreadPart("c1-editor")).not.toBeNull();
+    expect(queryThreadPart("c1-mode")).toBeNull();
+  });
+
   it("resolves a thread into the file and collapses it until shown", async () => {
     const server = createFakeServer({
       initialContent: [

@@ -299,14 +299,17 @@ export function CommentEditorList({
 
   if (comments.length === 0) return null;
 
+  // A reply that escalates a plain thread starts as a plain comment, and its
+  // choice is not remembered as the preferred mode for new comments.
   function getDraftMode(commentId: string): CommentComposerMode {
-    return agent.available
-      ? (draftModes[commentId] ?? preferredMode)
-      : "comment";
+    if (!agent.available) return "comment";
+    const isReply = !!commentMap.get(commentId)?.parentCommentId;
+    return draftModes[commentId] ?? (isReply ? "comment" : preferredMode);
   }
 
   const changeDraftMode = (commentId: string, mode: CommentComposerMode) => {
     setDraftModes((current) => ({ ...current, [commentId]: mode }));
+    if (commentMap.get(commentId)?.parentCommentId) return;
     setPreferredMode(mode);
     writeComposerModePreference(mode);
   };
@@ -343,25 +346,41 @@ export function CommentEditorList({
     }
 
     // Only a brand-new comment (empty until now) can pick a mode or notify the
-    // agent; editing an existing comment never re-sends an event.
+    // agent; editing an existing comment never re-sends an event. A new reply
+    // in a plain thread may escalate it: the intent goes on the thread root
+    // and the reply is sent as a follow-up.
     const isNewComment = comment.content.trim().length === 0;
     const isRoot = !comment.parentCommentId;
-    const mode = isRoot && isNewComment ? getDraftMode(commentId) : "comment";
+    const root = isRoot ? comment : findThreadRoot(commentId, commentMap);
+    const canEscalateThread =
+      !isRoot &&
+      isNewComment &&
+      !!root &&
+      !root.intent &&
+      comment.authorType !== "ai";
+    const mode =
+      isNewComment && (isRoot || canEscalateThread)
+        ? getDraftMode(commentId)
+        : "comment";
     const patch: CommentUpdatePatch | undefined =
       isRoot && isNewComment && mode !== "comment"
         ? { intent: mode }
         : undefined;
+    const escalatedRootIntent =
+      canEscalateThread && mode !== "comment" ? mode : undefined;
 
     if (nextContent !== comment.content || patch) {
       onUpdateComment(commentId, nextContent, patch);
     }
+    if (root && escalatedRootIntent) {
+      onUpdateComment(root.id, root.content, { intent: escalatedRootIntent });
+    }
 
     if (isNewComment && agent.available) {
-      const root = isRoot ? comment : findThreadRoot(commentId, commentMap);
       const type = getCommentSubmitEventType({
         isRoot,
         intent: mode,
-        rootIntent: root?.intent,
+        rootIntent: escalatedRootIntent ?? root?.intent,
         authorType: comment.authorType,
       });
       if (type && root) {
@@ -560,6 +579,8 @@ interface CommentThreadNodeProps {
   onChangeDraftMode: (commentId: string, mode: CommentComposerMode) => void;
   showResolved: boolean;
   onHideResolved: () => void;
+  /** The thread root's intent, for replies. */
+  threadRootIntent?: CriticCommentIntent;
 }
 
 const COMMENT_TREE_INDENT = 16;
@@ -656,6 +677,7 @@ function CommentThreadNode({
   onChangeDraftMode,
   showResolved,
   onHideResolved,
+  threadRootIntent,
 }: CommentThreadNodeProps) {
   const agent = useCommentAgent();
   const { comment, replies } = thread;
@@ -695,8 +717,13 @@ function CommentThreadNode({
   const hasCommentContent = comment.content.trim().length > 0;
   const isResolved = isRootThread && isCriticCommentResolved(comment);
   const rootIntent = isRootThread ? comment.intent : undefined;
+  // New root comments pick a mode; a new user reply can escalate a plain
+  // thread (replies in an Ask/Change thread inherit its intent).
   const showComposerModes =
-    isEditing && isRootThread && !hasCommentContent && agent.available;
+    isEditing &&
+    !hasCommentContent &&
+    agent.available &&
+    (isRootThread || (!threadRootIntent && !isAiAuthor));
   const draftMode = showComposerModes ? getDraftMode(comment.id) : "comment";
   const threadState = isRootThread ? agent.getThreadState(comment.id) : null;
   const latestThreadComment = isRootThread
@@ -1207,6 +1234,9 @@ function CommentThreadNode({
               onChangeDraftMode={onChangeDraftMode}
               showResolved={showResolved}
               onHideResolved={onHideResolved}
+              threadRootIntent={
+                isRootThread ? comment.intent : threadRootIntent
+              }
             />
           ))}
         </div>
