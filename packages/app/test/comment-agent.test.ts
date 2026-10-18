@@ -228,6 +228,16 @@ describe("thread lifecycle labels", () => {
     ).toBe("1 with a subagent");
     expect(summarizeAgentThreads({ c1: "pending", c2: "applied" })).toBe(null);
   });
+
+  it("counts threads with a headless fork apart from subagents", () => {
+    expect(
+      summarizeAgentThreads(
+        { c1: "delegated", c2: "delegated", c3: "queued" },
+        null,
+        { c2: { delegatedTo: "fork-process" } },
+      ),
+    ).toBe("1 queued · 1 with a subagent · 1 with a forked Claude");
+  });
 });
 
 describe("listen command", () => {

@@ -218,9 +218,12 @@ export function formatAgentElapsed(ms: number) {
   return `${Math.floor(totalMinutes / 60)}h ${totalMinutes % 60}m`;
 }
 
-const SUMMARY_PARTS: ReadonlyArray<[AgentThreadStatus, string]> = [
+type SummaryBucket = AgentThreadStatus | "forked";
+
+const SUMMARY_PARTS: ReadonlyArray<[SummaryBucket, string]> = [
   ["queued", "queued"],
   ["delegated", "with a subagent"],
+  ["forked", "with a forked Claude"],
   ["working", "working"],
 ];
 
@@ -232,11 +235,17 @@ const SUMMARY_PARTS: ReadonlyArray<[AgentThreadStatus, string]> = [
 export function summarizeAgentThreads(
   threads: Record<string, AgentThreadStatus>,
   openThreadIds?: ReadonlySet<string> | null,
+  threadDetails?: Record<string, AgentThreadTiming>,
 ): string | null {
-  const counts = new Map<AgentThreadStatus, number>();
+  const counts = new Map<SummaryBucket, number>();
   for (const [id, status] of Object.entries(threads)) {
     if (openThreadIds && !openThreadIds.has(id)) continue;
-    counts.set(status, (counts.get(status) ?? 0) + 1);
+    const bucket: SummaryBucket =
+      status === "delegated" &&
+      threadDetails?.[id]?.delegatedTo === "fork-process"
+        ? "forked"
+        : status;
+    counts.set(bucket, (counts.get(bucket) ?? 0) + 1);
   }
   const parts = SUMMARY_PARTS.flatMap(([status, label]) => {
     const count = counts.get(status) ?? 0;
