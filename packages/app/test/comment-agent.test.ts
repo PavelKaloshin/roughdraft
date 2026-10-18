@@ -8,7 +8,11 @@ import {
   readComposerModePreference,
   writeComposerModePreference,
 } from "../src/comment-agent";
-import { matchComposerModeShortcut } from "../src/comment-shortcuts";
+import {
+  getModeStepHint,
+  matchComposerModeShortcut,
+  matchModeStepKey,
+} from "../src/comment-shortcuts";
 import { criticMarkdownToEditorState } from "../src/critic-markup";
 import { buildCommentThreadRailItems } from "../src/document-comments";
 
@@ -212,6 +216,43 @@ describe("composer mode shortcut", () => {
         "MacIntel",
       ),
     ).toBeNull();
+  });
+});
+
+describe("composer mode-selection step keys", () => {
+  const key = (keyName: string, extra: Partial<KeyboardEventInit> = {}) => ({
+    key: keyName,
+    altKey: false,
+    ctrlKey: false,
+    metaKey: false,
+    shiftKey: false,
+    ...extra,
+  });
+
+  it("sends on Enter with or without Cmd/Ctrl, and leaves Shift+Enter alone", () => {
+    expect(matchModeStepKey(key("Enter"))).toEqual({ type: "submit" });
+    expect(matchModeStepKey(key("Enter", { metaKey: true }))).toEqual({
+      type: "submit",
+    });
+    expect(matchModeStepKey(key("Enter", { ctrlKey: true }))).toEqual({
+      type: "submit",
+    });
+    expect(matchModeStepKey(key("Enter", { shiftKey: true }))).toBeNull();
+  });
+
+  it("leaves Tab and modified digits to the browser", () => {
+    expect(matchModeStepKey(key("Tab"))).toBeNull();
+    expect(matchModeStepKey(key("2", { metaKey: true }))).toBeNull();
+    expect(matchModeStepKey(key("ArrowLeft", { shiftKey: true }))).toBeNull();
+  });
+
+  it("labels the hint with the platform's modifier", () => {
+    expect(getModeStepHint("MacIntel")).toBe(
+      "1 Comment · 2 Ask · 3 Change · ←/→ · ⌘↵ send · Esc edit",
+    );
+    expect(getModeStepHint("Win32")).toBe(
+      "1 Comment · 2 Ask · 3 Change · ←/→ · Ctrl+↵ send · Esc edit",
+    );
   });
 });
 

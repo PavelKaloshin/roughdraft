@@ -239,7 +239,7 @@ test.describe("Ask / Change comments", () => {
     await page.getByTestId("comment-rail-c1-action-reply").click();
     await expect(
       page.getByTestId("comment-rail-c2-mode-comment"),
-    ).toHaveAttribute("aria-pressed", "true");
+    ).toHaveAttribute("aria-checked", "true");
     await page.getByTestId("comment-rail-c2-mode-ask").click();
     await page
       .getByTestId("comment-rail-c2-editor")
@@ -265,5 +265,80 @@ test.describe("Ask / Change comments", () => {
     await expect(page.getByTestId("comment-rail-c1-agent-status")).toHaveText(
       "Waiting for Claude",
     );
+  });
+
+  test("writes, picks Ask and sends a comment with the keyboard only @smoke", async ({
+    page,
+    request,
+  }) => {
+    const relativePath = "keyboard.md";
+    const filePath = writeProjectFile(
+      projectDir,
+      relativePath,
+      ["# Keyboard", "", "Cold start takes about four seconds.", ""].join("\n"),
+    );
+    const watch = request.post("/api/review-events/watch", {
+      data: {
+        projectPath: projectDir,
+        path: relativePath,
+        types: ["comment.ask"],
+        timeoutSeconds: 20,
+      },
+    });
+    pendingWatch = watch;
+
+    await openMarkdownFile(page, filePath);
+    await selectRichText(page, "about four seconds");
+    // The editor has picked up the selection once its menu shows.
+    await expect(page.getByTestId("selection-menu")).toBeVisible();
+    // From here on: keyboard only. Cmd/Ctrl+Alt+M opens the composer.
+    // The app picks Cmd vs Ctrl from navigator.platform, which the test
+    // browser may report differently from the host OS.
+    const mod = (await page.evaluate(() =>
+      /mac|iphone|ipad|ipod/i.test(navigator.platform),
+    ))
+      ? "Meta"
+      : "Control";
+    await page.keyboard.press(`${mod}+Alt+KeyM`);
+    const editor = page.getByTestId("comment-rail-c1-editor");
+    await expect(editor).toBeFocused();
+    await page.keyboard.type("What is included in that time?");
+
+    // First Mod+Enter confirms the text and moves to the mode step.
+    await page.keyboard.press(`${mod}+Enter`);
+    await expect(page.getByTestId("comment-rail-c1-mode-step-hint")).toHaveText(
+      /^1 Comment · 2 Ask · 3 Change · ←\/→ · (⌘↵|Ctrl\+↵) send · Esc edit$/,
+    );
+    await expect(editor).toHaveAttribute("readonly", "");
+    await expect(
+      page.getByTestId("comment-rail-c1-mode-comment"),
+    ).toBeFocused();
+    await page.keyboard.press("2");
+    await expect(page.getByTestId("comment-rail-c1-mode-ask")).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    await expect(page.getByTestId("comment-rail-c1-mode-ask")).toBeFocused();
+    await snap(page, "29-agent-composer-mode-selection-step");
+    // Nothing is saved or sent before the second Mod+Enter.
+    expect(readProjectFile(projectDir, relativePath)).not.toContain(
+      "What is included",
+    );
+
+    await page.keyboard.press(`${mod}+Enter`);
+
+    const payload = (await (
+      (await watch) as { json: () => Promise<unknown> }
+    ).json()) as { events: Array<Record<string, unknown>> };
+    expect(payload.events).toHaveLength(1);
+    expect(payload.events[0]).toMatchObject({
+      type: "comment.ask",
+      commentId: "c1",
+    });
+    expect(readProjectFile(projectDir, relativePath)).toMatch(
+      /\{>>What is included in that time\?<<\}\{#c1\}[\s\S]*\n {2}c1:\n(?: {4}.*\n)*? {4}intent: ask\n/,
+    );
+    await expect(page.getByTestId("comment-rail-c1-editor")).toHaveCount(0);
+    await expect(page.getByTestId("comment-rail-c1-intent")).toHaveText("Ask");
   });
 });

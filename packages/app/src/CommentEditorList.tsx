@@ -45,13 +45,16 @@ import {
 } from "./comment-agent";
 import {
   getComposerModeShortcutLabel,
+  getModeStepHint,
+  isComposerSubmitShortcut,
   matchComposerModeShortcut,
+  matchModeStepKey,
 } from "./comment-shortcuts";
 import { Alert, AlertDescription, AlertTitle } from "./components/ui/alert";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
+import { RadioGroup, RadioGroupSegment } from "./components/ui/radio-group";
 import { Textarea } from "./components/ui/textarea";
-import { ToggleGroup, ToggleGroupItem } from "./components/ui/toggle-group";
 import {
   Tooltip,
   TooltipContent,
@@ -151,7 +154,7 @@ function isEditableShortcutTarget(target: EventTarget | null) {
 
   return Boolean(
     target.closest(
-      'input, textarea, select, [contenteditable="true"], [role="textbox"]',
+      'input, textarea, select, [contenteditable="true"], [role="textbox"], [role="radiogroup"]',
     ),
   );
 }
@@ -725,6 +728,61 @@ function CommentThreadNode({
     agent.available &&
     (isRootThread || (!threadRootIntent && !isAiAuthor));
   const draftMode = showComposerModes ? getDraftMode(comment.id) : "comment";
+  // Keyboard flow: the first Mod+Enter confirms the text and moves here; the
+  // second one sends with the chosen mode (see comment-shortcuts.ts).
+  const [isChoosingModeState, setChoosingMode] = useState(false);
+  const isChoosingMode = showComposerModes && isChoosingModeState;
+  const modeRadioRefs = useRef(new Map<CommentComposerMode, HTMLElement>());
+  const focusModeRadio = (mode: CommentComposerMode) => {
+    modeRadioRefs.current.get(mode)?.focus();
+  };
+  const selectDraftMode = (mode: CommentComposerMode) => {
+    onChangeDraftMode(comment.id, mode);
+    focusModeRadio(mode);
+  };
+  const enterModeStep = () => {
+    setChoosingMode(true);
+    focusModeRadio(draftMode);
+  };
+  const returnToEditing = () => {
+    setChoosingMode(false);
+    const textarea = textareaRefs.current.get(comment.id);
+    if (!textarea) return;
+    textarea.focus();
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+  };
+  const submitDraft = () => {
+    setChoosingMode(false);
+    onSubmitEditingComment(comment.id);
+  };
+  /** Keys of the mode-selection step; returns whether the key was handled. */
+  const handleModeStepKey = (event: KeyboardEvent) => {
+    const shortcut = matchComposerModeShortcut(event, getPlatform());
+    if (shortcut) {
+      setChoosingMode(true);
+      selectDraftMode(draftMode === shortcut ? "comment" : shortcut);
+      return true;
+    }
+    const action = matchModeStepKey(event);
+    if (!action) return false;
+    if (action.type === "submit") {
+      submitDraft();
+    } else if (action.type === "edit") {
+      returnToEditing();
+    } else {
+      const currentIndex = COMMENT_COMPOSER_MODES.indexOf(draftMode);
+      const count = COMMENT_COMPOSER_MODES.length;
+      const nextIndex =
+        action.type === "select"
+          ? action.index
+          : (currentIndex + action.delta + count) % count;
+      const next = COMMENT_COMPOSER_MODES[nextIndex];
+      if (!next) return false;
+      setChoosingMode(true);
+      selectDraftMode(next);
+    }
+    return true;
+  };
   const threadState = isRootThread ? agent.getThreadState(comment.id) : null;
   const latestThreadComment = isRootThread
     ? flattenCommentThreads([thread]).at(-1)
@@ -1119,20 +1177,33 @@ function CommentThreadNode({
                     depth === 0 ? "Add your comment" : "Write a reply"
                   }
                   rows={1}
+                  readOnly={isChoosingMode}
                   className={cn(
                     "mt-2 min-h-12 px-2.5 py-2 text-[13px] leading-5 md:text-[13px] md:leading-5",
                     variant === "banner"
                       ? "border-amber-200 dark:border-amber-700 bg-white/90 dark:bg-slate-800/90 text-slate-800 dark:text-slate-200"
                       : "border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 shadow-none",
+                    isChoosingMode &&
+                      "cursor-default border-dashed bg-stone-50 text-stone-600 focus-visible:ring-0 dark:bg-slate-900/60 dark:text-slate-400",
                   )}
                   onPointerDown={(event) => {
                     event.stopPropagation();
                     onSelectComment?.(comment.id);
+                    // Clicking the confirmed text goes back to editing it.
+                    if (isChoosingMode) setChoosingMode(false);
                   }}
                   onClick={(event) => {
                     event.stopPropagation();
                   }}
                   onKeyDown={(event) => {
+                    if (isChoosingMode) {
+                      if (handleModeStepKey(event)) {
+                        event.preventDefault();
+                        event.stopPropagation();
+                      }
+                      return;
+                    }
+
                     if (showComposerModes) {
                       const target = matchComposerModeShortcut(
                         event,
@@ -1149,13 +1220,14 @@ function CommentThreadNode({
                       }
                     }
 
-                    if (
-                      (event.metaKey || event.ctrlKey) &&
-                      event.key.toLowerCase() === "enter"
-                    ) {
+                    if (isComposerSubmitShortcut(event)) {
                       event.preventDefault();
                       event.stopPropagation();
-                      onSubmitEditingComment(comment.id);
+                      if (showComposerModes && draftContent.trim().length > 0) {
+                        enterModeStep();
+                      } else {
+                        onSubmitEditingComment(comment.id);
+                      }
                       return;
                     }
 
@@ -1178,7 +1250,10 @@ function CommentThreadNode({
                   commentId={comment.id}
                   variant={variant}
                   mode={draftMode}
+                  choosing={isChoosingMode}
+                  radioRefs={modeRadioRefs}
                   onChange={(mode) => onChangeDraftMode(comment.id, mode)}
+                  onKeyDown={handleModeStepKey}
                 />
               ) : null}
               <div className="mt-2 flex flex-wrap items-center gap-1">
@@ -1255,54 +1330,103 @@ function ComposerModeToggle({
   commentId,
   variant,
   mode,
+  choosing,
+  radioRefs,
   onChange,
+  onKeyDown,
 }: {
   commentId: string;
   variant: "banner" | "rail";
   mode: CommentComposerMode;
+  /** The keyboard mode-selection step is active. */
+  choosing: boolean;
+  radioRefs: MutableRefObject<Map<CommentComposerMode, HTMLElement>>;
   onChange: (mode: CommentComposerMode) => void;
+  /** Mode-selection step keys; returns whether the key was handled. */
+  onKeyDown: (event: KeyboardEvent) => boolean;
 }) {
   const platform = getPlatform();
+  const testIdPrefix = `comment-${variant}-${commentId}-mode`;
+  const stepHintId = `${testIdPrefix}-step-hint`;
 
   return (
-    <div className="mt-2 space-y-1">
-      <ToggleGroup
+    // Capture phase: the step's keys (digits, arrows, Enter, Escape) are
+    // handled here before the radio group's own arrow-key navigation, so the
+    // selection and focus move together and Enter sends.
+    <div
+      className="mt-2 space-y-1"
+      onKeyDownCapture={(event) => {
+        if (onKeyDown(event)) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+      }}
+    >
+      <RadioGroup
         aria-label="Comment type"
-        data-testid={`comment-${variant}-${commentId}-mode`}
-        variant="outline"
-        size="sm"
-        spacing={0}
-        value={[mode]}
+        aria-describedby={stepHintId}
+        data-testid={testIdPrefix}
+        data-choosing={choosing ? "true" : undefined}
+        className={cn(
+          "flex w-fit flex-row gap-0 rounded-md",
+          choosing &&
+            "ring-2 ring-amber-300 ring-offset-1 ring-offset-white dark:ring-amber-600 dark:ring-offset-slate-900",
+        )}
+        value={mode}
         onValueChange={(value) => {
-          const next = value[0];
-          if (next === "comment" || next === "ask" || next === "change") {
-            onChange(next);
+          if (value === "comment" || value === "ask" || value === "change") {
+            onChange(value);
           }
         }}
         onPointerDown={(event) => event.stopPropagation()}
         onClick={(event) => event.stopPropagation()}
       >
-        {COMMENT_COMPOSER_MODES.map((option) => (
-          <ToggleGroupItem
+        {COMMENT_COMPOSER_MODES.map((option, index) => (
+          <RadioGroupSegment
             key={option}
             value={option}
-            data-testid={`comment-${variant}-${commentId}-mode-${option}`}
+            ref={(node: HTMLElement | null) => {
+              if (node) radioRefs.current.set(option, node);
+              else radioRefs.current.delete(option);
+            }}
+            data-testid={`${testIdPrefix}-${option}`}
             title={
               option === "comment"
-                ? COMMENT_COMPOSER_MODE_LABELS[option]
-                : `${COMMENT_COMPOSER_MODE_LABELS[option]} (${getComposerModeShortcutLabel(option, platform)})`
+                ? `${COMMENT_COMPOSER_MODE_LABELS[option]} (${index + 1})`
+                : `${COMMENT_COMPOSER_MODE_LABELS[option]} (${index + 1} · ${getComposerModeShortcutLabel(option, platform)})`
             }
-            className="h-6 px-2 text-[11px] aria-pressed:bg-stone-800 aria-pressed:text-white dark:aria-pressed:bg-slate-200 dark:aria-pressed:text-slate-900"
+            className="h-6 px-2 text-[11px] data-checked:bg-stone-800 data-checked:text-white dark:data-checked:bg-slate-200 dark:data-checked:text-slate-900"
           >
             {COMMENT_COMPOSER_MODE_LABELS[option]}
-          </ToggleGroupItem>
+          </RadioGroupSegment>
         ))}
-      </ToggleGroup>
+      </RadioGroup>
       <p
-        data-testid={`comment-${variant}-${commentId}-mode-hint`}
+        data-testid={`${testIdPrefix}-hint`}
         className="text-[11px] leading-4 text-stone-400 dark:text-slate-500"
       >
         {composerModeHints[mode]}
+      </p>
+      <p
+        id={stepHintId}
+        data-testid={stepHintId}
+        aria-live="polite"
+        className={cn(
+          "text-[11px] leading-4 text-stone-500 dark:text-slate-400",
+          !choosing && "sr-only",
+        )}
+      >
+        {/* Wrap only between items, never inside "⌘↵ send". */}
+        {choosing
+          ? getModeStepHint(platform)
+              .split(" · ")
+              .map((item, index) => (
+                <span key={item}>
+                  {index > 0 ? " · " : null}
+                  <span className="whitespace-nowrap">{item}</span>
+                </span>
+              ))
+          : null}
       </p>
     </div>
   );

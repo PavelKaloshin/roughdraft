@@ -31,10 +31,23 @@ export function matchesAddCommentShortcut(
 }
 
 /**
- * Composer mode shortcuts, active while typing a new root comment:
- * Mod+Shift+A picks Ask, Mod+Shift+E picks Change ("edit"). Pressing the
- * shortcut of the mode that is already selected goes back to Comment.
- * Mod+Enter still saves with the current mode and Escape still cancels.
+ * Composer keyboard flow. Where the composer offers Comment / Ask / Change
+ * (a new root comment, or a new user reply in a plain thread, when the
+ * backend can reach an agent):
+ *
+ * 1. Typing: Mod+Enter confirms the text and moves to the mode-selection
+ *    step (an empty draft is submitted as before, which discards it).
+ *    Escape cancels, as before.
+ * 2. Mode-selection step (the text is read-only, focus is on the mode radio
+ *    group): 1 / 2 / 3 pick Comment / Ask / Change; ←/→ and ↑/↓ cycle;
+ *    Mod+Enter or Enter sends with the selected mode; Escape goes back to
+ *    editing the text (a second Escape then cancels).
+ *
+ * In both steps Mod+Shift+A picks Ask and Mod+Shift+E picks Change ("edit");
+ * pressing the shortcut of the mode that is already selected goes back to
+ * Comment. Where no mode picker is shown (editing an existing comment, a
+ * reply in an Ask/Change thread, backends without an agent), one Mod+Enter
+ * saves. "Mod" is Cmd or Ctrl: both are accepted on every platform.
  */
 export type ComposerModeShortcutTarget = "ask" | "change";
 
@@ -58,4 +71,55 @@ export function getComposerModeShortcutLabel(
 ) {
   const modifier = isApplePlatform(platform) ? "Cmd" : "Ctrl";
   return `${modifier} + Shift + ${target === "ask" ? "A" : "E"}`;
+}
+
+interface ComposerKeyEventLike {
+  key: string;
+  altKey: boolean;
+  ctrlKey: boolean;
+  metaKey: boolean;
+  shiftKey: boolean;
+}
+
+/** Mod+Enter (Cmd or Ctrl, on any platform), the composer's submit key. */
+export function isComposerSubmitShortcut(event: ComposerKeyEventLike) {
+  return (event.metaKey || event.ctrlKey) && event.key === "Enter";
+}
+
+export type ModeStepKeyAction =
+  | { type: "select"; index: number }
+  | { type: "cycle"; delta: 1 | -1 }
+  | { type: "submit" }
+  | { type: "edit" };
+
+/**
+ * Keys of the mode-selection step (see above). Mod+Shift+A/E are matched
+ * separately with `matchComposerModeShortcut`; anything else returns null so
+ * Tab and friends keep their default behavior.
+ */
+export function matchModeStepKey(
+  event: ComposerKeyEventLike,
+): ModeStepKeyAction | null {
+  if (event.key === "Enter" && !event.shiftKey && !event.altKey) {
+    return { type: "submit" };
+  }
+  if (event.metaKey || event.ctrlKey || event.altKey) return null;
+  if (event.key === "Escape") return { type: "edit" };
+  if (event.shiftKey) return null;
+  if (event.key === "1" || event.key === "2" || event.key === "3") {
+    return { type: "select", index: Number(event.key) - 1 };
+  }
+  if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+    return { type: "cycle", delta: 1 };
+  }
+  if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+    return { type: "cycle", delta: -1 };
+  }
+  return null;
+}
+
+/** The compact help line shown during the mode-selection step. */
+export function getModeStepHint(platform?: string | null) {
+  const send = isApplePlatform(platform) ? "⌘↵" : "Ctrl+↵";
+  return `1 Comment · 2 Ask · 3 Change · ←/→ · ${send} send · Esc edit`;
 }

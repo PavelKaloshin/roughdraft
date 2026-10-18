@@ -398,7 +398,7 @@ describe("Ask / Change comments", () => {
     const { onSaveDocument } = await renderWorkspace(server);
 
     await addCommentOn("target");
-    expect(getThreadPart("c1-mode-comment").getAttribute("aria-pressed")).toBe(
+    expect(getThreadPart("c1-mode-comment").getAttribute("aria-checked")).toBe(
       "true",
     );
     await typeInto(getThreadPart<HTMLTextAreaElement>("c1-editor"), "Note");
@@ -437,11 +437,11 @@ describe("Ask / Change comments", () => {
     };
 
     await pressModeShortcut();
-    expect(getThreadPart("c1-mode-ask").getAttribute("aria-pressed")).toBe(
+    expect(getThreadPart("c1-mode-ask").getAttribute("aria-checked")).toBe(
       "true",
     );
     await pressModeShortcut();
-    expect(getThreadPart("c1-mode-comment").getAttribute("aria-pressed")).toBe(
+    expect(getThreadPart("c1-mode-comment").getAttribute("aria-checked")).toBe(
       "true",
     );
   });
@@ -515,7 +515,7 @@ describe("Ask / Change comments", () => {
     await flush();
 
     // A reply in a plain thread starts as a plain comment.
-    expect(getThreadPart("c2-mode-comment").getAttribute("aria-pressed")).toBe(
+    expect(getThreadPart("c2-mode-comment").getAttribute("aria-checked")).toBe(
       "true",
     );
     await click(getThreadPart("c2-mode-ask"));
@@ -657,5 +657,259 @@ describe("Ask / Change comments", () => {
     expect(getThreadPart("c1-resolved").textContent).toContain("Resolved");
     expect(queryThreadPart("c1-body")).toBeNull();
     expect(server.postCommentEvent).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Keyboard-only composer: the first Mod+Enter confirms the text and moves to
+ * a mode-selection step (1/2/3, arrows), the second Mod+Enter sends. Where no
+ * mode picker exists, one Mod+Enter still saves.
+ */
+describe("keyboard comment flow", () => {
+  const isApple = /mac|iphone|ipad|ipod/i.test(navigator.platform);
+
+  /** Keys go to whatever has focus, like a real keyboard. */
+  async function press(
+    key: string,
+    init: { mod?: boolean; shift?: boolean; code?: string } = {},
+  ) {
+    const target = document.activeElement ?? document.body;
+    await act(async () => {
+      target.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key,
+          code: init.code,
+          shiftKey: init.shift ?? false,
+          metaKey: !!init.mod && isApple,
+          ctrlKey: !!init.mod && !isApple,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+  }
+
+  const modEnter = () => press("Enter", { mod: true });
+
+  /** The one checked mode radio, e.g. "c1-mode-ask". */
+  function checkedMode(id: string) {
+    const checked = ["comment", "ask", "change"]
+      .map((mode) => `${id}-mode-${mode}`)
+      .filter((suffix) => {
+        const radio = getThreadPart(suffix);
+        expect(radio.getAttribute("role")).toBe("radio");
+        return radio.getAttribute("aria-checked") === "true";
+      });
+    expect(checked).toHaveLength(1);
+    return checked[0];
+  }
+
+  /**
+   * Focus a composer the way a user's caret would be there. Selecting a
+   * thread focuses the document editor on the next animation frame (TipTap's
+   * `focus` command), so let that land first instead of racing it.
+   */
+  async function focusComposer(id: string, text: string) {
+    await flushAnimationFrame();
+    await flushAnimationFrame();
+    const editor = getThreadPart<HTMLTextAreaElement>(`${id}-editor`);
+    await act(async () => {
+      editor.focus();
+    });
+    expect(document.activeElement).toBe(editor);
+    await typeInto(editor, text);
+    return editor;
+  }
+
+  async function startRootComment(text: string) {
+    await addCommentOn("target");
+    return focusComposer("c1", text);
+  }
+
+  const plainThreadDoc = [
+    "Cold start {==target==}{>>Plain note<<}{#c1}.",
+    "",
+    "---",
+    "comments:",
+    "  c1:",
+    "    by: user",
+    '    at: "2026-10-18T12:00:00.000Z"',
+    "",
+  ].join("\n");
+
+  it("confirms the text on the first Mod+Enter, picks a mode with digits and arrows, sends on the second", async () => {
+    const server = createFakeServer({ initialContent: "Cold start target.\n" });
+    await renderWorkspace(server);
+    const editor = await startRootComment("Why?");
+
+    await modEnter();
+    await flush(6);
+
+    // Nothing saved or sent yet: the composer is in its mode-selection step.
+    expect(server.postCommentEvent).not.toHaveBeenCalled();
+    expect(getThreadPart("c1-editor")).toBe(editor);
+    expect(editor.value).toBe("Why?");
+    expect(editor.readOnly).toBe(true);
+    const group = getThreadPart("c1-mode");
+    expect(group.getAttribute("role")).toBe("radiogroup");
+    expect(group.contains(document.activeElement)).toBe(true);
+    const hint = getThreadPart("c1-mode-step-hint");
+    expect(hint.textContent).toBe(
+      `1 Comment · 2 Ask · 3 Change · ←/→ · ${isApple ? "⌘↵" : "Ctrl+↵"} send · Esc edit`,
+    );
+    expect(hint.closest("[aria-live]")?.getAttribute("aria-live")).toBe(
+      "polite",
+    );
+    expect(checkedMode("c1")).toBe("c1-mode-comment");
+
+    await press("3");
+    expect(checkedMode("c1")).toBe("c1-mode-change");
+    await press("ArrowRight");
+    expect(checkedMode("c1")).toBe("c1-mode-comment");
+    await press("ArrowLeft");
+    expect(checkedMode("c1")).toBe("c1-mode-change");
+    await press("ArrowUp");
+    expect(checkedMode("c1")).toBe("c1-mode-ask");
+    await press("1");
+    expect(checkedMode("c1")).toBe("c1-mode-comment");
+    await press("2");
+    expect(checkedMode("c1")).toBe("c1-mode-ask");
+    // Focus follows the selection (roving focus).
+    expect(document.activeElement).toBe(getThreadPart("c1-mode-ask"));
+
+    await modEnter();
+    await flush(6);
+
+    expect(server.postCommentEvent).toHaveBeenCalledTimes(1);
+    expect(server.postCommentEvent).toHaveBeenCalledWith("plan.md", {
+      type: "comment.ask",
+      commentId: "c1",
+    });
+    expect(server.diskAtEachEvent[0]).toContain("{>>Why?<<}{#c1}");
+    expect(server.diskAtEachEvent[0]).toContain("intent: ask");
+    expect(queryThreadPart("c1-editor")).toBeNull();
+  });
+
+  it("starts the step at the remembered mode and submits on plain Enter", async () => {
+    window.localStorage.setItem("roughdraft.commentComposerMode", "change");
+    const server = createFakeServer({ initialContent: "Cold start target.\n" });
+    await renderWorkspace(server);
+    await startRootComment("Tighten");
+
+    await modEnter();
+    expect(checkedMode("c1")).toBe("c1-mode-change");
+    await press("Enter");
+    await flush(6);
+
+    expect(server.postCommentEvent).toHaveBeenCalledTimes(1);
+    expect(server.postCommentEvent).toHaveBeenCalledWith("plan.md", {
+      type: "comment.change",
+      commentId: "c1",
+    });
+  });
+
+  it("lets Mod+Shift+A set the mode inside the step", async () => {
+    const server = createFakeServer({ initialContent: "Cold start target.\n" });
+    await renderWorkspace(server);
+    await startRootComment("Why?");
+
+    await modEnter();
+    await press("A", { mod: true, shift: true, code: "KeyA" });
+    expect(checkedMode("c1")).toBe("c1-mode-ask");
+    await modEnter();
+    await flush(6);
+
+    expect(server.postCommentEvent).toHaveBeenCalledWith("plan.md", {
+      type: "comment.ask",
+      commentId: "c1",
+    });
+  });
+
+  it("returns to editing on Esc with the text intact; a second Esc cancels", async () => {
+    const server = createFakeServer({ initialContent: "Cold start target.\n" });
+    await renderWorkspace(server);
+    const editor = await startRootComment("Half a thought");
+
+    await modEnter();
+    await press("Escape");
+    await flush();
+
+    expect(server.postCommentEvent).not.toHaveBeenCalled();
+    expect(editor.readOnly).toBe(false);
+    expect(editor.value).toBe("Half a thought");
+    expect(document.activeElement).toBe(editor);
+    expect(getThreadPart("c1-mode-step-hint").textContent).toBe("");
+
+    // Back in the text: Esc keeps today's behavior (cancel the new draft).
+    await press("Escape");
+    await flush();
+    expect(queryThreadPart("c1-editor")).toBeNull();
+    expect(server.postCommentEvent).not.toHaveBeenCalled();
+  });
+
+  it("saves an edit of an existing comment on the first Mod+Enter", async () => {
+    const server = createFakeServer({ initialContent: plainThreadDoc });
+    await renderWorkspace(server);
+    await click(getThreadPart("c1"));
+    await flush();
+    await click(getThreadPart("c1-action-edit"));
+    await flush();
+    await focusComposer("c1", "Edited note");
+
+    await modEnter();
+    await flush();
+
+    expect(queryThreadPart("c1-editor")).toBeNull();
+    expect(getThreadPart("c1-body").textContent?.trim()).toBe("Edited note");
+    expect(server.postCommentEvent).not.toHaveBeenCalled();
+  });
+
+  it("sends a reply in an Ask thread on the first Mod+Enter", async () => {
+    const server = createFakeServer({
+      initialContent: plainThreadDoc.replace(
+        '    at: "2026-10-18T12:00:00.000Z"\n',
+        '    at: "2026-10-18T12:00:00.000Z"\n    intent: ask\n',
+      ),
+    });
+    await renderWorkspace(server);
+    await click(getThreadPart("c1"));
+    await flush();
+    await click(getThreadPart("c1-action-reply"));
+    await flush();
+    await focusComposer("c2", "More detail?");
+
+    await modEnter();
+    await flush(6);
+
+    expect(server.postCommentEvent).toHaveBeenCalledTimes(1);
+    expect(server.postCommentEvent).toHaveBeenCalledWith("plan.md", {
+      type: "comment.followup",
+      commentId: "c2",
+    });
+  });
+
+  it("uses the two-step flow for a reply that can escalate a plain thread", async () => {
+    const server = createFakeServer({ initialContent: plainThreadDoc });
+    await renderWorkspace(server);
+    await click(getThreadPart("c1"));
+    await flush();
+    await click(getThreadPart("c1-action-reply"));
+    await flush();
+    const editor = await focusComposer("c2", "Claude, why?");
+
+    await modEnter();
+    expect(server.postCommentEvent).not.toHaveBeenCalled();
+    expect(editor.readOnly).toBe(true);
+    // A reply starts at Comment, not at the remembered mode.
+    expect(checkedMode("c2")).toBe("c2-mode-comment");
+    await press("2");
+    await modEnter();
+    await flush(6);
+
+    expect(server.postCommentEvent).toHaveBeenCalledTimes(1);
+    expect(server.postCommentEvent).toHaveBeenCalledWith("plan.md", {
+      type: "comment.followup",
+      commentId: "c2",
+    });
   });
 });
