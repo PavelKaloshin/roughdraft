@@ -27,6 +27,11 @@ import {
 } from "./network.js";
 import { findAvailablePort } from "./ports.js";
 import { resolveUpdateStatus, type UpdateStatus } from "./update-status.js";
+import {
+  roundTimeoutSignal,
+  type WatchRoundPayload,
+  watchInRounds,
+} from "./watch-rounds.js";
 
 const AGENT_SETUP_URL = "https://roughdraft.md/setup.md";
 const ROUGHDRAFT_FLAVORED_MARKDOWN_SPEC_URL =
@@ -106,6 +111,8 @@ export interface CliDependencies {
   readStdin: () => Promise<string>;
   log: (message: string) => void;
   error: (message: string) => void;
+  /** How long `open --remote` waits for the save-back stream to connect. */
+  remoteConnectTimeoutMs?: number;
 }
 
 type OpenMode =
@@ -857,6 +864,7 @@ export function createCliDependencies(
     readStdin: overrides.readStdin ?? defaultReadStdin,
     log: overrides.log ?? ((message) => console.log(message)),
     error: overrides.error ?? ((message) => console.error(message)),
+    remoteConnectTimeoutMs: overrides.remoteConnectTimeoutMs,
   };
 }
 
@@ -1258,8 +1266,9 @@ function printCriticMarkupHelp(log: (message: string) => void) {
   );
   log("");
   log("Code blocks:");
+  log("  To comment on code in a fence, anchor it: {==code==}{>>note<<}{#c1}.");
   log(
-    "  Treat CriticMarkup inside fenced code blocks as literal example text.",
+    "  Any other CriticMarkup inside fenced code blocks is literal example text.",
   );
   log("");
   log("Full spec:");
@@ -1477,18 +1486,27 @@ async function runRemoteOpen(
     deps.log(`Holding session open for ${options.openPath}. Ctrl-C to exit.`);
   }
 
-  const SSE_CONNECT_TIMEOUT_MS = 10_000;
+  const SSE_CONNECT_TIMEOUT_MS = deps.remoteConnectTimeoutMs ?? 10_000;
   const eventsUrl = new URL(
     `/api/remote-document/${encodeURIComponent(sessionId)}/events`,
     baseUrl,
   );
   eventsUrl.searchParams.set("role", "cli");
 
+  // Only the connect is time-limited: an AbortSignal on the fetch would also
+  // abort the long-lived body stream, so clear the timer once headers arrive.
+  // The host sends keepalives, so undici's body timeout does not fire either.
+  const connectAbort = new AbortController();
+  const connectTimer = setTimeout(
+    () =>
+      connectAbort.abort(new DOMException("Connect timeout", "TimeoutError")),
+    SSE_CONNECT_TIMEOUT_MS,
+  );
   let eventsResponse: Response;
   try {
     eventsResponse = await deps.fetchImpl(eventsUrl.toString(), {
       headers: { Accept: "text/event-stream", ...authHeaders },
-      signal: AbortSignal.timeout(SSE_CONNECT_TIMEOUT_MS),
+      signal: connectAbort.signal,
     });
   } catch (error) {
     deps.error(
@@ -1497,6 +1515,8 @@ async function runRemoteOpen(
       }`,
     );
     return 1;
+  } finally {
+    clearTimeout(connectTimer);
   }
 
   if (!eventsResponse.ok || !eventsResponse.body) {
@@ -2272,25 +2292,6 @@ async function runMarkdownDoctor(
   return validation.ok ? 0 : 1;
 }
 
-// Well under undici's default 300s headers timeout for Node's fetch.
-const WATCH_POLL_ROUND_SECONDS = 60;
-
-type WatchPayload = {
-  events?: unknown[];
-  timedOut?: boolean;
-  nextSequence: number;
-};
-
-function isRetryableWatchError(error: unknown): boolean {
-  if (error instanceof Error && error.name === "TimeoutError") return true;
-  const cause = error instanceof Error ? error.cause : undefined;
-  const code =
-    cause && typeof cause === "object" && "code" in cause
-      ? (cause as { code?: unknown }).code
-      : undefined;
-  return code === "UND_ERR_HEADERS_TIMEOUT" || code === "UND_ERR_BODY_TIMEOUT";
-}
-
 async function runWatch(
   deps: CliDependencies,
   targetPath: string,
@@ -2307,20 +2308,11 @@ async function runWatch(
   }
   const relativePath = path.relative(target.projectDir, target.openPath);
   const watchUrl = new URL("/api/review-events/watch", serverUrl);
-  const deadline =
-    options.timeoutSeconds !== undefined
-      ? Date.now() + options.timeoutSeconds * 1000
-      : undefined;
 
-  // Node's fetch gives up on a response that sends no headers within 300s, so
-  // one unbounded long-poll crashes on a slow reviewer. Poll in bounded rounds
-  // and carry the event cursor between them so nothing is missed in the gaps.
-  const poll = async (cursor: {
-    fromNow: boolean;
-    afterSequence?: number;
-    timeoutSeconds: number;
-  }): Promise<WatchPayload | null> => {
-    try {
+  const payload = await watchInRounds({
+    afterSequence: options.replay ? 0 : undefined,
+    timeoutSeconds: options.timeoutSeconds,
+    poll: async (cursor) => {
       const response = await deps.fetchImpl(watchUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2330,55 +2322,14 @@ async function runWatch(
           batchWindowSeconds: options.batchWindowSeconds,
           ...cursor,
         }),
-        signal: AbortSignal.timeout((cursor.timeoutSeconds + 5) * 1000),
+        signal: roundTimeoutSignal(cursor.timeoutSeconds, 5),
       });
       if (!response.ok) {
         throw new Error(`Failed to watch review events: ${response.status}`);
       }
-      return (await response.json()) as WatchPayload;
-    } catch (error) {
-      if (isRetryableWatchError(error)) return null;
-      throw error;
-    }
-  };
-
-  let afterSequence: number | undefined;
-  if (!options.replay) {
-    // Pin the cursor to "now" with an immediate round so later rounds can
-    // resume from it instead of re-anchoring to whatever is latest.
-    while (afterSequence === undefined) {
-      const anchor = await poll({ fromNow: true, timeoutSeconds: 0 });
-      if (anchor) afterSequence = anchor.nextSequence - 1;
-    }
-  }
-
-  let payload: WatchPayload;
-  for (;;) {
-    const remainingSeconds =
-      deadline !== undefined
-        ? Math.max(0, (deadline - Date.now()) / 1000)
-        : Number.POSITIVE_INFINITY;
-    const roundSeconds = Math.min(remainingSeconds, WATCH_POLL_ROUND_SECONDS);
-    const result = await poll({
-      fromNow: false,
-      afterSequence: afterSequence ?? 0,
-      timeoutSeconds: roundSeconds,
-    });
-    if (result) {
-      afterSequence = result.nextSequence - 1;
-      if (!result.timedOut || remainingSeconds <= roundSeconds) {
-        payload = result;
-        break;
-      }
-    } else if (deadline !== undefined && Date.now() >= deadline) {
-      payload = {
-        events: [],
-        timedOut: true,
-        nextSequence: (afterSequence ?? 0) + 1,
-      };
-      break;
-    }
-  }
+      return (await response.json()) as WatchRoundPayload;
+    },
+  });
 
   if (json) {
     emitJson(deps.log, payload);

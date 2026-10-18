@@ -5,6 +5,7 @@ import type {
   ReviewCompletedEvent,
   ReviewEvent,
 } from "./review-events.js";
+import { roundTimeoutSignal } from "./watch-rounds.js";
 
 /**
  * `roughdraft listen | reply | ack | resolve`: the agent half of comment
@@ -189,7 +190,7 @@ export async function runListen(
         ...(instanceId ? { instanceId } : {}),
         listener: { id: listenerId, ...(sessionId ? { sessionId } : {}) },
       }),
-      signal: AbortSignal.timeout((timeoutSeconds + 10) * 1000),
+      signal: roundTimeoutSignal(timeoutSeconds, 10),
     });
     if (response.status >= 400 && response.status < 500) {
       const payload = (await response.json().catch(() => ({}))) as {

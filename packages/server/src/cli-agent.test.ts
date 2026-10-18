@@ -179,11 +179,15 @@ describe("agent CLI commands", () => {
 
     expect(errors).toEqual([]);
     expect(exitCode).toBe(0);
+    // Attaching queued both unanswered threads from the file, so the posted
+    // ask is the same event (seq 1), and the change follows it.
     const seq = posted.event.sequence;
+    expect(seq).toBe(1);
     expect(logs).toEqual([
       `[roughdraft] listening on ${documentPath} (session session-abc) since=0`,
-      `[roughdraft] ask c1 seq=${seq} → roughdraft ack ${documentPath} c1, answer without editing the file: roughdraft reply ${documentPath} c1 --stdin | by=pavel anchor="about \\"four\\" seconds" text="What is included?\\nAnd why \\"four\\"?"`,
-      `[roughdraft] listen expired; re-arm with: roughdraft listen ${documentPath} --since ${seq}`,
+      `[roughdraft] ask c1 seq=1 → roughdraft ack ${documentPath} c1, answer without editing the file: roughdraft reply ${documentPath} c1 --stdin | by=pavel anchor="about \\"four\\" seconds" text="What is included?\\nAnd why \\"four\\"?"`,
+      `[roughdraft] change c2 seq=2 → roughdraft ack ${documentPath} c2, edit the file, then: roughdraft reply ${documentPath} c2 --status applied --stdin | by=pavel anchor="this paragraph" text="One sentence please."`,
+      `[roughdraft] listen expired; re-arm with: roughdraft listen ${documentPath} --since 2`,
     ]);
   });
 
@@ -202,8 +206,19 @@ describe("agent CLI commands", () => {
       first.logs.some((line) => line.startsWith("[roughdraft] ask c1")),
     ).toBe(true);
 
-    // Nobody is listening while this change request is posted.
-    await postEvent("comment.change", "c2");
+    // Nobody is listening while the user follows up in the change thread.
+    fs.appendFileSync(
+      documentPath,
+      [
+        "  c3:",
+        "    body: Keep the numbers.",
+        "    by: pavel",
+        '    at: "2026-10-18T12:05:00.000Z"',
+        "    re: c2",
+        "",
+      ].join("\n"),
+    );
+    await postEvent("comment.followup", "c3");
 
     const second = makeDeps();
     const secondRun = runCli(
@@ -224,7 +239,7 @@ describe("agent CLI commands", () => {
     );
     expect(eventLines).toHaveLength(1);
     expect(eventLines[0]).toMatch(
-      /^\[roughdraft\] change c2 seq=\d+ → roughdraft ack .* c2, edit the file, then: roughdraft reply .* c2 --status applied --stdin \| /,
+      /^\[roughdraft\] followup c2 reply=c3 intent=change seq=\d+ → roughdraft ack .* c2, edit the file, then: roughdraft reply .* c2 --status applied --stdin \| /,
     );
   });
 
@@ -293,11 +308,22 @@ describe("agent CLI commands", () => {
     server = await startServer(projectDir, port);
     await postEvent("comment.change", "c2");
 
+    // The restarted server lost its queue, but re-reads the unanswered
+    // threads from the file when the listener reattaches: the ask posted
+    // before the restart comes back. Sequences start over, and whether the
+    // tab's post or the reattach comes first is a race, so ignore order.
     await waitForLog(
       logs,
-      (line) => line.startsWith("[roughdraft] change c2 seq=1 "),
+      (line) => /^\[roughdraft\] change c2 seq=[12] /.test(line),
       4_500,
     );
+    const deadline = Date.now() + 2_000;
+    const askLines = () =>
+      logs.filter((line) => line.startsWith("[roughdraft] ask c1 "));
+    while (askLines().length < 2 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(askLines()).toHaveLength(2);
     expect(await listening).toBe(0);
   }, 12_000);
 
