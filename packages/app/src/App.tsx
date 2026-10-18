@@ -593,7 +593,10 @@ function HomepageWorkflowScene({
       data-testid="homepage-workflow-scene"
       ref={sceneRef}
     >
-      <div className="font-die-grotesk-a min-w-0 max-w-[28rem] font-bold max-[899px]:max-w-[min(100%,27rem)]">
+      <div
+        className="font-die-grotesk-a min-w-0 max-w-[28rem] font-bold max-[899px]:max-w-[min(100%,27rem)]"
+        data-testid="homepage-workflow-scene-copy"
+      >
         <div className="inline-flex h-12 min-w-12 items-center justify-center rounded-full border border-slate-950 bg-slate-950 px-2 text-[2.25rem] leading-none font-bold text-white dark:border-slate-100 dark:bg-slate-100 dark:text-slate-950">
           {step}
         </div>
