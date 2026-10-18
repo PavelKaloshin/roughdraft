@@ -196,6 +196,11 @@ test.describe("stale writes", () => {
   test("rejects autosave after external content changes with stable metadata", async ({
     page,
   }) => {
+    // Without this, the live file channel (which compares content versions,
+    // not mtime and size) reloads the external edit before the user types, so
+    // the save would correctly succeed and the conflict path is never taken.
+    await blockMarkdownFileEvents(page);
+
     const fixedTimestamp = new Date("2026-01-01T00:00:00.000Z");
     const filePath = writeProjectFile(
       projectDir,
