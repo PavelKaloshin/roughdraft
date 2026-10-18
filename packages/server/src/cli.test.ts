@@ -1088,6 +1088,103 @@ describe("cli", () => {
     });
   });
 
+  it("keeps waiting for review when the watch response outlives the client's headers timeout", async () => {
+    // Node's built-in fetch (undici) rejects with
+    // `TypeError: fetch failed { cause: HeadersTimeoutError }` when a response
+    // sends no headers within `headersTimeout` (300s by default). The review
+    // watch is an unbounded long-poll, so a slow reviewer used to crash
+    // `roughdraft open`. Scale that client limit down to keep the test fast.
+    const CLIENT_HEADERS_TIMEOUT_MS = 200;
+    const test = createTestDependencies();
+    const documentPath = path.join(projectDir, "draft.md");
+    fs.writeFileSync(documentPath, "# Draft\n");
+    let watchRequestCount = 0;
+
+    const fetchWithHeadersTimeout: typeof fetch = async (input, init) => {
+      const url =
+        input instanceof URL
+          ? input
+          : new URL(
+              typeof input === "string" ? input : input.url,
+              "http://localhost",
+            );
+      if (url.pathname !== "/api/review-events/watch") {
+        return test.deps.fetchImpl(input, init);
+      }
+
+      watchRequestCount += 1;
+      const headersTimeout = new AbortController();
+      const timer = setTimeout(
+        () => headersTimeout.abort(),
+        CLIENT_HEADERS_TIMEOUT_MS,
+      );
+      try {
+        return await test.deps.fetchImpl(input, {
+          ...init,
+          signal: init?.signal
+            ? AbortSignal.any([init.signal, headersTimeout.signal])
+            : headersTimeout.signal,
+        });
+      } catch (error) {
+        if (!headersTimeout.signal.aborted) throw error;
+        throw new TypeError("fetch failed", {
+          cause: Object.assign(new Error("Headers Timeout Error"), {
+            name: "HeadersTimeoutError",
+            code: "UND_ERR_HEADERS_TIMEOUT",
+          }),
+        });
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+
+    const watchPromise = runCli(
+      ["open", documentPath, "--json", "--batch-window", "0"],
+      { ...test.deps, fetchImpl: fetchWithHeadersTimeout },
+    );
+    // Surface a crash immediately instead of as an unhandled rejection.
+    const settled = watchPromise.then(
+      (exitCode) => ({ exitCode, error: null as unknown }),
+      (error: unknown) => ({ exitCode: null, error }),
+    );
+
+    let persisted: { port: number } | null = null;
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      const stateFile = getServerStateFilePath(test.deps.env);
+      if (fs.existsSync(stateFile)) {
+        persisted = JSON.parse(fs.readFileSync(stateFile, "utf8")) as {
+          port: number;
+        };
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(persisted).not.toBeNull();
+
+    // The reviewer takes longer than the client is willing to wait for headers.
+    await new Promise((resolve) =>
+      setTimeout(resolve, CLIENT_HEADERS_TIMEOUT_MS * 3),
+    );
+    await fetch(`http://localhost:${persisted?.port}/api/review-events`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ projectPath: projectDir, path: "draft.md" }),
+    });
+
+    const result = await settled;
+    expect(result.error).toBeNull();
+    expect(result.exitCode).toBe(0);
+    expect(watchRequestCount).toBeGreaterThan(0);
+    const payload = parseOnlyJsonLog<{
+      timedOut: boolean;
+      events: Array<{ documentPath: string; type: string }>;
+    }>(test.logs);
+    expect(payload).toMatchObject({
+      timedOut: false,
+      events: [{ documentPath, type: "review.completed" }],
+    });
+  });
+
   it("opens a document and waits for the next review event by default from open --json", async () => {
     const test = createTestDependencies();
     const documentPath = path.join(projectDir, "draft.md");
@@ -1137,14 +1234,18 @@ describe("cli", () => {
     }
 
     expect(persisted).not.toBeNull();
+    // Wait for a long-poll round, not the immediate round that anchors "now".
     for (let attempt = 0; attempt < 20; attempt += 1) {
-      if (watchRequestBody) break;
+      if (watchRequestBody && watchRequestBody.timeoutSeconds !== 0) break;
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     expect(watchRequestBody).toMatchObject({
       batchWindowSeconds: 0,
     });
-    expect(watchRequestBody).not.toHaveProperty("timeoutSeconds");
+    // No --timeout means wait indefinitely, but each round stays under Node
+    // fetch's 300s headers timeout so a slow review cannot crash the CLI.
+    expect(watchRequestBody?.timeoutSeconds).toBeGreaterThan(0);
+    expect(watchRequestBody?.timeoutSeconds).toBeLessThan(300);
     await fetch(`http://localhost:${persisted?.port}/api/review-events`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },

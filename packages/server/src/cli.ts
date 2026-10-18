@@ -2134,6 +2134,25 @@ async function runMarkdownDoctor(
   return validation.ok ? 0 : 1;
 }
 
+// Well under undici's default 300s headers timeout for Node's fetch.
+const WATCH_POLL_ROUND_SECONDS = 60;
+
+type WatchPayload = {
+  events?: unknown[];
+  timedOut?: boolean;
+  nextSequence: number;
+};
+
+function isRetryableWatchError(error: unknown): boolean {
+  if (error instanceof Error && error.name === "TimeoutError") return true;
+  const cause = error instanceof Error ? error.cause : undefined;
+  const code =
+    cause && typeof cause === "object" && "code" in cause
+      ? (cause as { code?: unknown }).code
+      : undefined;
+  return code === "UND_ERR_HEADERS_TIMEOUT" || code === "UND_ERR_BODY_TIMEOUT";
+}
+
 async function runWatch(
   deps: CliDependencies,
   targetPath: string,
@@ -2149,43 +2168,79 @@ async function runWatch(
     serverUrl = result.server.url;
   }
   const relativePath = path.relative(target.projectDir, target.openPath);
-  const body: {
-    projectPath: string;
-    path: string;
-    timeoutSeconds?: number;
-    batchWindowSeconds: number;
+  const watchUrl = new URL("/api/review-events/watch", serverUrl);
+  const deadline =
+    options.timeoutSeconds !== undefined
+      ? Date.now() + options.timeoutSeconds * 1000
+      : undefined;
+
+  // Node's fetch gives up on a response that sends no headers within 300s, so
+  // one unbounded long-poll crashes on a slow reviewer. Poll in bounded rounds
+  // and carry the event cursor between them so nothing is missed in the gaps.
+  const poll = async (cursor: {
     fromNow: boolean;
-  } = {
-    projectPath: target.projectDir,
-    path: relativePath,
-    batchWindowSeconds: options.batchWindowSeconds,
-    fromNow: !options.replay,
+    afterSequence?: number;
+    timeoutSeconds: number;
+  }): Promise<WatchPayload | null> => {
+    try {
+      const response = await deps.fetchImpl(watchUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectPath: target.projectDir,
+          path: relativePath,
+          batchWindowSeconds: options.batchWindowSeconds,
+          ...cursor,
+        }),
+        signal: AbortSignal.timeout((cursor.timeoutSeconds + 5) * 1000),
+      });
+      if (!response.ok) {
+        throw new Error(`Failed to watch review events: ${response.status}`);
+      }
+      return (await response.json()) as WatchPayload;
+    } catch (error) {
+      if (isRetryableWatchError(error)) return null;
+      throw error;
+    }
   };
-  if (options.timeoutSeconds !== undefined) {
-    body.timeoutSeconds = options.timeoutSeconds;
+
+  let afterSequence: number | undefined;
+  if (!options.replay) {
+    // Pin the cursor to "now" with an immediate round so later rounds can
+    // resume from it instead of re-anchoring to whatever is latest.
+    while (afterSequence === undefined) {
+      const anchor = await poll({ fromNow: true, timeoutSeconds: 0 });
+      if (anchor) afterSequence = anchor.nextSequence - 1;
+    }
   }
 
-  const response = await deps.fetchImpl(
-    new URL("/api/review-events/watch", serverUrl),
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      ...(options.timeoutSeconds !== undefined
-        ? { signal: AbortSignal.timeout((options.timeoutSeconds + 5) * 1000) }
-        : {}),
-    },
-  );
-
-  if (!response.ok) {
-    throw new Error(`Failed to watch review events: ${response.status}`);
+  let payload: WatchPayload;
+  for (;;) {
+    const remainingSeconds =
+      deadline !== undefined
+        ? Math.max(0, (deadline - Date.now()) / 1000)
+        : Number.POSITIVE_INFINITY;
+    const roundSeconds = Math.min(remainingSeconds, WATCH_POLL_ROUND_SECONDS);
+    const result = await poll({
+      fromNow: false,
+      afterSequence: afterSequence ?? 0,
+      timeoutSeconds: roundSeconds,
+    });
+    if (result) {
+      afterSequence = result.nextSequence - 1;
+      if (!result.timedOut || remainingSeconds <= roundSeconds) {
+        payload = result;
+        break;
+      }
+    } else if (deadline !== undefined && Date.now() >= deadline) {
+      payload = {
+        events: [],
+        timedOut: true,
+        nextSequence: (afterSequence ?? 0) + 1,
+      };
+      break;
+    }
   }
-
-  const payload = (await response.json()) as {
-    events?: unknown[];
-    timedOut?: boolean;
-    nextSequence?: number;
-  };
 
   if (json) {
     emitJson(deps.log, payload);
