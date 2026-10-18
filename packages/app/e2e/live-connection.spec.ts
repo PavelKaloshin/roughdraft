@@ -63,7 +63,7 @@ test.describe("Live connection with several tabs", () => {
     const [tab] = await openTabs(context, [filePath]);
     if (!tab) throw new Error("tab did not open");
     await expect(tab.getByTestId("agent-connection-indicator")).toHaveText(
-      "No Claude session listening",
+      "Claude · No session",
     );
 
     await selectRichText(tab, "about four seconds");
@@ -131,7 +131,7 @@ test.describe("Live connection with several tabs", () => {
     const [, tab] = await openTabs(context, [otherFile, filePath, otherFile]);
     if (!tab) throw new Error("tab did not open");
     await expect(tab.getByTestId("agent-connection-indicator")).toHaveText(
-      "No Claude session listening",
+      "Claude · No session",
     );
 
     // A listener attaching after the tab opened is a live status update.
@@ -145,7 +145,7 @@ test.describe("Live connection with several tabs", () => {
       },
     });
     await expect(tab.getByTestId("agent-connection-indicator")).toHaveText(
-      "Claude listening · session feed5678",
+      "Claude · feed5678",
     );
     await watch;
 

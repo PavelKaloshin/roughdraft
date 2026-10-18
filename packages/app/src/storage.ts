@@ -95,6 +95,11 @@ export interface StorageBackend {
     relativePath: string,
     input: { type: CommentEventType; commentId: string },
   ): Promise<CommentEventResult>;
+  /**
+   * Make a live Claude Code session the document's owner (ADR 0007); the
+   * previous owner is told. The status stream reports the change.
+   */
+  connectSession?(relativePath: string, sessionId: string): Promise<void>;
   /** Live agent presence and per-thread progress for one document. */
   watchAgentStatus?(
     relativePath: string,

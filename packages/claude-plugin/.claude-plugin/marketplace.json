@@ -1,0 +1,14 @@
+{
+  "name": "roughdraft",
+  "owner": {
+    "name": "Roughdraft"
+  },
+  "description": "Local marketplace for the Roughdraft Claude Code plugin.",
+  "plugins": [
+    {
+      "name": "roughdraft",
+      "source": "./",
+      "description": "Roughdraft live review: sessions receive Ask/Change comments on the Markdown files they write or open."
+    }
+  ]
+}

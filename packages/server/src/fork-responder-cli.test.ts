@@ -414,4 +414,40 @@ describe("headless fork answers", () => {
     expect(await threadStatus("c1")).toBe("answered");
     expect(await threadStatus("c2")).toBe("queued");
   }, 30_000);
+
+  it("listen --session --fork-asks-after forks an Ask in a file the session owns", async () => {
+    const { deps, logs, errors } = makeDeps();
+    await runCli(["claim", documentPath, "--quiet"], deps);
+
+    const exitCode = await runCli(
+      [
+        "listen",
+        "--session",
+        "parent-session",
+        "--quiet",
+        "--max-seconds",
+        "1",
+        "--fork-asks-after",
+        "0.3",
+      ],
+      deps,
+    );
+
+    expect(errors).toEqual([]);
+    expect(exitCode).toBe(0);
+    const lines = logs.map((line) => line.split(" ").slice(0, 3).join(" "));
+    expect(lines).toEqual([
+      "[roughdraft] claimed " + documentPath,
+      "[roughdraft] ask c1",
+      "[roughdraft] change c2",
+      "[roughdraft] forked c1",
+    ]);
+    expect(readRecord().argv.slice(0, 3)).toEqual([
+      "-p",
+      "--resume",
+      "parent-session",
+    ]);
+    expect(await threadStatus("c1")).toBe("answered");
+    expect(await threadStatus("c2")).toBe("queued");
+  }, 30_000);
 });

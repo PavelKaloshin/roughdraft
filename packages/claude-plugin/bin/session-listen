@@ -1,0 +1,6 @@
+#!/bin/sh
+# Plugin monitor: keeps `roughdraft listen --session` running for the whole
+# Claude Code session. Every stdout line wakes the session, so it prints
+# nothing unless Roughdraft has an event for a file this session owns.
+command -v node >/dev/null 2>&1 || exit 0
+exec node "$(dirname "$0")/../scripts/session-listen.mjs" "$@"
