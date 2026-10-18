@@ -79,10 +79,9 @@ test.describe("Live connection with several tabs", () => {
         timeout: 2_500,
       })
       .toContain("intent: ask");
-    await expect(tab.getByTestId("comment-rail-c1-agent-status")).toHaveText(
-      "Waiting for Claude",
-      { timeout: 2_500 },
-    );
+    await expect(
+      tab.getByTestId("comment-rail-c1-agent-status-label"),
+    ).toHaveText("Waiting for a Claude session", { timeout: 2_500 });
   });
 
   test("an external write reaches every tab showing the file @smoke", async ({

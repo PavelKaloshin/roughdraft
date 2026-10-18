@@ -152,11 +152,11 @@ describe("agent status snapshot", () => {
         c3: {},
       },
     });
+    // An older server sends no timing at all.
     expect(parseAgentStatusSnapshot(null)).toEqual({
       listening: false,
       listenerCount: 0,
       threads: {},
-      threadDetails: {},
     });
   });
 });

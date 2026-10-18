@@ -299,9 +299,11 @@ export function parseAgentStatusSnapshot(value: unknown): AgentStatusSnapshot {
       }
     }
   }
-  // Timing for threads with a known status; each timestamp is optional.
-  const threadDetails: Record<string, AgentThreadTiming> = {};
+  // Timing for threads with a known status; each timestamp is optional, and
+  // older servers send none at all.
+  let threadDetails: Record<string, AgentThreadTiming> | undefined;
   if (record.threadDetails && typeof record.threadDetails === "object") {
+    threadDetails = {};
     for (const [id, detail] of Object.entries(
       record.threadDetails as Record<string, unknown>,
     )) {
@@ -321,6 +323,6 @@ export function parseAgentStatusSnapshot(value: unknown): AgentStatusSnapshot {
       ? { sessionId: record.sessionId }
       : {}),
     threads,
-    threadDetails,
+    ...(threadDetails ? { threadDetails } : {}),
   };
 }
