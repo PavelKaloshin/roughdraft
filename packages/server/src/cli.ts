@@ -26,6 +26,13 @@ import {
   ROUGHDRAFT_PUBLIC_HOST,
 } from "./network.js";
 import { findAvailablePort } from "./ports.js";
+import {
+  claimForCallingSession,
+  isSessionListenArgs,
+  printSessionCommandHelp,
+  runSessionCommand,
+  type SessionCommandDeps,
+} from "./session-cli.js";
 import { resolveUpdateStatus, type UpdateStatus } from "./update-status.js";
 import {
   roundTimeoutSignal,
@@ -59,6 +66,9 @@ const KNOWN_COMMANDS = [
   "help",
   "agent-setup",
   "criticmarkup",
+  "claim",
+  "sessions",
+  "setup",
 ] as const;
 
 export interface RoughdraftServerState {
@@ -902,6 +912,16 @@ function printHelp(log: (message: string) => void) {
     "  ack <file.md> <id>      Mark a comment thread as being worked on (--delegated: passed to a subagent)",
   );
   log("  resolve <file.md> <id>  Mark a comment thread resolved");
+  log(
+    "  listen --session <id>   Print Ask/Change lines for every file a Claude session owns",
+  );
+  log(
+    "  claim <file.md>    Make a Claude session the owner of a file (--force: reassign)",
+  );
+  log("  sessions           List live Claude Code sessions and their files");
+  log(
+    "  setup claude       Install the Claude Code plugin (automatic live review)",
+  );
   log("  mcp                Start the experimental stdio MCP server");
   log("  doctor [path]      Diagnose setup or validate Markdown");
   log("  help agent         Print the agent setup prompt");
@@ -933,6 +953,11 @@ function printCommandHelp(
   command: KnownCommand,
   log: (message: string) => void,
 ) {
+  if (command === "claim" || command === "sessions" || command === "setup") {
+    printSessionCommandHelp(command, log);
+    return;
+  }
+
   if (command === "open") {
     log("Usage:");
     log(
@@ -1111,6 +1136,7 @@ function printCommandHelp(
     log(
       "  CLAUDE_CODE_SESSION_ID   Reported to the Roughdraft UI as the listening session",
     );
+    printSessionCommandHelp("listen", log);
     return;
   }
 
@@ -2388,6 +2414,44 @@ function getConfidentStopCandidate(
   return payload.pid;
 }
 
+/**
+ * Server lookups for the session commands (ADR 0007): the dev API behind a
+ * live dev frontend for this checkout, otherwise the background server.
+ * `locateServer` never starts one (the plugin's listener runs in every
+ * Claude Code session, whether or not Roughdraft is in use).
+ */
+function createSessionCommandDeps(deps: CliDependencies): SessionCommandDeps {
+  const withEnv = (env: NodeJS.ProcessEnv): CliDependencies => ({
+    ...deps,
+    env,
+  });
+  return {
+    ...deps,
+    locateServer: async (env) => {
+      const scoped = withEnv(env);
+      const liveDevFrontend = await resolveLiveDevFrontendBaseUrl(scoped);
+      if (liveDevFrontend?.apiUrl) return liveDevFrontend.apiUrl;
+      return (await findReusableServer(scoped))?.url ?? null;
+    },
+    ensureServer: async (env, projectDir) => {
+      const scoped = withEnv(env);
+      const liveDevFrontend = await resolveLiveDevFrontendBaseUrl(scoped);
+      if (liveDevFrontend?.apiUrl) return liveDevFrontend.apiUrl;
+      return (await ensureServerRunning(scoped, { projectDir })).server.url;
+    },
+    pluginDir: path.join(currentServerRoot, "packages", "claude-plugin"),
+    runCommand: (argv) => {
+      const [bin = "", ...args] = argv;
+      const result = spawnSync(bin, args, { stdio: "inherit" });
+      return result.error ? 127 : (result.status ?? 1);
+    },
+    printHelp: (command) =>
+      command === "listen"
+        ? printCommandHelp("listen", deps.log)
+        : printSessionCommandHelp(command, deps.log),
+  };
+}
+
 const AGENT_COMMAND_USAGE = {
   listen:
     "Usage: roughdraft listen <file.md> [--since <seq>] [--max-seconds <seconds>]",
@@ -2937,6 +3001,20 @@ export async function runCli(
     }
 
     if (
+      command === "claim" ||
+      command === "sessions" ||
+      command === "setup" ||
+      (command === "listen" && isSessionListenArgs(rest))
+    ) {
+      return runSessionCommand(
+        command,
+        rest,
+        createSessionCommandDeps(deps),
+        parsed.global.json,
+      );
+    }
+
+    if (
       command === "listen" ||
       command === "reply" ||
       command === "ack" ||
@@ -3079,6 +3157,16 @@ export async function runCli(
       } else {
         result = await ensureServerRunning(deps, { projectDir });
         baseUrl = buildPublicBaseUrl(result.server.port);
+      }
+
+      // A Claude Code session opening a file becomes its owner unless a
+      // live session already owns it (ADR 0007).
+      if (!isDirectory) {
+        await claimForCallingSession(
+          deps,
+          liveDevFrontend?.apiUrl ?? baseUrl,
+          openPath,
+        );
       }
 
       const targetUrl = buildTargetUrl(baseUrl, openPath, isDirectory);
