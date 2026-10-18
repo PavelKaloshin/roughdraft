@@ -7,6 +7,7 @@ import {
   readProjectFile,
   removeMarkdownProject,
   richTextEditor,
+  selectRichText,
   writeProjectFile,
 } from "./helpers";
 
@@ -78,5 +79,42 @@ test.describe("unedited documents", () => {
     expect(readProjectFile(projectDir, "plan.md")).toBe(agentEdit);
 
     logE2eEvent("unedited-no-save.verified", { file: "plan.md" });
+  });
+
+  test("opening and cancelling a comment composer never writes the file @smoke", async ({
+    page,
+  }) => {
+    // Found on a real document: the composer created an empty draft, the
+    // re-serialized document differed from the source, and Escape left a
+    // pending autosave that rewrote the whole file.
+    const markdownWrites: string[] = [];
+    page.on("request", (request) => {
+      if (
+        request.method() === "PUT" &&
+        new URL(request.url()).pathname === "/api/markdown-file"
+      ) {
+        markdownWrites.push(request.postData() ?? "");
+      }
+    });
+
+    const source = fs.readFileSync(
+      new URL("../../skill/SKILL.md", import.meta.url),
+      "utf8",
+    );
+    const filePath = writeProjectFile(projectDir, "SKILL.md", source);
+    await openMarkdownFile(page, filePath, "rich-text");
+    await expect(richTextEditor(page)).toContainText("Roughdraft live review");
+
+    await selectRichText(page, "ordinary feedback");
+    await page.getByTestId("selection-menu-action-comment").click();
+    // Keep the empty composer open past the 500 ms autosave debounce.
+    await page.waitForTimeout(800);
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(1200);
+
+    expect(markdownWrites).toEqual([]);
+    expect(readProjectFile(projectDir, "SKILL.md")).toBe(source);
+
+    logE2eEvent("unedited-no-save.composer-cancelled", { file: "SKILL.md" });
   });
 });

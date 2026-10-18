@@ -20,6 +20,12 @@ import {
 // blocks and never re-wrap long lines (the default folds them with `>`).
 const ENDMATTER_YAML_OPTIONS = { blockQuote: "literal", lineWidth: 0 } as const;
 import {
+  type BlockSource,
+  buildBlockSource,
+  planBlockPieces,
+  type ReviewStateDescriber,
+} from "./block-source";
+import {
   createEditorExtensions,
   type CriticChangeAttrs,
   type CriticChangeKind,
@@ -1636,26 +1642,154 @@ export function criticMarkdownToRenderedHtml(
   return { html, comments, changes, frontmatter, endmatter };
 }
 
-export function criticMarkdownToEditorState(
-  markdown: string,
-  options?: MarkdownOptions,
-): {
+/** Whether serialization writes review metadata as `{#id}` + endmatter. */
+function usesEndmatterMetadata(
+  endmatter: string | null | undefined,
+  comments: ReadonlyMap<string, CriticComment>,
+): boolean {
+  // A comment with an agent intent always gets compact `{#id}` + endmatter
+  // metadata (the spec's preferred form), even in a document that had no
+  // endmatter yet, so agent replies with multiline Markdown can live there too.
+  return (
+    Boolean(endmatter) ||
+    [...comments.values()].some(
+      (comment) => comment.intent && !comment.parentCommentId,
+    )
+  );
+}
+
+/**
+ * What a block's source text depends on besides its nodes: the inline text
+ * its comments and suggestions serialize to. Editing, resolving or replying to
+ * a comment whose text lives inline changes this, so the block is written
+ * fresh; an endmatter-only change (a reply, a status in endmatter mode) does
+ * not, so the block keeps its bytes.
+ */
+function createReviewStateDescriber(
+  comments: ReadonlyMap<string, CriticComment>,
+  useEndmatter: boolean,
+): ReviewStateDescriber {
+  return (nodes) => {
+    const commentIdGroups: string[] = [];
+    const changeIds = new Set<string>();
+    const visit = (node: JSONContent) => {
+      for (const mark of node.marks ?? []) {
+        const ids = mark.attrs?.commentIds;
+        if (Array.isArray(ids) && ids.length > 0) {
+          const group = JSON.stringify(ids);
+          if (commentIdGroups.at(-1) !== group) commentIdGroups.push(group);
+        }
+        if (mark.type === "criticChange" && mark.attrs?.changeId) {
+          changeIds.add(String(mark.attrs.changeId));
+        }
+      }
+      for (const child of node.content ?? []) visit(child);
+    };
+    for (const node of nodes) visit(node);
+    if (commentIdGroups.length === 0 && changeIds.size === 0) return "";
+
+    const parts = [useEndmatter ? "endmatter" : "inline"];
+    for (const group of commentIdGroups) {
+      parts.push(
+        serializeCommentBlocks(
+          JSON.parse(group) as string[],
+          comments,
+          useEndmatter,
+        ),
+      );
+    }
+    for (const changeId of changeIds) {
+      for (const comment of comments.values()) {
+        if (comment.parentCommentId !== changeId) continue;
+        parts.push(
+          serializeCommentBlocks([comment.id], comments, useEndmatter),
+        );
+      }
+    }
+    return parts.join("\u0001");
+  };
+}
+
+/**
+ * Lexes once and renders each top-level token on its own: the concatenated
+ * HTML is what `parser.parse` would produce, and the per-token HTML tells
+ * which top-level nodes each token's source text produced. (Rendering twice
+ * is not an option: the code-block renderer registers comments it finds.)
+ */
+function renderTopLevelTokens(
+  parser: Marked,
+  protectedBody: string,
+): { html: string; tokens: Array<{ raw: string; html: string }> } {
+  const lexed = parser.lexer(protectedBody);
+  const tokens = lexed.map((token) => {
+    const single = Object.assign([token], { links: lexed.links });
+    return { raw: token.raw, html: parser.parser(single) };
+  });
+  return { html: tokens.map((token) => token.html).join(""), tokens };
+}
+
+interface CriticEditorState {
   doc: JSONContent;
   comments: Map<string, CriticComment>;
   frontmatter: string | null;
   endmatter: string | null;
   headingSpacing: HeadingSpacing;
-} {
-  const { frontmatter, body, endmatter } = splitYamlDocumentMetadata(markdown);
+  /** Null unless requested, or when the blocks could not be mapped exactly. */
+  blockSource: BlockSource | null;
+}
+
+interface CriticParseOptions {
+  /** Also remember each top-level block's source text (see block-source.ts). */
+  blockSource?: boolean;
+}
+
+export function criticMarkdownToEditorState(
+  markdown: string,
+  options?: MarkdownOptions,
+  parseOptions?: CriticParseOptions,
+): CriticEditorState {
+  return parseCriticDocumentParts(
+    splitYamlDocumentMetadata(markdown),
+    options,
+    parseOptions,
+  );
+}
+
+function parseCriticDocumentParts(
+  {
+    frontmatter,
+    body,
+    endmatter,
+  }: { frontmatter: string | null; body: string; endmatter: string | null },
+  options?: MarkdownOptions,
+  parseOptions?: CriticParseOptions,
+): CriticEditorState {
   const headingSpacing = detectHeadingSpacing(body);
   const parsedEndmatter = parseReviewEndmatter(endmatter);
   const { parser, comments } = createCriticMarked(options, parsedEndmatter);
-  const html = parser.parse(protectRichTextRoundTripMarkdown(body)) as string;
-  const doc = generateJSON(html, extensions) as JSONContent & {
+  const rendered = renderTopLevelTokens(
+    parser,
+    protectRichTextRoundTripMarkdown(body),
+  );
+  const doc = generateJSON(rendered.html, extensions) as JSONContent & {
     yamlFrontmatter?: string;
     yamlEndmatter?: string;
   };
   addEndmatterFeedback(comments, parsedEndmatter);
+
+  let blockSource: BlockSource | null = null;
+  if (parseOptions?.blockSource) {
+    blockSource = mapBlockSource(
+      body,
+      rendered.tokens,
+      doc,
+      createReviewStateDescriber(
+        comments,
+        usesEndmatterMetadata(endmatter, comments),
+      ),
+    );
+  }
+
   if (frontmatter) {
     doc.yamlFrontmatter = frontmatter;
   }
@@ -1663,7 +1797,30 @@ export function criticMarkdownToEditorState(
     doc.yamlEndmatter = endmatter;
   }
 
-  return { doc, comments, frontmatter, endmatter, headingSpacing };
+  return { doc, comments, frontmatter, endmatter, headingSpacing, blockSource };
+}
+
+function mapBlockSource(
+  body: string,
+  tokens: ReadonlyArray<{ raw: string; html: string }>,
+  doc: JSONContent,
+  describeReviewState: ReviewStateDescriber,
+): BlockSource | null {
+  const tokenNodes = tokens.map((token) => ({
+    raw: token.raw,
+    nodes:
+      token.html.trim() === ""
+        ? []
+        : ((generateJSON(token.html, extensions) as JSONContent).content ?? []),
+  }));
+  // The per-token nodes must add up to exactly the document's nodes;
+  // otherwise some token's nodes depend on its neighbours and the mapping
+  // would be a guess.
+  const mapped = tokenNodes.flatMap((token) => token.nodes);
+  if (JSON.stringify(mapped) !== JSON.stringify(doc.content ?? [])) {
+    return null;
+  }
+  return buildBlockSource(body, tokenNodes, describeReviewState);
 }
 
 function collectCriticChangesFromDoc(
@@ -1700,16 +1857,70 @@ function collectCriticChangesFromDoc(
   return changes;
 }
 
+export interface EditorStateSerializeOptions {
+  frontmatter?: string | null;
+  endmatter?: string | null;
+  headingSpacing?: HeadingSpacing;
+  /**
+   * Source text of the blocks as loaded (from `criticMarkdownToEditorState`
+   * with `blockSource: true`). Untouched blocks are written back with their
+   * original bytes; without it the whole document is re-serialized.
+   */
+  blockSource?: BlockSource | null;
+  /** The options the document was parsed with (used by the safety check). */
+  markdownOptions?: MarkdownOptions;
+  /**
+   * Called when the spliced output would not parse back to the document and
+   * the full serialization is written instead. Defaults to `console.warn`.
+   */
+  onBlockSourceFallback?: (reason: string) => void;
+}
+
+/** Top-level nodes, minus the empty paragraph TipTap keeps at the end. */
+function comparableContent(doc: JSONContent): string {
+  const content = [...(doc.content ?? [])];
+  while (
+    content.length > 0 &&
+    content.at(-1)?.type === "paragraph" &&
+    !content.at(-1)?.content?.length
+  ) {
+    content.pop();
+  }
+  return JSON.stringify(content);
+}
+
+function comparableComments(comments: ReadonlyMap<string, CriticComment>) {
+  // Timestamps are left out: a bare `{>>…<<}` gets a fresh one on every parse.
+  return JSON.stringify(
+    [...comments.values()]
+      .map((comment) => [
+        comment.id,
+        comment.content,
+        comment.parentCommentId ?? null,
+        comment.intent ?? null,
+        comment.status ?? null,
+        comment.authorType,
+        comment.authorId ?? null,
+      ])
+      .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+  );
+}
+
+function sameParse(
+  a: { doc: JSONContent; comments: ReadonlyMap<string, CriticComment> },
+  b: { doc: JSONContent; comments: ReadonlyMap<string, CriticComment> },
+): boolean {
+  return (
+    comparableContent(a.doc) === comparableContent(b.doc) &&
+    comparableComments(a.comments) === comparableComments(b.comments)
+  );
+}
+
 export function editorStateToCriticMarkdown(
   doc: JSONContent,
   comments: Map<string, CriticComment>,
-  options?: {
-    frontmatter?: string | null;
-    endmatter?: string | null;
-    headingSpacing?: HeadingSpacing;
-  },
+  options?: EditorStateSerializeOptions,
 ): string {
-  const html = generateHTML(doc, extensions);
   // Not stored on the doc: PageCard compares doc JSON to decide whether to
   // reset editor content, and an extra key would force a reset every time.
   const headingSpacing = options?.headingSpacing;
@@ -1723,14 +1934,7 @@ export function editorStateToCriticMarkdown(
     (doc as JSONContent & { yamlEndmatter?: string }).yamlEndmatter ??
     null;
   const changes = collectCriticChangesFromDoc(doc);
-  // A comment with an agent intent always gets compact `{#id}` + endmatter
-  // metadata (the spec's preferred form), even in a document that had no
-  // endmatter yet, so agent replies with multiline Markdown can live there too.
-  const useEndmatter =
-    Boolean(sourceEndmatter) ||
-    [...comments.values()].some(
-      (comment) => comment.intent && !comment.parentCommentId,
-    );
+  const useEndmatter = usesEndmatterMetadata(sourceEndmatter, comments);
   addCriticCommentRule(service, comments, useEndmatter);
   addCriticChangeRule(service, comments, useEndmatter);
   addCriticCodeBlockRule(service);
@@ -1740,16 +1944,127 @@ export function editorStateToCriticMarkdown(
     changes,
     useEndmatter,
   );
-  return appendYamlEndmatter(
-    prependYamlFrontmatter(
-      normalizeBlockSpacing(
-        `${service.turndown(html).trimEnd()}\n`,
-        headingSpacing,
-      ),
-      frontmatter,
-    ),
-    endmatter,
+  const withMetadata = (body: string) =>
+    appendYamlEndmatter(prependYamlFrontmatter(body, frontmatter), endmatter);
+  const serializeHtml = (html: string) =>
+    normalizeBlockSpacing(
+      `${service.turndown(html).trimEnd()}\n`,
+      headingSpacing,
+    );
+  const fullSerialization = () =>
+    withMetadata(serializeHtml(generateHTML(doc, extensions)));
+
+  const blockSource = options?.blockSource;
+  if (!blockSource) return fullSerialization();
+
+  const pieces = planBlockPieces(
+    doc.content ?? [],
+    blockSource,
+    createReviewStateDescriber(comments, useEndmatter),
   );
+  if (!pieces.some((piece) => piece.kind === "source")) {
+    return fullSerialization();
+  }
+
+  // Untouched blocks: original bytes. Changed runs: serialized together, so
+  // neighbouring changed blocks relate to each other as in a full save.
+  const texts: Array<{ text: string; blockIndex: number | null }> = [];
+  const runTexts = new Map<(typeof pieces)[number], string>();
+  for (const piece of pieces) {
+    if (piece.kind === "source") {
+      texts.push({
+        text: blockSource.blocks[piece.blockIndex].raw,
+        blockIndex: piece.blockIndex,
+      });
+      continue;
+    }
+    const text = serializeHtml(
+      generateHTML({ type: "doc", content: piece.nodes }, extensions),
+    )
+      .replace(/^\n+/, "")
+      .replace(/\n+$/, "");
+    if (text !== "") {
+      texts.push({ text, blockIndex: null });
+      runTexts.set(piece, text);
+    }
+  }
+
+  const atxHeadingLine = /^#{1,6}(?: |$)/;
+  let body = "";
+  texts.forEach((entry, index) => {
+    if (index === 0) {
+      body += entry.blockIndex === 0 ? blockSource.leading : "";
+      body += entry.text;
+      return;
+    }
+    const previous = texts[index - 1];
+    if (
+      previous.blockIndex != null &&
+      entry.blockIndex === previous.blockIndex + 1
+    ) {
+      // Neighbours in the source too: keep the original spacing.
+      body += blockSource.blocks[previous.blockIndex].separatorAfter;
+    } else {
+      const previousLastLine = previous.text.slice(
+        previous.text.lastIndexOf("\n") + 1,
+      );
+      const compact =
+        headingSpacing !== "blank" &&
+        (atxHeadingLine.test(previousLastLine) ||
+          atxHeadingLine.test(entry.text));
+      body += compact ? "\n" : "\n\n";
+    }
+    body += entry.text;
+  });
+  const last = texts.at(-1);
+  body +=
+    last?.blockIndex === blockSource.blocks.length - 1
+      ? blockSource.trailing
+      : "\n";
+
+  const spliced = withMetadata(body);
+
+  // Safety guard. Usually the spliced file parses straight back to the
+  // document being saved. When it does not (the editor holds something
+  // Markdown cannot express, e.g. an unsubmitted comment draft, or a changed
+  // block whose serialization is itself lossy), the splice must at least
+  // compose cleanly: it has to parse to the untouched blocks' nodes plus
+  // whatever each changed run parses to on its own. Anything else means the
+  // pieces affect each other (a link definition went missing, a block merged
+  // into its neighbour, ...), so write the full serialization instead.
+  const check = criticMarkdownToEditorState(spliced, options?.markdownOptions);
+  if (sameParse(check, { doc, comments })) return spliced;
+  const expected: JSONContent[] = [];
+  for (const piece of pieces) {
+    if (piece.kind === "source") {
+      expected.push(...piece.nodes);
+      continue;
+    }
+    const text = runTexts.get(piece);
+    if (!text) continue;
+    expected.push(
+      ...(parseCriticDocumentParts(
+        { frontmatter: null, body: `${text}\n`, endmatter },
+        options?.markdownOptions,
+      ).doc.content ?? []),
+    );
+  }
+  if (
+    comparableContent(check.doc) ===
+    comparableContent({ type: "doc", content: expected })
+  ) {
+    return spliced;
+  }
+
+  const full = fullSerialization();
+  const reason =
+    "block source preservation: spliced Markdown parses differently; writing the full serialization";
+  if (options?.onBlockSourceFallback) {
+    options.onBlockSourceFallback(reason);
+  } else {
+    console.warn(`[roughdraft] ${reason}`);
+  }
+  return full;
 }
 
 export function createCriticComment(

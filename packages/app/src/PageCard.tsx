@@ -706,10 +706,11 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
   // Parsed once per mount. External file changes are applied incrementally
   // (see applyExternalMarkdown) instead of remounting the editor.
   const [parsedContent] = useState(() =>
-    criticMarkdownToEditorState(readSourceMarkdown(), {
-      resolveFileUrl,
-      resolveLinkUrl,
-    }),
+    criticMarkdownToEditorState(
+      readSourceMarkdown(),
+      { resolveFileUrl, resolveLinkUrl },
+      { blockSource: true },
+    ),
   );
   const [comments, setComments] = useState<Map<string, CriticComment>>(
     () => parsedContent.comments,
@@ -717,6 +718,10 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
   const frontmatterRef = useRef<string | null>(parsedContent.frontmatter);
   const endmatterRef = useRef<string | null>(parsedContent.endmatter);
   const headingSpacingRef = useRef(parsedContent.headingSpacing);
+  // Source text of the loaded blocks: untouched blocks are saved byte-for-byte.
+  // Replaced whenever new content is loaded (external change, merge); kept
+  // across the user's own saves, so undoing an edit restores the original bytes.
+  const blockSourceRef = useRef(parsedContent.blockSource);
 
   useEffect(() => {
     commentsRef.current = comments;
@@ -738,19 +743,34 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
       const currentDoc = doc ?? currentEditor?.getJSON();
       if (!currentDoc) return;
 
+      // An empty comment draft that was never submitted is UI state only: it
+      // is not written, so opening a composer never changes the file.
+      const allComments = nextComments ?? commentsRef.current;
+      const emptyDraftIds = new Set(
+        newCommentDraftIdsRef.current.filter(
+          (id) => allComments.get(id)?.content.trim() === "",
+        ),
+      );
+      const savedComments =
+        emptyDraftIds.size === 0
+          ? allComments
+          : new Map([...allComments].filter(([id]) => !emptyDraftIds.has(id)));
+
       onMarkdownChange(
         editorStateToCriticMarkdown(
-          currentDoc,
-          nextComments ?? commentsRef.current,
+          withoutCommentIds(currentDoc, emptyDraftIds),
+          savedComments,
           {
             frontmatter: frontmatterRef.current,
             endmatter: endmatterRef.current,
             headingSpacing: headingSpacingRef.current,
+            blockSource: blockSourceRef.current,
+            markdownOptions: { resolveFileUrl, resolveLinkUrl },
           },
         ),
       );
     },
-    [onMarkdownChange],
+    [onMarkdownChange, resolveFileUrl, resolveLinkUrl],
   );
 
   const insertFiles = useCallback(
@@ -1354,13 +1374,15 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
       }
       pendingExternalMarkdownRef.current = null;
 
-      const parsed = criticMarkdownToEditorState(markdown, {
-        resolveFileUrl,
-        resolveLinkUrl,
-      });
+      const parsed = criticMarkdownToEditorState(
+        markdown,
+        { resolveFileUrl, resolveLinkUrl },
+        { blockSource: true },
+      );
       frontmatterRef.current = parsed.frontmatter;
       endmatterRef.current = parsed.endmatter;
       headingSpacingRef.current = parsed.headingSpacing;
+      blockSourceRef.current = parsed.blockSource;
 
       // An open comment draft lives only in the editor until it is submitted;
       // keep it (and its anchor) across the external change. A draft whose id
@@ -2409,13 +2431,60 @@ const CodeEditorSurface = memo(function CodeEditorSurface({
   );
 });
 
+/** The doc with the given comment ids removed from its comment marks. */
+function withoutCommentIds(
+  node: JSONContent,
+  commentIds: ReadonlySet<string>,
+): JSONContent {
+  if (commentIds.size === 0) return node;
+  const next: JSONContent = { ...node };
+  if (node.marks) {
+    next.marks = node.marks.flatMap((mark) => {
+      const ids = mark.attrs?.commentIds;
+      if (mark.type !== "commentRef" || !Array.isArray(ids)) return [mark];
+      const kept = ids.filter((id) => !commentIds.has(id));
+      if (kept.length === ids.length) return [mark];
+      return kept.length > 0
+        ? [{ ...mark, attrs: { ...mark.attrs, commentIds: kept } }]
+        : [];
+    });
+    if (next.marks.length === 0) delete next.marks;
+  }
+  if (node.content) {
+    // Text that differed only by the removed mark joins up again, as it
+    // would in a parsed doc.
+    next.content = [];
+    for (const child of node.content) {
+      const mapped = withoutCommentIds(child, commentIds);
+      const previous = next.content.at(-1);
+      if (
+        previous?.type === "text" &&
+        mapped.type === "text" &&
+        JSON.stringify(previous.marks ?? []) ===
+          JSON.stringify(mapped.marks ?? [])
+      ) {
+        next.content[next.content.length - 1] = {
+          ...previous,
+          text: `${previous.text ?? ""}${mapped.text ?? ""}`,
+        };
+      } else {
+        next.content.push(mapped);
+      }
+    }
+  }
+  return next;
+}
+
 /** What the rich-text editor writes for markdown it loaded and did not edit. */
 function normalizeRichTextMarkdown(markdown: string): string {
-  const parsed = criticMarkdownToEditorState(markdown);
+  const parsed = criticMarkdownToEditorState(markdown, undefined, {
+    blockSource: true,
+  });
   return editorStateToCriticMarkdown(parsed.doc, parsed.comments, {
     frontmatter: parsed.frontmatter,
     endmatter: parsed.endmatter,
     headingSpacing: parsed.headingSpacing,
+    blockSource: parsed.blockSource,
   });
 }
 
@@ -2713,15 +2782,62 @@ const PageCardEditorSurface = memo(function PageCardEditorSurface({
     waitForPendingSave,
   ]);
 
+  // What the rich-text editor writes for the last accepted file when nothing
+  // was edited (cached per accepted text). Usually the file itself; differs
+  // only where the serializer cannot keep the source bytes.
+  const richTextBaselineRef = useRef<{ source: string; baseline: string }>(
+    null,
+  );
+  const isAcceptedContent = useCallback((nextMarkdown: string) => {
+    const accepted = lastAcceptedMarkdownRef.current;
+    if (nextMarkdown === accepted) return true;
+    // The raw editor's text is the user's own; only the rich-text editor
+    // re-serializes.
+    if (editorViewModeRef.current === "code") return false;
+    if (richTextBaselineRef.current?.source !== accepted) {
+      let baseline = accepted;
+      try {
+        baseline = normalizeRichTextMarkdown(accepted);
+      } catch (error) {
+        console.error("Failed to serialize the accepted document:", error);
+      }
+      richTextBaselineRef.current = { source: accepted, baseline };
+    }
+    return nextMarkdown === richTextBaselineRef.current.baseline;
+  }, []);
+
   const handleMarkdownChange = useCallback(
     (nextMarkdown: string) => {
+      // Back at the loaded (or last saved) content, e.g. a comment composer
+      // opened and cancelled, or an edit undone: nothing to save. While a save
+      // is in flight the disk may be about to change, so save normally then.
+      if (!inFlightSaveRef.current && isAcceptedContent(nextMarkdown)) {
+        if (saveTimer.current) {
+          clearTimeout(saveTimer.current);
+          saveTimer.current = null;
+        }
+        const accepted = lastAcceptedMarkdownRef.current;
+        const wasPending = pendingMarkdownRef.current !== accepted;
+        pendingMarkdownRef.current = accepted;
+        setMarkdown(accepted);
+        if (wasPending) onLocalContentChange?.(accepted);
+        reportDirtyState(false);
+        onSaveStateChange("saved");
+        return;
+      }
       pendingMarkdownRef.current = nextMarkdown;
       setMarkdown(nextMarkdown);
       onLocalContentChange?.(nextMarkdown);
       reportDirtyState(nextMarkdown !== lastAcceptedMarkdownRef.current);
       scheduleSave(nextMarkdown);
     },
-    [onLocalContentChange, reportDirtyState, scheduleSave],
+    [
+      isAcceptedContent,
+      onLocalContentChange,
+      onSaveStateChange,
+      reportDirtyState,
+      scheduleSave,
+    ],
   );
 
   useEffect(() => {
