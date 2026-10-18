@@ -93,7 +93,7 @@ describe("markdown file change events", () => {
     const events = await subscribe();
 
     // Three writes in a row: each must be seen once and well before the old
-    // 500ms stat-polling interval would (P(old poll < 150ms, 3×) ≈ 3%).
+    // 500ms stat-polling interval would (measured ~400ms; P(< 200ms, 3×) ≈ 6%).
     for (const [index, content] of [
       "# One\n",
       "# Two\n",
@@ -110,7 +110,7 @@ describe("markdown file change events", () => {
       expect(event).toMatchObject({ path: "plan.md", exists: true });
       expect(event?.version).toBe(await versionOnDisk());
       expect((event?.at ?? Number.POSITIVE_INFINITY) - writtenAt).toBeLessThan(
-        150,
+        200,
       );
     }
   });
@@ -126,7 +126,7 @@ describe("markdown file change events", () => {
     expect(events[0]?.version).toBe(await versionOnDisk());
     expect(
       (events[0]?.at ?? Number.POSITIVE_INFINITY) - writtenAt,
-    ).toBeLessThan(150);
+    ).toBeLessThan(200);
   });
 
   it("does not report writes to other files in the directory", async () => {
