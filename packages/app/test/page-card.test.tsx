@@ -2092,6 +2092,56 @@ describe("PageCard editor integration", () => {
     expect(rendered.container.textContent).toContain("Me");
   });
 
+  it("cancelling an empty comment composer on an unedited document never saves", async () => {
+    const rendered = await renderPageCard({
+      page: {
+        id: "doc-comment-cancel-1",
+        title: "Doc Comment Cancel 1",
+        content: [
+          "Setext title",
+          "============",
+          "",
+          "* star bullet with target text",
+          "",
+          "Wrapped paragraph",
+          "with __bold__.",
+          "",
+        ].join("\n"),
+      },
+      selected: true,
+    });
+
+    await selectText(rendered.getEditor(), "target");
+    await addCommentWithShortcut();
+
+    vi.useFakeTimers();
+
+    const commentEditor = getByTestId<HTMLTextAreaElement>(
+      rendered.container,
+      "comment-banner-c1-editor",
+    );
+    await act(async () => {
+      commentEditor.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Escape",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(
+      queryByTestId(rendered.container, "comment-banner-c1-editor"),
+    ).toBeNull();
+
+    await act(async () => {
+      vi.advanceTimersByTime(1500);
+      await Promise.resolve();
+    });
+
+    expect(rendered.onSave).not.toHaveBeenCalled();
+    expect(rendered.onSaveStateChange.mock.calls.at(-1)?.[0]).toBe("saved");
+  });
+
   it("does not autosave a newly-created empty comment before it is submitted", async () => {
     const rendered = await renderPageCard({
       page: {

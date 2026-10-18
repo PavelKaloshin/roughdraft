@@ -2420,11 +2420,14 @@ const CodeEditorSurface = memo(function CodeEditorSurface({
 
 /** What the rich-text editor writes for markdown it loaded and did not edit. */
 function normalizeRichTextMarkdown(markdown: string): string {
-  const parsed = criticMarkdownToEditorState(markdown);
+  const parsed = criticMarkdownToEditorState(markdown, undefined, {
+    blockSource: true,
+  });
   return editorStateToCriticMarkdown(parsed.doc, parsed.comments, {
     frontmatter: parsed.frontmatter,
     endmatter: parsed.endmatter,
     headingSpacing: parsed.headingSpacing,
+    blockSource: parsed.blockSource,
   });
 }
 
@@ -2722,15 +2725,62 @@ const PageCardEditorSurface = memo(function PageCardEditorSurface({
     waitForPendingSave,
   ]);
 
+  // What the rich-text editor writes for the last accepted file when nothing
+  // was edited (cached per accepted text). Usually the file itself; differs
+  // only where the serializer cannot keep the source bytes.
+  const richTextBaselineRef = useRef<{ source: string; baseline: string }>(
+    null,
+  );
+  const isAcceptedContent = useCallback((nextMarkdown: string) => {
+    const accepted = lastAcceptedMarkdownRef.current;
+    if (nextMarkdown === accepted) return true;
+    // The raw editor's text is the user's own; only the rich-text editor
+    // re-serializes.
+    if (editorViewModeRef.current === "code") return false;
+    if (richTextBaselineRef.current?.source !== accepted) {
+      let baseline = accepted;
+      try {
+        baseline = normalizeRichTextMarkdown(accepted);
+      } catch (error) {
+        console.error("Failed to serialize the accepted document:", error);
+      }
+      richTextBaselineRef.current = { source: accepted, baseline };
+    }
+    return nextMarkdown === richTextBaselineRef.current.baseline;
+  }, []);
+
   const handleMarkdownChange = useCallback(
     (nextMarkdown: string) => {
+      // Back at the loaded (or last saved) content, e.g. a comment composer
+      // opened and cancelled, or an edit undone: nothing to save. While a save
+      // is in flight the disk may be about to change, so save normally then.
+      if (!inFlightSaveRef.current && isAcceptedContent(nextMarkdown)) {
+        if (saveTimer.current) {
+          clearTimeout(saveTimer.current);
+          saveTimer.current = null;
+        }
+        const accepted = lastAcceptedMarkdownRef.current;
+        const wasPending = pendingMarkdownRef.current !== accepted;
+        pendingMarkdownRef.current = accepted;
+        setMarkdown(accepted);
+        if (wasPending) onLocalContentChange?.(accepted);
+        reportDirtyState(false);
+        onSaveStateChange("saved");
+        return;
+      }
       pendingMarkdownRef.current = nextMarkdown;
       setMarkdown(nextMarkdown);
       onLocalContentChange?.(nextMarkdown);
       reportDirtyState(nextMarkdown !== lastAcceptedMarkdownRef.current);
       scheduleSave(nextMarkdown);
     },
-    [onLocalContentChange, reportDirtyState, scheduleSave],
+    [
+      isAcceptedContent,
+      onLocalContentChange,
+      onSaveStateChange,
+      reportDirtyState,
+      scheduleSave,
+    ],
   );
 
   useEffect(() => {
