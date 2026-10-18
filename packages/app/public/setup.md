@@ -114,6 +114,8 @@ After the user finishes reviewing in Roughdraft, read the Markdown file from dis
 
 If you are Claude Code and have the Monitor tool, you can stay connected while the user reviews instead of blocking: run `roughdraft open --print-url "/absolute/path/to/file.md"`, give the user the URL, then arm Monitor on `roughdraft listen "/absolute/path/to/file.md"` with the 30-minute maximum `timeout_ms`. Each Monitor line is one event and starts with the command to run (after `→`): for an Ask comment, run `roughdraft ack … --delegated` and hand it to a forked background subagent, which runs `roughdraft ack …` and answers in the thread with `roughdraft reply … --stdin` without editing the file, so the answer does not wait for your current work; apply a Change comment yourself with a minimal edit, then `roughdraft reply … --status applied`; a `done` line means the user clicked Done Reviewing. When `listen` expires, re-arm Monitor with the exact command it prints.
 
+If the Roughdraft Claude Code plugin is installed (`roughdraft setup claude --install`, once per machine), do not arm Monitor or run `listen` yourself: every interactive session automatically receives comments on the Markdown files it writes, edits, or opens, as `[roughdraft] …` lines that name the file (`file=…`). Handle them as above. A `released` line means the user connected that file to another session: stop handling its comments.
+
 Use Roughdraft-flavored CriticMarkup when reading or writing inline review feedback in Markdown. The base markers are:
 
 Comment: `{>>comment<<}`
@@ -154,6 +156,17 @@ Use `roughdraft help` and `roughdraft help criticmarkup` for local command and s
 ````
 
 After updating your instructions, briefly tell the user which file you changed.
+
+## Claude Code Plugin (automatic live review)
+
+If you are Claude Code, offer to install the Roughdraft plugin once at user scope. It makes every interactive session receive the user's Ask/Change comments on the Markdown files it writes or opens, without arming anything, and lets the user see and switch the connected session in Roughdraft:
+
+```bash
+roughdraft setup claude            # prints the two commands
+roughdraft setup claude --install  # runs them
+```
+
+Ask before installing it. New sessions pick it up; running sessions need a restart.
 
 ## Roughdraft-flavored CriticMarkup Reference
 

@@ -11,6 +11,8 @@ The user reviews your Markdown file in Roughdraft and can leave three kinds of c
 - **Ask** — "what did you mean here?". Answer in the thread. Do not edit the file.
 - **Change** — "change this". Edit the file, then say what you changed in the thread.
 
+> With the Roughdraft Claude Code plugin (`roughdraft setup claude`) the session is connected automatically and the plugin's own `roughdraft-live-review` skill applies: skip step 2 below. Event lines then also carry `file=…`, and `claimed`/`released` lines tell you when a file is linked to or moved away from this session. This skill is for sessions without the plugin.
+
 ## Start
 
 1. Open the document without blocking the session:

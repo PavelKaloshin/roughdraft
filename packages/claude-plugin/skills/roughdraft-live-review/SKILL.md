@@ -46,6 +46,10 @@ The user watches each thread move through `Queued in Claude's session` (the line
 
 - `[roughdraft] followup cN file=… reply=cM intent=…` — the user replied in an existing thread. Handle it like its thread's intent (`ask` → forked subagent, `change` → you edit and reply).
 
+- `[roughdraft] forked cN to a headless Claude (main session busy)` — you did not ack that Ask within 15 seconds, so the plugin's listener answered it from a headless fork of this session (it reads files and replies, never edits); the user sees `Passed to a forked Claude`. Skip cN. Likewise skip an Ask when your `ack` prints `(to a headless fork; leave it)` or a status of `working`/`answered` you did not set: someone else has it.
+
+- `[roughdraft] headless fork for cN failed (…); answer it yourself:` — followed by cN's event line again. The thread is back in your queue; handle that line as usual.
+
 - `[roughdraft] done … file=… comments=N unresolved=M` — the user clicked Done Reviewing. Read the file and handle remaining plain comments and suggestions as usual.
 
 - `[roughdraft] claimed <file> → …` — the file is now linked to this session. No action needed.
