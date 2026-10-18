@@ -2142,6 +2142,47 @@ describe("PageCard editor integration", () => {
     expect(rendered.onSaveStateChange.mock.calls.at(-1)?.[0]).toBe("saved");
   });
 
+  it("keeps an open, empty comment draft out of a save triggered by another edit", async () => {
+    const source = [
+      "* star bullet with target text",
+      "",
+      "Edit here.",
+      "",
+    ].join("\n");
+    const rendered = await renderPageCard({
+      page: { id: "doc-comment-draft-edit-1", title: "Doc", content: source },
+      selected: true,
+    });
+    const editor = rendered.getEditor();
+
+    await selectText(editor, "target");
+    await addCommentWithShortcut();
+    expect(
+      queryByTestId(rendered.container, "comment-banner-c1-editor"),
+    ).not.toBeNull();
+
+    vi.useFakeTimers();
+
+    const range = findTextRange(editor, "Edit here.");
+    await act(async () => {
+      editor
+        .chain()
+        .setTextSelection(range?.to ?? 0)
+        .insertContent(" Done.")
+        .run();
+    });
+    await flushReact();
+    await act(async () => {
+      vi.advanceTimersByTime(500);
+      await Promise.resolve();
+    });
+
+    expect(rendered.onSave).toHaveBeenCalledTimes(1);
+    expect(rendered.onSave.mock.calls[0]?.[1]).toBe(
+      source.replace("Edit here.\n", "Edit here. Done.\n"),
+    );
+  });
+
   it("does not autosave a newly-created empty comment before it is submitted", async () => {
     const rendered = await renderPageCard({
       page: {

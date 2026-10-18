@@ -743,10 +743,23 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
       const currentDoc = doc ?? currentEditor?.getJSON();
       if (!currentDoc) return;
 
+      // An empty comment draft that was never submitted is UI state only: it
+      // is not written, so opening a composer never changes the file.
+      const allComments = nextComments ?? commentsRef.current;
+      const emptyDraftIds = new Set(
+        newCommentDraftIdsRef.current.filter(
+          (id) => allComments.get(id)?.content.trim() === "",
+        ),
+      );
+      const savedComments =
+        emptyDraftIds.size === 0
+          ? allComments
+          : new Map([...allComments].filter(([id]) => !emptyDraftIds.has(id)));
+
       onMarkdownChange(
         editorStateToCriticMarkdown(
-          currentDoc,
-          nextComments ?? commentsRef.current,
+          withoutCommentIds(currentDoc, emptyDraftIds),
+          savedComments,
           {
             frontmatter: frontmatterRef.current,
             endmatter: endmatterRef.current,
@@ -2417,6 +2430,50 @@ const CodeEditorSurface = memo(function CodeEditorSurface({
     </div>
   );
 });
+
+/** The doc with the given comment ids removed from its comment marks. */
+function withoutCommentIds(
+  node: JSONContent,
+  commentIds: ReadonlySet<string>,
+): JSONContent {
+  if (commentIds.size === 0) return node;
+  const next: JSONContent = { ...node };
+  if (node.marks) {
+    next.marks = node.marks.flatMap((mark) => {
+      const ids = mark.attrs?.commentIds;
+      if (mark.type !== "commentRef" || !Array.isArray(ids)) return [mark];
+      const kept = ids.filter((id) => !commentIds.has(id));
+      if (kept.length === ids.length) return [mark];
+      return kept.length > 0
+        ? [{ ...mark, attrs: { ...mark.attrs, commentIds: kept } }]
+        : [];
+    });
+    if (next.marks.length === 0) delete next.marks;
+  }
+  if (node.content) {
+    // Text that differed only by the removed mark joins up again, as it
+    // would in a parsed doc.
+    next.content = [];
+    for (const child of node.content) {
+      const mapped = withoutCommentIds(child, commentIds);
+      const previous = next.content.at(-1);
+      if (
+        previous?.type === "text" &&
+        mapped.type === "text" &&
+        JSON.stringify(previous.marks ?? []) ===
+          JSON.stringify(mapped.marks ?? [])
+      ) {
+        next.content[next.content.length - 1] = {
+          ...previous,
+          text: `${previous.text ?? ""}${mapped.text ?? ""}`,
+        };
+      } else {
+        next.content.push(mapped);
+      }
+    }
+  }
+  return next;
+}
 
 /** What the rich-text editor writes for markdown it loaded and did not edit. */
 function normalizeRichTextMarkdown(markdown: string): string {
