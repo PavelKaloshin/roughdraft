@@ -1,5 +1,8 @@
 import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { CommentEditorList } from "./CommentEditorList";
+import {
+  CommentEditorList,
+  type UpdateCommentHandler,
+} from "./CommentEditorList";
 import type { CriticComment } from "./critic-markup";
 import {
   buildCommentThreadRailItems,
@@ -20,7 +23,7 @@ interface DocumentCommentRailProps {
   contentHeight: number;
   className?: string;
   onDeleteComment: (commentId: string) => void;
-  onUpdateComment: (commentId: string, nextContent: string) => void;
+  onUpdateComment: UpdateCommentHandler;
   onReplyComment: (commentId: string) => void;
   onSelectComment: (commentId: string) => void;
   onFocusComment: (commentId: string) => void;

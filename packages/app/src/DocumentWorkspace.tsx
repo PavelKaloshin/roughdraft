@@ -15,7 +15,9 @@ import {
   Upload,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { AgentConnectionIndicator, NoListenerNotice } from "./AgentConnection";
 import type { DocumentEditorViewMode } from "./app-navigation";
+import { CommentAgentContext } from "./comment-agent";
 import { RemoteSessionBanner } from "./components/RemoteSessionBanner";
 import { Button } from "./components/ui/button";
 import {
@@ -41,15 +43,16 @@ import {
   criticMarkdownToRenderedHtml,
 } from "./critic-markup";
 import { cn } from "./lib/utils";
+import type { OutlineJumpRequest } from "./outline-navigation";
 import {
   type DocumentInteractionMode,
   type DocumentSaveController,
   type DocumentSaveState,
   PageCard,
 } from "./PageCard";
-import type { OutlineJumpRequest } from "./outline-navigation";
 import { RobotsHighFiveToy } from "./RobotsHighFiveToy";
 import type { CompleteReviewOptions, Page, StorageBackend } from "./storage";
+import { useCommentAgentController } from "./useCommentAgentController";
 import { useReviewLayoutShiftAnimation } from "./useReviewLayoutShiftAnimation";
 import {
   readFullWidthPreference,
@@ -467,6 +470,16 @@ export function DocumentWorkspace({
     },
     [onDocumentSaveControllerChange],
   );
+  const flushDocumentSave = useCallback(
+    async () => saveControllerRef.current?.flushSave(),
+    [],
+  );
+  const commentAgent = useCommentAgentController({
+    backend,
+    documentPath: activeDocumentPath,
+    absolutePath: documentCopyPath,
+    flushSave: flushDocumentSave,
+  });
 
   const handleSaveStateChange = useCallback(
     (state: DocumentSaveState) => {
@@ -1174,7 +1187,10 @@ export function DocumentWorkspace({
                   />
                   <TooltipContent>Reload from disk</TooltipContent>
                 </Tooltip>
-                <div className="ml-auto inline-flex h-[1.25rem] shrink-0 items-center">
+                <div className="ml-auto flex min-w-0 items-center gap-1">
+                  <AgentConnectionIndicator agent={commentAgent} />
+                </div>
+                <div className="inline-flex h-[1.25rem] shrink-0 items-center">
                   <Select<DocumentInteractionMode>
                     value={documentInteractionMode}
                     onValueChange={(value) => {
@@ -1211,29 +1227,38 @@ export function DocumentWorkspace({
                   </Select>
                 </div>
               </div>
+              {commentAgent.hasUndeliveredEvents ? (
+                <NoListenerNotice
+                  listenCommand={commentAgent.listenCommand}
+                  testId="agent-no-listener-notice"
+                  className="mt-2 text-[0.75rem] font-normal tracking-normal"
+                />
+              ) : null}
             </div>
           </div>
         ) : null}
         {documentPage ? (
           backend ? (
-            <PageCard
-              key={`${documentPage.id}:${activeDocumentPath ?? ""}`}
-              page={documentPage}
-              activeDocumentPath={activeDocumentPath}
-              selected
-              onSave={onSaveDocument}
-              onSaveStateChange={handleSaveStateChange}
-              editorViewMode={documentEditorViewMode}
-              interactionMode={documentInteractionMode}
-              backend={backend}
-              onCommentRailPresenceChange={setDocumentHasComments}
-              onDirtyStateChange={handleDocumentDirtyStateChange}
-              onLocalContentChange={onDocumentLocalContentChange}
-              onSaveControllerChange={handleSaveControllerChange}
-              saveBlocked={documentDiskChangeState !== "clean"}
-              forceResetKey={documentForceResetKey}
-              outlineJumpRequest={outlineJumpRequest}
-            />
+            <CommentAgentContext.Provider value={commentAgent}>
+              <PageCard
+                key={`${documentPage.id}:${activeDocumentPath ?? ""}`}
+                page={documentPage}
+                activeDocumentPath={activeDocumentPath}
+                selected
+                onSave={onSaveDocument}
+                onSaveStateChange={handleSaveStateChange}
+                editorViewMode={documentEditorViewMode}
+                interactionMode={documentInteractionMode}
+                backend={backend}
+                onCommentRailPresenceChange={setDocumentHasComments}
+                onDirtyStateChange={handleDocumentDirtyStateChange}
+                onLocalContentChange={onDocumentLocalContentChange}
+                onSaveControllerChange={handleSaveControllerChange}
+                saveBlocked={documentDiskChangeState !== "clean"}
+                forceResetKey={documentForceResetKey}
+                outlineJumpRequest={outlineJumpRequest}
+              />
+            </CommentAgentContext.Provider>
           ) : null
         ) : (
           <div className="flex min-h-[50vh] items-center justify-center text-sm text-slate-500 dark:text-slate-400">

@@ -10,10 +10,11 @@ import {
   useState,
 } from "react";
 import {
-  CommentEditorList,
   type CommentActionDefinition,
   type CommentActionsRenderContext,
   type CommentContentRenderContext,
+  CommentEditorList,
+  type UpdateCommentHandler,
 } from "./CommentEditorList";
 import type {
   CriticChangeAttrs,
@@ -59,7 +60,7 @@ interface DocumentReviewRailProps {
   layout?: "anchored" | "flow";
   testId?: string;
   onDeleteComment: (commentId: string) => void;
-  onUpdateComment: (commentId: string, nextContent: string) => void;
+  onUpdateComment: UpdateCommentHandler;
   onReplyComment: (commentId: string) => void;
   onSelectComment: (commentId: string) => void;
   onFocusComment: (commentId: string) => void;

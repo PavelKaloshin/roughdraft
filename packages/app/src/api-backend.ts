@@ -1,3 +1,9 @@
+import type {
+  AgentStatusSnapshot,
+  AgentThreadStatus,
+  CommentEventResult,
+  CommentEventType,
+} from "./comment-agent";
 import {
   type BackendInfo,
   type CompleteReviewOptions,
@@ -184,6 +190,69 @@ export class ApiBackend implements StorageBackend {
     };
   }
 
+  async postCommentEvent(
+    relativePath: string,
+    input: { type: CommentEventType; commentId: string },
+  ): Promise<CommentEventResult> {
+    const res = await fetch(
+      this.buildUrl("/api/review-events", { path: relativePath }),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectPath: this.info.projectPath,
+          path: relativePath,
+          type: input.type,
+          commentId: input.commentId,
+        }),
+      },
+    );
+
+    if (!res.ok) {
+      throw new Error(
+        `Failed to send ${input.type} for ${input.commentId}: ${res.status}`,
+      );
+    }
+
+    const payload = (await res.json()) as {
+      duplicate?: unknown;
+      agent?: { listening?: unknown; sessionId?: unknown };
+    };
+    const sessionId = payload.agent?.sessionId;
+    return {
+      duplicate: payload.duplicate === true,
+      agent: {
+        listening: payload.agent?.listening === true,
+        ...(typeof sessionId === "string" ? { sessionId } : {}),
+      },
+    };
+  }
+
+  watchAgentStatus(
+    relativePath: string,
+    onStatus: (status: AgentStatusSnapshot) => void,
+  ): () => void {
+    const source = new EventSource(
+      this.buildUrl("/api/agent/events", { path: relativePath }),
+    );
+
+    source.addEventListener("status", (event) => {
+      try {
+        onStatus(
+          parseAgentStatusSnapshot(
+            JSON.parse((event as MessageEvent<string>).data),
+          ),
+        );
+      } catch (error) {
+        console.error("Failed to read agent status event:", error);
+      }
+    });
+
+    return () => {
+      source.close();
+    };
+  }
+
   async saveAsset(file: File): Promise<StoredAsset> {
     const buffer = await file.arrayBuffer();
     let binary = "";
@@ -217,4 +286,37 @@ export class ApiBackend implements StorageBackend {
   async openProject(path: string): Promise<void> {
     this.updateProjectInfo(path);
   }
+}
+
+const agentThreadStatuses = new Set<AgentThreadStatus>([
+  "pending",
+  "working",
+  "answered",
+  "applied",
+]);
+
+export function parseAgentStatusSnapshot(value: unknown): AgentStatusSnapshot {
+  const record =
+    value && typeof value === "object"
+      ? (value as Record<string, unknown>)
+      : {};
+  const threads: Record<string, AgentThreadStatus> = {};
+  if (record.threads && typeof record.threads === "object") {
+    for (const [id, status] of Object.entries(
+      record.threads as Record<string, unknown>,
+    )) {
+      if (agentThreadStatuses.has(status as AgentThreadStatus)) {
+        threads[id] = status as AgentThreadStatus;
+      }
+    }
+  }
+  return {
+    listening: record.listening === true,
+    listenerCount:
+      typeof record.listenerCount === "number" ? record.listenerCount : 0,
+    ...(typeof record.sessionId === "string"
+      ? { sessionId: record.sessionId }
+      : {}),
+    threads,
+  };
 }

@@ -701,6 +701,66 @@
   }
 }
 
+/* Markdown rendered inside comment bodies (agent answers, user notes). */
+.comment-markdown {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.comment-markdown > * + * {
+  margin-top: 0.4rem;
+}
+
+.comment-markdown ul,
+.comment-markdown ol {
+  padding-left: 1.1rem;
+}
+
+.comment-markdown ul {
+  list-style: disc;
+}
+
+.comment-markdown ol {
+  list-style: decimal;
+}
+
+.comment-markdown a {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.comment-markdown code {
+  border-radius: 4px;
+  background: rgb(120 113 108 / 0.12);
+  padding: 0 0.25rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.92em;
+}
+
+.comment-markdown pre {
+  overflow-x: auto;
+  border-radius: 6px;
+  background: rgb(120 113 108 / 0.12);
+  padding: 0.4rem 0.55rem;
+}
+
+.comment-markdown pre code {
+  background: transparent;
+  padding: 0;
+}
+
+.comment-markdown blockquote {
+  border-left: 2px solid rgb(120 113 108 / 0.35);
+  padding-left: 0.5rem;
+}
+
+.comment-markdown h1,
+.comment-markdown h2,
+.comment-markdown h3,
+.comment-markdown h4 {
+  font-weight: 600;
+}
+
 @keyframes review-handoff-robots-hop {
   0%,
   100% {
