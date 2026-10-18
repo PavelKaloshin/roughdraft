@@ -1752,6 +1752,126 @@ describe("PageCard editor integration", () => {
       );
     });
 
+    async function typeIntoTextarea(
+      textarea: HTMLTextAreaElement,
+      value: string,
+    ) {
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(
+          HTMLTextAreaElement.prototype,
+          "value",
+        )?.set?.call(textarea, value);
+        textarea.dispatchEvent(new InputEvent("input", { bubbles: true }));
+      });
+    }
+
+    it("re-keys an open root draft when the agent's change claims its id", async () => {
+      const rendered = await renderPageCard({ page: livePage(liveDoc()) });
+      await selectText(rendered.getEditor(), "Third");
+      await addCommentWithShortcut();
+      await typeIntoTextarea(
+        getByTestId<HTMLTextAreaElement>(
+          rendered.container,
+          "comment-banner-c2-editor",
+        ),
+        "My unsaved draft",
+      );
+
+      // The agent adds its own comment c2 on another paragraph.
+      await rendered.rerender({
+        page: livePage(
+          liveDoc().replace(
+            "Fourth paragraph.",
+            "{==Fourth==}{>>Agent note<<}{#c2} paragraph.",
+          ) + '  c2:\n    by: AI\n    at: "2026-05-24T11:00:00.000Z"\n',
+        ),
+      });
+      await flushReact();
+      await flushAnimationFrame();
+
+      // The draft moved to a fresh id, text and anchor intact.
+      const draftEditor = queryByTestId<HTMLTextAreaElement>(
+        rendered.container,
+        "comment-banner-c3-editor",
+      );
+      expect(draftEditor?.value).toBe("My unsaved draft");
+      const html = rendered.getEditor().getHTML();
+      expect(html).toMatch(/data-comment-ids="[^"]*c3[^"]*"[^>]*>Third/);
+      expect(html).toMatch(/data-comment-ids="\[&quot;c2&quot;\]"[^>]*>Fourth/);
+
+      // Submitting saves both comments under distinct ids.
+      vi.useFakeTimers();
+      await act(async () => {
+        getByTestId(
+          rendered.container,
+          "comment-banner-c3-action-save",
+        ).dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+        await Promise.resolve();
+      });
+      const saved = rendered.onSave.mock.calls.at(-1)?.[1] as string;
+      expect(saved).toContain("{==Fourth==}{>>Agent note<<}{#c2}");
+      expect(saved).toContain("{==Third==}{>>My unsaved draft<<}{#c3}");
+    });
+
+    it("re-keys an open reply draft when the agent replies with the same id", async () => {
+      const rendered = await renderPageCard({ page: livePage(liveDoc()) });
+      await selectText(rendered.getEditor(), "alpha");
+      await act(async () => {
+        getByTestId(
+          rendered.container,
+          "comment-banner-c1-action-reply",
+        ).dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      await flushReact();
+      await typeIntoTextarea(
+        getByTestId<HTMLTextAreaElement>(
+          rendered.container,
+          "comment-banner-c2-editor",
+        ),
+        "My unsaved reply",
+      );
+
+      // The agent answers in the same thread through the endmatter only.
+      await rendered.rerender({
+        page: livePage(
+          liveDoc() +
+            '  c2:\n    body: Agent answer\n    by: AI\n    at: "2026-05-24T11:00:00.000Z"\n    re: c1\n',
+        ),
+      });
+      await flushReact();
+      await flushAnimationFrame();
+
+      expect(
+        queryByTestId(rendered.container, "comment-banner-c2-body")
+          ?.textContent,
+      ).toContain("Agent answer");
+      expect(
+        queryByTestId<HTMLTextAreaElement>(
+          rendered.container,
+          "comment-banner-c3-editor",
+        )?.value,
+      ).toBe("My unsaved reply");
+
+      vi.useFakeTimers();
+      await act(async () => {
+        getByTestId(
+          rendered.container,
+          "comment-banner-c3-action-save",
+        ).dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+        await Promise.resolve();
+      });
+      const saved = rendered.onSave.mock.calls.at(-1)?.[1] as string;
+      expect(saved).toMatch(/c2:\n\s+body: Agent answer/);
+      expect(saved).toMatch(/ {2}c3:\n( {4}.*\n)* {4}body: My unsaved reply\n/);
+      expect(saved).toMatch(/ {2}c3:\n( {4}.*\n)* {4}re: c1\n/);
+    });
+
     it("merges a dirty draft with a non-overlapping disk change and saves the merge once", async () => {
       const rendered = await renderPageCard({ page: livePage(liveDoc()) });
       const editor = rendered.getEditor();

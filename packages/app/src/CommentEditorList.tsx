@@ -16,12 +16,19 @@ import {
   type MouseEvent,
   type MutableRefObject,
   type ReactNode,
+  useContext,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
 import { NoListenerNotice } from "./AgentConnection";
+import {
+  applyCommentIdRenames,
+  CommentDraftRenamesContext,
+  rekeyRecord,
+} from "./comment-draft-renames";
 import { CommentMarkdown } from "./CommentMarkdown";
 import {
   COMMENT_COMPOSER_MODE_LABELS,
@@ -188,6 +195,20 @@ export function CommentEditorList({
   const [draftModes, setDraftModes] = useState<
     Record<string, CommentComposerMode>
   >({});
+  // An external change can claim an open draft's id; the editor then re-keys
+  // the draft and this list moves its local state along, before paint.
+  const draftRenames = useContext(CommentDraftRenamesContext);
+  const appliedDraftRenameCountRef = useRef(draftRenames.length);
+  useLayoutEffect(() => {
+    const pending = draftRenames.slice(appliedDraftRenameCountRef.current);
+    appliedDraftRenameCountRef.current = draftRenames.length;
+    if (pending.length === 0) return;
+    setDrafts((current) => rekeyRecord(current, pending));
+    setDraftModes((current) => rekeyRecord(current, pending));
+    setEditingCommentIds((current) =>
+      current.map((id) => applyCommentIdRenames(id, pending)),
+    );
+  }, [draftRenames]);
   const [localShowResolved, setLocalShowResolved] = useState(false);
   const hasAgentProvider = agent !== defaultCommentAgentContext;
   const showResolved = hasAgentProvider
