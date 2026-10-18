@@ -134,6 +134,10 @@ describe("session CLI commands", () => {
         PATH: process.env.PATH,
         ROUGHDRAFT_STATE_DIR: stateDir,
         ROUGHDRAFT_DEV_FRONTEND_STATE_FILE: path.join(tempDir, "none.json"),
+        // Without a state file the CLI probes its default port (7373); keep
+        // it on this test's own server so a developer's running Roughdraft
+        // is never found.
+        ROUGHDRAFT_PORT: String(server.port),
         ...(options.sessionId
           ? { CLAUDE_CODE_SESSION_ID: options.sessionId }
           : {}),
