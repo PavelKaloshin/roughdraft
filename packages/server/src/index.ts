@@ -187,6 +187,83 @@ function fileVersionFromFile(filePath: string): string {
   return fileVersionFromContent(stats, content);
 }
 
+function fileVersionOrNull(filePath: string): string | null {
+  try {
+    return fileVersionFromFile(filePath);
+  } catch {
+    return null;
+  }
+}
+
+/** Coalesces the burst of notifications one save produces. */
+const FILE_WATCH_DEBOUNCE_MS = 50;
+/** Stat-polling fallback when native watching is unavailable. */
+const FILE_WATCH_POLL_INTERVAL_MS = 500;
+
+/**
+ * Calls `onChange` (debounced) when `filePath` may have changed. Watches the
+ * containing directory rather than the file: editors and agents often save
+ * atomically (write a temp file, rename it over the target), which replaces
+ * the inode a file watcher would be attached to. Falls back to stat polling
+ * if native watching fails (unsupported filesystem, watcher limits, the
+ * directory going away). Callers dedupe by content version.
+ */
+function watchFileForChanges(
+  filePath: string,
+  onChange: () => void,
+): () => void {
+  const directory = path.dirname(filePath);
+  const fileName = path.basename(filePath);
+  let timer: NodeJS.Timeout | null = null;
+  let watcher: fs.FSWatcher | null = null;
+  let polling = false;
+  let stopped = false;
+
+  const schedule = () => {
+    if (stopped) return;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      if (!stopped) onChange();
+    }, FILE_WATCH_DEBOUNCE_MS);
+  };
+  const poll = (current: fs.Stats, previous: fs.Stats) => {
+    if (
+      current.mtimeMs !== previous.mtimeMs ||
+      current.size !== previous.size ||
+      current.nlink !== previous.nlink
+    ) {
+      schedule();
+    }
+  };
+  const fallBackToPolling = () => {
+    watcher?.close();
+    watcher = null;
+    if (stopped || polling) return;
+    polling = true;
+    fs.watchFile(filePath, { interval: FILE_WATCH_POLL_INTERVAL_MS }, poll);
+    // Do not miss a change that happened while switching.
+    schedule();
+  };
+
+  try {
+    watcher = fs.watch(directory, { persistent: false }, (_event, name) => {
+      // Some platforms omit the name; then any entry may be ours.
+      if (name === null || name.toString() === fileName) schedule();
+    });
+    watcher.on("error", fallBackToPolling);
+  } catch {
+    fallBackToPolling();
+  }
+
+  return () => {
+    stopped = true;
+    if (timer) clearTimeout(timer);
+    watcher?.close();
+    if (polling) fs.unwatchFile(filePath, poll);
+  };
+}
+
 function normalizeOverallComment(input: unknown): string | undefined {
   if (typeof input !== "string") return undefined;
   const trimmed = input.trim();
@@ -702,34 +779,24 @@ export function createApp(options: CreateAppOptions = {}): CreateAppResult {
     res.flushHeaders?.();
     res.write("retry: 1000\n\n");
 
-    const sendChange = (stats: fs.Stats) => {
-      const exists = stats.nlink > 0;
+    // One event per distinct on-disk state: the watcher may report a single
+    // write several times, and the tab recognizes its own saves by version.
+    let lastVersion: string | null = fileVersionOrNull(absolutePath);
+    const sendIfChanged = () => {
+      const version = fileVersionOrNull(absolutePath);
+      if (version === lastVersion) return;
+      lastVersion = version;
       res.write(
         `event: change\ndata: ${JSON.stringify({
           path: relativePath,
-          exists,
-          version: exists ? fileVersionFromFile(absolutePath) : null,
+          exists: version !== null,
+          version,
         })}\n\n`,
       );
     };
 
-    const listener = (current: fs.Stats, previous: fs.Stats) => {
-      if (
-        current.mtimeMs === previous.mtimeMs &&
-        current.size === previous.size &&
-        current.nlink === previous.nlink
-      ) {
-        return;
-      }
-
-      sendChange(current);
-    };
-
-    fs.watchFile(absolutePath, { interval: 500 }, listener);
-
-    req.on("close", () => {
-      fs.unwatchFile(absolutePath, listener);
-    });
+    const stopWatching = watchFileForChanges(absolutePath, sendIfChanged);
+    req.on("close", stopWatching);
   });
 
   app.get("/api/review-index", (req, res) => {
