@@ -138,20 +138,16 @@ function specFixtureMarkdown(): Array<[string, string]> {
 }
 
 describe("block source preservation: unedited documents", () => {
-  it("writes every repo Markdown file back byte-for-byte when nothing was edited", () => {
-    const changed: string[] = [];
-    for (const file of corpusFiles()) {
-      const source = fs.readFileSync(file, "utf8");
-      const opened = openInEditor(source);
-      try {
-        if (opened.save() !== source) {
-          changed.push(path.relative(repoRoot, file));
-        }
-      } finally {
-        opened.editor.destroy();
-      }
+  it.each(
+    corpusFiles().map((file) => [path.relative(repoRoot, file), file]),
+  )("writes %s back byte-for-byte when nothing was edited", (_name, file) => {
+    const source = fs.readFileSync(file, "utf8");
+    const opened = openInEditor(source);
+    try {
+      expect(opened.save()).toBe(source);
+    } finally {
+      opened.editor.destroy();
     }
-    expect(changed).toEqual([]);
   });
 
   it.each(
