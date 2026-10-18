@@ -524,6 +524,23 @@ describe("agent comment events", () => {
     expect((await status()).listening).toBe(false);
   });
 
+  it("keeps a listener present for the grace it declares between waits", async () => {
+    // MCP agents call a bounded wait, then work for a while (editing the
+    // file) before the next call; they declare a longer grace than `listen`.
+    const app = makeApp({ agentListenerGraceMs: 50 });
+    const status = async () =>
+      (await request(app).get("/api/agent/status").query(target())).body;
+
+    await watchComments(app, {
+      timeoutSeconds: 0.05,
+      listener: { id: "mcp-1", graceSeconds: 0.3 },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect((await status()).listening).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect((await status()).listening).toBe(false);
+  });
+
   it("streams agent status changes over SSE", async () => {
     const app = makeApp({ agentListenerGraceMs: 50 });
     const server = app.listen(0);

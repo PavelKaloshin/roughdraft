@@ -183,11 +183,13 @@ describe("agent CLI commands", () => {
     // ask is the same event (seq 1), and the change follows it.
     const seq = posted.event.sequence;
     expect(seq).toBe(1);
+    const instanceId = logs.at(-1)?.match(/--instance (\S+)$/)?.[1];
+    expect(instanceId).toMatch(/^[0-9a-f-]{36}$/);
     expect(logs).toEqual([
       `[roughdraft] listening on ${documentPath} (session session-abc) since=0`,
       `[roughdraft] ask c1 seq=1 → roughdraft ack ${documentPath} c1, answer without editing the file: roughdraft reply ${documentPath} c1 --stdin | by=pavel anchor="about \\"four\\" seconds" text="What is included?\\nAnd why \\"four\\"?"`,
       `[roughdraft] change c2 seq=2 → roughdraft ack ${documentPath} c2, edit the file, then: roughdraft reply ${documentPath} c2 --status applied --stdin | by=pavel anchor="this paragraph" text="One sentence please."`,
-      `[roughdraft] listen expired; re-arm with: roughdraft listen ${documentPath} --since 2`,
+      `[roughdraft] listen expired; re-arm with: roughdraft listen ${documentPath} --since 2 --instance ${instanceId}`,
     ]);
   });
 
@@ -201,7 +203,7 @@ describe("agent CLI commands", () => {
     await postEvent("comment.ask", "c1");
     await firstRun;
     const rearm = first.logs.at(-1) ?? "";
-    const since = Number(rearm.match(/--since (\d+)$/)?.[1]);
+    const since = Number(rearm.match(/--since (\d+)/)?.[1]);
     expect(
       first.logs.some((line) => line.startsWith("[roughdraft] ask c1")),
     ).toBe(true);
@@ -325,6 +327,39 @@ describe("agent CLI commands", () => {
     }
     expect(askLines()).toHaveLength(2);
     expect(await listening).toBe(0);
+  }, 12_000);
+
+  it("re-arming with the printed command after a server restart loses nothing", async () => {
+    const first = makeDeps();
+    await runCli(["listen", documentPath, "--max-seconds", "0.3"], first.deps);
+    const rearm = first.logs.at(-1) ?? "";
+    const rearmArgs = rearm
+      .slice(rearm.lastIndexOf(" listen ") + " listen ".length)
+      .split(" ")
+      .filter((arg) => arg !== documentPath);
+
+    // The server restarts and the tab posts exactly as many events as the
+    // old cursor had seen, so the cursor alone cannot reveal the restart.
+    const port = server.port;
+    await server.close();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    server = await startServer(projectDir, port);
+    await postEvent("comment.ask", "c1");
+    await postEvent("comment.change", "c2");
+
+    const second = makeDeps();
+    await runCli(
+      ["listen", documentPath, ...rearmArgs, "--max-seconds", "0.3"],
+      second.deps,
+    );
+
+    const eventLines = second.logs.filter((line) =>
+      /^\[roughdraft\] (ask|change) /.test(line),
+    );
+    expect(eventLines.map((line) => line.split(" ")[1])).toEqual([
+      "ask",
+      "change",
+    ]);
   }, 12_000);
 
   it("writes a multiline reply from stdin through the server", async () => {

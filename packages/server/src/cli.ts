@@ -1097,6 +1097,9 @@ function printCommandHelp(
       "  --since <seq>            Only events after this sequence (from the expired line)",
     );
     log(
+      "  --instance <id>          Server instance the --since cursor came from",
+    );
+    log(
       `  --max-seconds <seconds>  Exit cleanly after this long, default ${DEFAULT_LISTEN_MAX_SECONDS}`,
     );
     log("  --state-file <path>      Server state file");
@@ -2399,7 +2402,12 @@ async function runAgentCommand(
   try {
     options =
       command === "listen"
-        ? parseAgentArgs(rest, [...commonFlags, "--since", "--max-seconds"])
+        ? parseAgentArgs(rest, [
+            ...commonFlags,
+            "--since",
+            "--instance",
+            "--max-seconds",
+          ])
         : command === "reply"
           ? parseAgentArgs(rest, [...commonFlags, "--body", "--status"], {
               allowStdin: true,
@@ -2491,6 +2499,7 @@ async function runAgentCommand(
   if (command === "listen") {
     return runListen(deps, target, {
       since: options.since,
+      instanceId: options.instance,
       maxSeconds: options.maxSeconds ?? DEFAULT_LISTEN_MAX_SECONDS,
     });
   }

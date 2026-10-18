@@ -156,7 +156,13 @@ function isRetryableError(error: unknown): boolean {
 export async function runListen(
   io: AgentCliIo,
   target: AgentCliTarget,
-  options: { since?: number; maxSeconds: number; roundSeconds?: number },
+  options: {
+    since?: number;
+    /** Server instance the `since` cursor came from (printed on expiry). */
+    instanceId?: string;
+    maxSeconds: number;
+    roundSeconds?: number;
+  },
 ): Promise<number> {
   const now = io.now ?? Date.now;
   const cli = cliCommandName(io.env);
@@ -169,7 +175,7 @@ export async function runListen(
   const file = shellQuote(target.documentPath);
 
   let cursor = options.since ?? 0;
-  let instanceId: string | null = null;
+  let instanceId: string | null = options.instanceId ?? null;
   let announced = false;
   let retryDelay = RETRY_MIN_DELAY_MS;
   let completedBefore = 0;
@@ -277,7 +283,7 @@ export async function runListen(
   }
 
   io.log(
-    `[roughdraft] listen expired; re-arm with: ${cli} listen ${file} --since ${cursor}`,
+    `[roughdraft] listen expired; re-arm with: ${cli} listen ${file} --since ${cursor}${instanceId ? ` --instance ${instanceId}` : ""}`,
   );
   return 0;
 }
@@ -406,6 +412,7 @@ export interface ParsedAgentArgs {
   status?: string;
   summary?: string;
   since?: number;
+  instance?: string;
   maxSeconds?: number;
   stateDir?: string;
   stateFile?: string;
@@ -416,6 +423,7 @@ const VALUE_FLAGS = {
   "--status": "status",
   "--summary": "summary",
   "--since": "since",
+  "--instance": "instance",
   "--max-seconds": "maxSeconds",
   "--state-dir": "stateDir",
   "--state-file": "stateFile",

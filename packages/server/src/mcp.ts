@@ -46,6 +46,9 @@ const COMMENT_WAIT_TYPES = {
 } as const;
 const COMMENT_WAIT_RETRY_DELAY_MS = 250;
 const THREAD_REPLY_CONFLICT_RETRIES = 3;
+/** How long an MCP agent counts as listening between wait calls. */
+const MCP_LISTENER_GRACE_SECONDS = 180;
+
 /** Identifies this MCP process as one listener across wait calls. */
 const mcpListenerId = crypto.randomUUID();
 
@@ -631,6 +634,8 @@ async function waitForCommentEvents(
             listener: {
               id: mcpListenerId,
               ...(sessionId ? { sessionId } : {}),
+              // The agent works (edits, replies) between bounded waits.
+              graceSeconds: MCP_LISTENER_GRACE_SECONDS,
             },
           }),
           signal: roundTimeoutSignal(roundSeconds, 10),

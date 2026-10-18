@@ -24,6 +24,11 @@ export interface AgentStatus {
 export interface AgentListenerIdentity {
   listenerId: string;
   sessionId?: string | null;
+  /**
+   * How long this listener stays present between requests, when it needs
+   * longer than the default (an MCP agent works between bounded waits).
+   */
+  graceMs?: number;
 }
 
 interface ListenerRecord {
@@ -32,6 +37,7 @@ interface ListenerRecord {
   connectedAt: number;
   lastSeenAt: number;
   activeRequests: number;
+  graceMs: number;
 }
 
 interface ThreadRecord {
@@ -92,10 +98,12 @@ export class AgentRegistry {
         connectedAt: now,
         lastSeenAt: now,
         activeRequests: 0,
+        graceMs: this.graceMs,
       };
       state.listeners.set(identity.listenerId, record);
     }
     if (identity.sessionId) record.sessionId = identity.sessionId;
+    record.graceMs = Math.max(this.graceMs, identity.graceMs ?? 0);
     record.activeRequests += 1;
     record.lastSeenAt = now;
     this.broadcast(documentPath);
@@ -225,7 +233,7 @@ export class AgentRegistry {
     for (const [id, listener] of state.listeners) {
       if (
         listener.activeRequests > 0 ||
-        now - listener.lastSeenAt <= this.graceMs
+        now - listener.lastSeenAt <= listener.graceMs
       ) {
         present.push(listener);
       } else {
@@ -235,13 +243,21 @@ export class AgentRegistry {
     return present;
   }
 
+  private longestGraceMs(state: DocumentState): number {
+    let longest = this.graceMs;
+    for (const listener of state.listeners.values()) {
+      longest = Math.max(longest, listener.graceMs);
+    }
+    return longest;
+  }
+
   private scheduleGraceCheck(documentPath: string): void {
     const state = this.state(documentPath);
     if (state.graceTimer) clearTimeout(state.graceTimer);
     state.graceTimer = setTimeout(() => {
       state.graceTimer = null;
       this.broadcast(documentPath);
-    }, this.graceMs + 10);
+    }, this.longestGraceMs(state) + 10);
     state.graceTimer.unref?.();
   }
 

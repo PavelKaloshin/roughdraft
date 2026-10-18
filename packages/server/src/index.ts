@@ -993,6 +993,11 @@ export function createApp(options: CreateAppOptions = {}): CreateAppResult {
           listenerId,
           sessionId:
             typeof listener?.sessionId === "string" ? listener.sessionId : null,
+          graceMs:
+            typeof listener?.graceSeconds === "number" &&
+            Number.isFinite(listener.graceSeconds)
+              ? Math.min(Math.max(listener.graceSeconds, 0), 600) * 1000
+              : undefined,
         })
       : null;
 
