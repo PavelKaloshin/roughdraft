@@ -37,6 +37,19 @@ export interface CriticComment {
   parentCommentId?: string | null;
   scope?: "document";
   /**
+   * What a root comment asks of a connected agent. Absent means a plain
+   * `comment`; only known non-default intents are kept on the model. Ignored on
+   * replies (a thread's intent is its root's).
+   */
+  intent?: CriticCommentIntent;
+  /** Review state from metadata, e.g. `resolved`. */
+  status?: string | null;
+  /**
+   * Inline-attribute metadata keys the app does not model (for example the
+   * `resolved` summary), kept so a rewrite does not drop them.
+   */
+  extraAttributes?: [string, string][];
+  /**
    * Set when the source comment had no usable metadata (a bare `{>>…<<}`, or
    * a `{#id}` reference with no endmatter entry). While the comment is left
    * untouched it is written back exactly as it was instead of gaining
@@ -44,6 +57,29 @@ export interface CriticComment {
    */
   verbatimSource?: { metadata: string; content: string };
 }
+
+export type CriticCommentIntent = "ask" | "change";
+
+export function parseCriticCommentIntent(
+  value: unknown,
+): CriticCommentIntent | undefined {
+  return value === "ask" || value === "change" ? value : undefined;
+}
+
+export function isCriticCommentResolved(
+  comment: Pick<CriticComment, "status">,
+): boolean {
+  return comment.status === "resolved";
+}
+
+const modeledAttributeKeys = new Set([
+  "id",
+  "by",
+  "at",
+  "re",
+  "intent",
+  "status",
+]);
 
 export interface CriticCommentThread {
   comment: CriticComment;
@@ -151,13 +187,28 @@ function parseAttributeMetadata(
   }
 
   const author = fields.get("by") ?? "user";
+  const parentCommentId = fields.get("re") ?? null;
+  const intent = parentCommentId
+    ? undefined
+    : parseCriticCommentIntent(fields.get("intent"));
+  const extraAttributes = [...fields].filter(
+    ([key]) => !modeledAttributeKeys.has(key),
+  );
+  // An intent value the app does not know is preserved verbatim.
+  const rawIntent = fields.get("intent");
+  if (rawIntent !== undefined && !intent) {
+    extraAttributes.push(["intent", rawIntent]);
+  }
 
   return {
     id: fields.get("id"),
     createdAt: fields.get("at") ?? new Date().toISOString(),
     authorType: author.toUpperCase() === "AI" ? "ai" : "user",
     authorId: author.toUpperCase() === "AI" ? null : author,
-    parentCommentId: fields.get("re") ?? null,
+    parentCommentId,
+    ...(intent ? { intent } : {}),
+    ...(fields.has("status") ? { status: fields.get("status") } : {}),
+    ...(extraAttributes.length > 0 ? { extraAttributes } : {}),
   };
 }
 
@@ -168,6 +219,10 @@ function commentPartialFromEndmatterEntry(
 ): Partial<Omit<CriticComment, "content">> {
   const author = typeof entry?.by === "string" ? entry.by : "user";
   const includeParent = options?.includeParent ?? true;
+  const intent =
+    typeof entry?.re === "string"
+      ? undefined
+      : parseCriticCommentIntent(entry?.intent);
 
   return {
     id,
@@ -177,6 +232,8 @@ function commentPartialFromEndmatterEntry(
     authorId: author.toUpperCase() === "AI" ? null : author,
     parentCommentId:
       includeParent && typeof entry?.re === "string" ? entry.re : null,
+    ...(intent ? { intent } : {}),
+    ...(typeof entry?.status === "string" ? { status: entry.status } : {}),
   };
 }
 
@@ -215,6 +272,16 @@ function serializeMetadata(comment: CriticComment): string {
 
   if (comment.parentCommentId) {
     fields.push(["re", comment.parentCommentId]);
+  } else if (comment.intent) {
+    fields.push(["intent", comment.intent]);
+  }
+  if (comment.status) {
+    fields.push(["status", comment.status]);
+  }
+  for (const [key, value] of comment.extraAttributes ?? []) {
+    // A reopened thread drops its resolution summary along with its status.
+    if (key === "resolved" && !comment.status) continue;
+    fields.push([key, value]);
   }
 
   return `{${fields
@@ -349,6 +416,17 @@ function endmatterEntryForComment(
     delete next.re;
   }
 
+  // Unknown intent values already in the file survive via `existing`.
+  if (comment.intent && !next.re) {
+    next.intent = comment.intent;
+  }
+  if (comment.status) {
+    next.status = comment.status;
+  } else {
+    delete next.status;
+    delete next.resolved;
+  }
+
   return next;
 }
 
@@ -369,8 +447,9 @@ function serializeReviewEndmatter(
   existingEndmatter: string | null,
   comments: Map<string, CriticComment>,
   changes: Map<string, CriticChangeAttrs>,
+  createIfMissing = false,
 ): string | null {
-  if (!existingEndmatter) return null;
+  if (!existingEndmatter && !createIfMissing) return null;
 
   const parsed = parseReviewEndmatter(existingEndmatter);
   const commentEntries = new Map<string, Record<string, unknown>>();
@@ -392,6 +471,7 @@ function serializeReviewEndmatter(
   }
 
   if (
+    existingEndmatter &&
     areEndmatterMapsEqual(parsed.comments, commentEntries) &&
     areEndmatterMapsEqual(parsed.suggestions, suggestionEntries)
   ) {
@@ -499,6 +579,8 @@ function isWrittenVerbatim(
 ): boolean {
   if (!comment.verbatimSource) return false;
   if (comment.verbatimSource.content !== comment.content) return false;
+  // Gaining an intent or a status needs real metadata to be written.
+  if (comment.intent || comment.status) return false;
   for (const other of comments.values()) {
     if (other.parentCommentId === comment.id) return false;
   }
@@ -519,6 +601,13 @@ function createCommentWithContext(
     authorId: partial?.authorId ?? (authorType === "ai" ? null : "user"),
     parentCommentId: partial?.parentCommentId ?? null,
     scope: partial?.scope,
+    ...(partial?.intent && !partial.parentCommentId
+      ? { intent: partial.intent }
+      : {}),
+    ...(partial?.status ? { status: partial.status } : {}),
+    ...(partial?.extraAttributes?.length
+      ? { extraAttributes: partial.extraAttributes }
+      : {}),
   };
 }
 
@@ -698,6 +787,37 @@ export function getCommentDescendantIds(
   return descendantIds;
 }
 
+function getEndmatterReplyIds(
+  rootIds: readonly string[],
+  endmatter?: ParsedEndmatter,
+): string[] {
+  if (!endmatter || endmatter.comments.size === 0) return [];
+
+  const childrenByParent = new Map<string, string[]>();
+  for (const [id, entry] of endmatter.comments) {
+    if (typeof entry.re !== "string" || typeof entry.body !== "string") {
+      continue;
+    }
+    const children = childrenByParent.get(entry.re) ?? [];
+    children.push(id);
+    childrenByParent.set(entry.re, children);
+  }
+
+  const seen = new Set(rootIds);
+  const replyIds: string[] = [];
+  const visit = (parentId: string) => {
+    for (const childId of childrenByParent.get(parentId) ?? []) {
+      if (seen.has(childId)) continue;
+      seen.add(childId);
+      replyIds.push(childId);
+      visit(childId);
+    }
+  };
+  for (const rootId of rootIds) visit(rootId);
+
+  return replyIds;
+}
+
 function tokenizeCriticCommentAnchor(
   lexer: TokenizerThis["lexer"],
   src: string,
@@ -733,11 +853,19 @@ function tokenizeCriticCommentAnchor(
 
   if (parsedComments.length === 0) return undefined;
 
+  const anchoredIds = parsedComments.map((comment) => comment.id);
+
   return {
     token: {
       type: "criticCommentAnchor",
       raw,
-      commentIds: parsedComments.map((comment) => comment.id),
+      // Replies that live only in endmatter (`re:`) belong to this anchor
+      // too, exactly like a reply added in the editor; without them the
+      // thread rail would not show them after a reload.
+      commentIds: [
+        ...anchoredIds,
+        ...getEndmatterReplyIds(anchoredIds, endmatter),
+      ],
       tokens: lexer.inlineTokens(anchor),
     },
     comments: parsedComments,
@@ -816,11 +944,16 @@ function tokenizeCriticStandaloneComment(
 
   if (result.comments.length === 0) return undefined;
 
+  const anchoredIds = result.comments.map((comment) => comment.id);
+
   return {
     token: {
       type: "criticStandaloneComment",
       raw: result.raw,
-      commentIds: result.comments.map((comment) => comment.id),
+      commentIds: [
+        ...anchoredIds,
+        ...getEndmatterReplyIds(anchoredIds, endmatter),
+      ],
     },
     comments: result.comments,
   };
@@ -1549,7 +1682,14 @@ export function editorStateToCriticMarkdown(
     (doc as JSONContent & { yamlEndmatter?: string }).yamlEndmatter ??
     null;
   const changes = collectCriticChangesFromDoc(doc);
-  const useEndmatter = Boolean(sourceEndmatter);
+  // A comment with an agent intent always gets compact `{#id}` + endmatter
+  // metadata (the spec's preferred form), even in a document that had no
+  // endmatter yet, so agent replies with multiline Markdown can live there too.
+  const useEndmatter =
+    Boolean(sourceEndmatter) ||
+    [...comments.values()].some(
+      (comment) => comment.intent && !comment.parentCommentId,
+    );
   addCriticCommentRule(service, comments, useEndmatter);
   addCriticChangeRule(service, comments, useEndmatter);
   addCriticCodeBlockRule(service);
@@ -1557,6 +1697,7 @@ export function editorStateToCriticMarkdown(
     sourceEndmatter,
     comments,
     changes,
+    useEndmatter,
   );
   return appendYamlEndmatter(
     prependYamlFrontmatter(
