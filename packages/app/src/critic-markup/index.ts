@@ -1926,13 +1926,113 @@ function comparableComments(comments: ReadonlyMap<string, CriticComment>) {
   );
 }
 
-function sameParse(
-  a: { doc: JSONContent; comments: ReadonlyMap<string, CriticComment> },
-  b: { doc: JSONContent; comments: ReadonlyMap<string, CriticComment> },
-): boolean {
+type ParsedReview = {
+  doc: JSONContent;
+  comments: ReadonlyMap<string, CriticComment>;
+};
+
+/**
+ * Ids of the comments that are written as a bare `{>>…<<}`. Their ids exist
+ * only in memory: every parse generates one past the ids it has seen, so a
+ * new comment or reply elsewhere renumbers them on the next parse.
+ */
+function generatedCommentIds(
+  comments: ReadonlyMap<string, CriticComment>,
+): Set<string> {
+  const ids = new Set<string>();
+  for (const comment of comments.values()) {
+    if (
+      comment.verbatimSource?.metadata === "" &&
+      isWrittenVerbatim(comment, comments)
+    ) {
+      ids.add(comment.id);
+    }
+  }
+  return ids;
+}
+
+function renameCommentIdsInNodes(
+  nodes: JSONContent[],
+  rename: (id: string) => string,
+): JSONContent[] {
+  const visit = (value: unknown, key?: string): unknown => {
+    if (Array.isArray(value)) {
+      return key === "commentIds"
+        ? value.map((id) => (typeof id === "string" ? rename(id) : id))
+        : value.map((item) => visit(item));
+    }
+    if (value && typeof value === "object") {
+      return Object.fromEntries(
+        Object.entries(value).map(([k, v]) => [k, visit(v, k)]),
+      );
+    }
+    return value;
+  };
+  return visit(nodes) as JSONContent[];
+}
+
+/** Prefix that no id written in a file can carry. */
+const generatedIdToken = "\u0000generated:";
+
+/**
+ * Marks the generated ids of one parse as such, so that ids from different
+ * parses (which may collide) stay apart until `numberGeneratedIds`.
+ */
+function tagGeneratedIds(
+  nodes: JSONContent[],
+  generated: ReadonlySet<string>,
+  scope: string,
+): JSONContent[] {
+  return renameCommentIdsInNodes(nodes, (id) =>
+    generated.has(id) ? `${generatedIdToken}${scope}:${id}` : id,
+  );
+}
+
+/** Renumbers tagged generated ids in order of first appearance. */
+function numberGeneratedIds(nodes: JSONContent[]): {
+  nodes: JSONContent[];
+  rename: (id: string) => string;
+} {
+  const numbers = new Map<string, string>();
+  const rename = (id: string) => {
+    if (!id.startsWith(generatedIdToken)) return id;
+    let number = numbers.get(id);
+    if (!number) {
+      number = `${generatedIdToken}${numbers.size}`;
+      numbers.set(id, number);
+    }
+    return number;
+  };
+  return { nodes: renameCommentIdsInNodes(nodes, rename), rename };
+}
+
+/**
+ * The parse with every generated (bare comment) id replaced by its position,
+ * so that two parses which differ only in how they numbered bare comments
+ * compare equal.
+ */
+function withPositionalGeneratedIds(parse: ParsedReview): ParsedReview {
+  const generated = generatedCommentIds(parse.comments);
+  if (generated.size === 0) return parse;
+  const { nodes, rename } = numberGeneratedIds(
+    tagGeneratedIds(parse.doc.content ?? [], generated, ""),
+  );
+  const tag = (id: string) =>
+    generated.has(id) ? rename(`${generatedIdToken}:${id}`) : id;
+  const comments = new Map<string, CriticComment>();
+  for (const comment of parse.comments.values()) {
+    const id = tag(comment.id);
+    comments.set(id, { ...comment, id });
+  }
+  return { doc: { ...parse.doc, content: nodes }, comments };
+}
+
+function sameParse(a: ParsedReview, b: ParsedReview): boolean {
+  const left = withPositionalGeneratedIds(a);
+  const right = withPositionalGeneratedIds(b);
   return (
-    comparableContent(a.doc) === comparableContent(b.doc) &&
-    comparableComments(a.comments) === comparableComments(b.comments)
+    comparableContent(left.doc) === comparableContent(right.doc) &&
+    comparableComments(left.comments) === comparableComments(right.comments)
   );
 }
 
@@ -2054,24 +2154,42 @@ export function editorStateToCriticMarkdown(
   // into its neighbour, ...), so write the full serialization instead.
   const check = criticMarkdownToEditorState(spliced, options?.markdownOptions);
   if (sameParse(check, { doc, comments })) return spliced;
+  // Each parse numbers bare comments on its own, so compare their positions.
+  const editorGenerated = generatedCommentIds(comments);
   const expected: JSONContent[] = [];
-  for (const piece of pieces) {
+  pieces.forEach((piece, index) => {
     if (piece.kind === "source") {
-      expected.push(...piece.nodes);
-      continue;
+      expected.push(...tagGeneratedIds(piece.nodes, editorGenerated, "editor"));
+      return;
     }
     const text = runTexts.get(piece);
-    if (!text) continue;
-    expected.push(
-      ...(parseCriticDocumentParts(
-        { frontmatter: null, body: `${text}\n`, endmatter },
-        options?.markdownOptions,
-      ).doc.content ?? []),
+    if (!text) return;
+    const run = parseCriticDocumentParts(
+      { frontmatter: null, body: `${text}\n`, endmatter },
+      options?.markdownOptions,
     );
-  }
+    expected.push(
+      ...tagGeneratedIds(
+        run.doc.content ?? [],
+        generatedCommentIds(run.comments),
+        `run${index}`,
+      ),
+    );
+  });
+  const checkNodes = tagGeneratedIds(
+    check.doc.content ?? [],
+    generatedCommentIds(check.comments),
+    "check",
+  );
   if (
-    comparableContent(check.doc) ===
-    comparableContent({ type: "doc", content: expected })
+    comparableContent({
+      type: "doc",
+      content: numberGeneratedIds(checkNodes).nodes,
+    }) ===
+    comparableContent({
+      type: "doc",
+      content: numberGeneratedIds(expected).nodes,
+    })
   ) {
     return spliced;
   }

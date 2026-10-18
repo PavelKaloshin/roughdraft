@@ -5,6 +5,7 @@ import { Editor, type JSONContent } from "@tiptap/core";
 import { describe, expect, it, vi } from "vitest";
 import {
   type CriticComment,
+  createNextCommentId,
   criticMarkdownToEditorState,
   editorStateToCriticMarkdown,
 } from "../src/critic-markup";
@@ -542,6 +543,221 @@ describe("block source preservation: safety guard", () => {
       appendAfter(opened.editor, "Edit this paragraph.", " Edited.");
       opened.save({ onBlockSourceFallback: onFallback });
       expect(onFallback).not.toHaveBeenCalled();
+    } finally {
+      opened.editor.destroy();
+    }
+  });
+});
+
+describe("block source preservation: bare comments on their own line", () => {
+  // A bare comment (no highlight, no metadata) written on its own line next to
+  // a block must survive an edit elsewhere byte for byte, without the guard
+  // falling back to the full serialization (which joins the comment onto the
+  // previous line and rewrites the untouched block).
+  const bareCommentBlocks = [
+    [
+      "an indented continuation line under a list item",
+      [
+        "- Item text ends here. Сервер остаётся без постоянного состояния.",
+        "  {>>Альтернатива — маленький файл закреплений у сервера.<<}",
+        "- Second item.",
+      ].join("\n"),
+    ],
+    [
+      "the last line of the last list item",
+      [
+        "- First item.",
+        "- Item text ends here.",
+        "  {>>A note on the last item.<<}",
+      ].join("\n"),
+    ],
+    [
+      "a continuation line in an ordered list item",
+      ["1. Step one.", "   {>>Why first?<<}", "2. Step two."].join("\n"),
+    ],
+    [
+      "a soft-wrapped line after a paragraph",
+      ["Paragraph text ends here.", "{>>A note on the paragraph.<<}"].join(
+        "\n",
+      ),
+    ],
+    ["a paragraph of its own", "{>>A standalone note.<<}"],
+    [
+      "the start of a blockquote line",
+      ["> Quoted text ends here.", "> {>>A note on the quote.<<}"].join("\n"),
+    ],
+    [
+      "a blockquote line of its own",
+      ["> Quoted text.", ">", "> {>>A note on the quote.<<}"].join("\n"),
+    ],
+  ] as const;
+
+  it.each(
+    bareCommentBlocks,
+  )("keeps a bare comment on %s byte-identical", (_label, block) => {
+    const source = `# Title\n\n${block}\n\nEdit me.\n`;
+    const opened = openInEditor(source);
+    const onFallback = vi.fn();
+    try {
+      appendAfter(opened.editor, "Edit me.", " Now.");
+      const saved = opened.save({ onBlockSourceFallback: onFallback });
+      expect(onFallback).not.toHaveBeenCalled();
+      expect(saved).toBe(`# Title\n\n${block}\n\nEdit me. Now.\n`);
+    } finally {
+      opened.editor.destroy();
+    }
+  });
+
+  it.each(
+    bareCommentBlocks,
+  )("keeps a bare comment on %s byte-identical when a new comment is added", (_label, block) => {
+    const source = `# Title\n\n${block}\n\nEdit me.\n`;
+    const opened = openInEditor(source);
+    const onFallback = vi.fn();
+    try {
+      commentOn(opened, "Title", {
+        id: createNextCommentId(opened.comments.values()),
+        content: "New note.",
+        createdAt: "2026-04-28T12:05:00.000Z",
+        authorType: "user",
+        authorId: "user",
+        parentCommentId: null,
+      });
+      const saved = opened.save({ onBlockSourceFallback: onFallback });
+      expect(onFallback).not.toHaveBeenCalled();
+      expect(saved).toMatch(/^# \{==Title==\}\{>>New note\.<<\}\{id="c2" /);
+      expect(saved.endsWith(`\n\n${block}\n\nEdit me.\n`)).toBe(true);
+    } finally {
+      opened.editor.destroy();
+    }
+  });
+
+  // A bare comment has no id in the file, so each parse generates one past
+  // every id it has seen. A new comment or reply takes the next free id in the
+  // editor, so re-parsing the saved file numbers the bare comment differently.
+  // That renumbering is not a change and must not defeat block preservation.
+  const listWithBareComment = [
+    "- Item text ends here. Сервер остаётся без постоянного состояния.",
+    "  {>>Альтернатива — маленький файл закреплений у сервера.<<}",
+    "- Second item.",
+  ].join("\n");
+
+  function commentOn(
+    opened: ReturnType<typeof openInEditor>,
+    text: string,
+    comment: CriticComment,
+  ) {
+    opened.addComment(comment);
+    const { from, to } = findText(opened.editor, text);
+    opened.editor
+      .chain()
+      .setTextSelection({ from, to })
+      .setCommentRef({ commentIds: [comment.id] })
+      .run();
+  }
+
+  it("keeps the list when a reply is added elsewhere (endmatter metadata)", () => {
+    const source = [
+      "Intro with {==anchor==}{>>Root note.<<}{#c1}.",
+      "",
+      listWithBareComment,
+      "",
+      "---",
+      "comments:",
+      "  c1:",
+      "    by: user",
+      '    at: "2026-04-28T12:00:00.000Z"',
+      "",
+    ].join("\n");
+    const opened = openInEditor(source);
+    const onFallback = vi.fn();
+    try {
+      opened.addComment({
+        id: createNextCommentId(opened.comments.values()),
+        content: "Agent reply.",
+        createdAt: "2026-04-28T12:05:00.000Z",
+        authorType: "ai",
+        authorId: null,
+        parentCommentId: "c1",
+      });
+      const saved = opened.save({ onBlockSourceFallback: onFallback });
+      expect(onFallback).not.toHaveBeenCalled();
+      const bodyEnd = source.indexOf("---\n");
+      expect(saved.slice(0, bodyEnd)).toBe(source.slice(0, bodyEnd));
+      expect(saved.slice(bodyEnd)).toContain("body: Agent reply.");
+    } finally {
+      opened.editor.destroy();
+    }
+  });
+
+  it("keeps the list when a new comment is added above it (inline metadata)", () => {
+    const source = `Intro paragraph.\n\n${listWithBareComment}\n`;
+    const opened = openInEditor(source);
+    const onFallback = vi.fn();
+    try {
+      commentOn(opened, "Intro", {
+        id: createNextCommentId(opened.comments.values()),
+        content: "New note.",
+        createdAt: "2026-04-28T12:05:00.000Z",
+        authorType: "user",
+        authorId: "user",
+        parentCommentId: null,
+      });
+      const saved = opened.save({ onBlockSourceFallback: onFallback });
+      expect(onFallback).not.toHaveBeenCalled();
+      expect(saved).toMatch(/^\{==Intro==\}\{>>New note\.<<\}\{id="c2" /);
+      expect(saved.endsWith(`\n\n${listWithBareComment}\n`)).toBe(true);
+    } finally {
+      opened.editor.destroy();
+    }
+  });
+
+  it("keeps a bare comment's block when the edited block above it serializes lossily", () => {
+    // The edited loose ordered list loses its 3-space child indent when it is
+    // re-serialized, so the guard has to fall through to its composition
+    // check; that check must also ignore how bare comments were numbered.
+    const lossyList =
+      "1. First item.\n\n   Child paragraph.\n\n2. Second item.";
+    const source = `${lossyList}\n\n${listWithBareComment}\n`;
+    const opened = openInEditor(source);
+    const onFallback = vi.fn();
+    try {
+      commentOn(opened, "First", {
+        id: createNextCommentId(opened.comments.values()),
+        content: "New note.",
+        createdAt: "2026-04-28T12:05:00.000Z",
+        authorType: "user",
+        authorId: "user",
+        parentCommentId: null,
+      });
+      const saved = opened.save({ onBlockSourceFallback: onFallback });
+      expect(onFallback).not.toHaveBeenCalled();
+      expect(saved).toContain('{==First==}{>>New note.<<}{id="c2" ');
+      expect(saved.endsWith(`\n\n${listWithBareComment}\n`)).toBe(true);
+    } finally {
+      opened.editor.destroy();
+    }
+  });
+
+  it("writes an edited list that holds a bare comment without falling back", () => {
+    const source = `Intro paragraph.\n\n${listWithBareComment}\n\nUntouched *tail*.\n`;
+    const opened = openInEditor(source);
+    const onFallback = vi.fn();
+    try {
+      commentOn(opened, "Intro", {
+        id: createNextCommentId(opened.comments.values()),
+        content: "New note.",
+        createdAt: "2026-04-28T12:05:00.000Z",
+        authorType: "user",
+        authorId: "user",
+        parentCommentId: null,
+      });
+      appendAfter(opened.editor, "Second item.", " Edited.");
+      const saved = opened.save({ onBlockSourceFallback: onFallback });
+      expect(onFallback).not.toHaveBeenCalled();
+      expect(saved).toContain("- Second item. Edited.");
+      expect(saved).toContain("{>>Альтернатива");
+      expect(saved.endsWith("\n\nUntouched *tail*.\n")).toBe(true);
     } finally {
       opened.editor.destroy();
     }
