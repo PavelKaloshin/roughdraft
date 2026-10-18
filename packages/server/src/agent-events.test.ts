@@ -529,6 +529,90 @@ describe("agent comment events", () => {
 
       expect(response.status).toBe(400);
     });
+
+    describe("headless fork hand-off", () => {
+      it("marks a queued Ask as passed to a forked Claude", async () => {
+        const app = makeApp();
+        await postEvent(app, "comment.ask", "c1");
+        await watchComments(app, { listener: { id: "listener-1" } });
+
+        const claim = await ack(app, "c1", {
+          delegated: true,
+          delegatedTo: "fork-process",
+        });
+
+        expect(claim.status).toBe(200);
+        expect(claim.body).toMatchObject({
+          status: "delegated",
+          delegatedTo: "fork-process",
+        });
+        expect((await status(app)).threadDetails.c1).toMatchObject({
+          status: "delegated",
+          delegatedTo: "fork-process",
+        });
+        // The busy session reaching the line later sees who has it.
+        const late = await ack(app, "c1", { delegated: true });
+        expect(late.body).toMatchObject({
+          status: "delegated",
+          delegatedTo: "fork-process",
+        });
+      });
+
+      it("refuses the fork once the session picked the thread up itself", async () => {
+        const app = makeApp();
+        await postEvent(app, "comment.ask", "c1");
+        await watchComments(app, { listener: { id: "listener-1" } });
+        await ack(app, "c1", { delegated: true });
+
+        const claim = await ack(app, "c1", {
+          delegated: true,
+          delegatedTo: "fork-process",
+        });
+
+        expect(claim.status).toBe(409);
+        expect(claim.body).toMatchObject({ status: "delegated" });
+        expect((await status(app)).threadDetails.c1.delegatedTo).toBe(
+          undefined,
+        );
+      });
+
+      it("puts a thread back in the queue when the fork gave up, but never an answered one", async () => {
+        const app = makeApp();
+        await postEvent(app, "comment.ask", "c1");
+        await watchComments(app, { listener: { id: "listener-1" } });
+        await ack(app, "c1", { delegated: true, delegatedTo: "fork-process" });
+        await ack(app, "c1");
+
+        const requeued = await ack(app, "c1", { requeue: true });
+
+        expect(requeued.body).toMatchObject({ status: "queued" });
+        expect((await status(app)).threadDetails.c1).toMatchObject({
+          status: "queued",
+        });
+        expect((await status(app)).threadDetails.c1.delegatedTo).toBe(
+          undefined,
+        );
+
+        await request(app)
+          .post("/api/comments/reply")
+          .send({ ...target(), commentId: "c1", body: "Cache warm-up." });
+        const late = await ack(app, "c1", { requeue: true });
+        expect(late.body).toMatchObject({ status: "answered" });
+      });
+
+      it("rejects an unknown delegatedTo, or one without delegated", async () => {
+        const app = makeApp();
+        await postEvent(app, "comment.ask", "c1");
+
+        expect(
+          (await ack(app, "c1", { delegated: true, delegatedTo: "robot" }))
+            .status,
+        ).toBe(400);
+        expect(
+          (await ack(app, "c1", { delegatedTo: "fork-process" })).status,
+        ).toBe(400);
+      });
+    });
   });
 
   it("records applied status and replies to the thread root when given a reply id", async () => {
