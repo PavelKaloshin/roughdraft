@@ -294,8 +294,11 @@ describe("mcp agent threads against a running server", () => {
       env,
       recordingFetch,
     )) as WaitResult;
+    // c2's change request was never posted, but it is unanswered in the
+    // file, so attaching queues it too.
     expect(first.events).toMatchObject([
       { type: "comment.ask", commentId: "c1" },
+      { type: "comment.change", commentId: "c2" },
     ]);
     expect(first.timedOut).toBe(false);
     expect(Math.max(...sentTimeouts)).toBeLessThanOrEqual(50);
@@ -314,7 +317,18 @@ describe("mcp agent threads against a running server", () => {
     expect(quiet).toMatchObject({ events: [], timedOut: true });
 
     setTimeout(() => {
-      void postEvent({ type: "comment.change", commentId: "c2" });
+      fs.appendFileSync(
+        documentPath,
+        [
+          "  c3:",
+          "    body: Keep the numbers.",
+          "    by: pavel",
+          '    at: "2026-10-18T12:05:00.000Z"',
+          "    re: c2",
+          "",
+        ].join("\n"),
+      );
+      void postEvent({ type: "comment.followup", commentId: "c3" });
     }, 100);
     const next = (await callTool(
       "roughdraft_wait_comment_events",
@@ -322,14 +336,14 @@ describe("mcp agent threads against a running server", () => {
         documentPath,
         cursor: quiet.cursor,
         instanceId: quiet.instanceId,
-        types: ["change"],
+        types: ["followup"],
         timeoutSeconds: 5,
       },
       env,
       fetch,
     )) as WaitResult;
     expect(next.events).toMatchObject([
-      { type: "comment.change", commentId: "c2" },
+      { type: "comment.followup", commentId: "c3", threadRootId: "c2" },
     ]);
     expect(next.cursor).toBeGreaterThan(quiet.cursor);
   });

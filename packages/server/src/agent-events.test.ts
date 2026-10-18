@@ -164,6 +164,90 @@ describe("agent comment events", () => {
     ]);
   });
 
+  it("re-queues unanswered ask/change threads from the file when the first listener attaches", async () => {
+    // Events live in memory, so an Ask posted before a server restart (or
+    // while no server ran) is gone. The file still has the thread; a fresh
+    // server finds threads whose last word is the user's and queues them.
+    fs.writeFileSync(
+      documentPath,
+      [
+        "# Plan",
+        "",
+        "A {==one==}{>>Why?<<}{#c1}, B {==two==}{>>Shorter.<<}{#c2},",
+        "C {==three==}{>>Source?<<}{#c3}, D {==four==}{>>Old?<<}{#c5},",
+        "E {==five==}{>>Plain note.<<}{#c6}.",
+        "",
+        "---",
+        "comments:",
+        "  c1:",
+        "    by: pavel",
+        '    at: "2026-10-18T12:00:00.000Z"',
+        "    intent: ask",
+        "  c2:",
+        "    by: pavel",
+        '    at: "2026-10-18T12:00:01.000Z"',
+        "    intent: change",
+        "  c3:",
+        "    by: pavel",
+        '    at: "2026-10-18T12:00:02.000Z"',
+        "    intent: ask",
+        "  c5:",
+        "    by: pavel",
+        '    at: "2026-10-18T12:00:03.000Z"',
+        "    intent: ask",
+        "    status: resolved",
+        "  c6:",
+        "    by: pavel",
+        '    at: "2026-10-18T12:00:04.000Z"',
+        "  c7:",
+        "    body: Done.",
+        "    by: AI",
+        '    at: "2026-10-18T12:01:00.000Z"',
+        "    re: c2",
+        "  c8:",
+        "    body: From the 2025 report.",
+        "    by: AI",
+        '    at: "2026-10-18T12:01:01.000Z"',
+        "    re: c3",
+        "  c9:",
+        "    body: Which page?",
+        "    by: pavel",
+        '    at: "2026-10-18T12:02:00.000Z"',
+        "    re: c3",
+        "",
+      ].join("\n"),
+    );
+    const app = makeApp();
+
+    // A Done Reviewing-only watcher (`roughdraft open`) does not trigger it.
+    const doneOnly = await request(app)
+      .post("/api/review-events/watch")
+      .send({ ...target(), fromNow: false, timeoutSeconds: 0 });
+    expect(doneOnly.body.latestSequence).toBe(0);
+
+    const first = await watchComments(app);
+    expect(
+      first.body.events.map((event: { type: string; commentId: string }) => [
+        event.type,
+        event.commentId,
+      ]),
+    ).toEqual([
+      ["comment.ask", "c1"],
+      ["comment.followup", "c9"],
+    ]);
+    const status = await request(app).get("/api/agent/status").query(target());
+    expect(status.body.threads).toEqual({ c1: "pending", c3: "pending" });
+
+    // The tab re-posting the same Ask is a duplicate, and a second listener
+    // round does not queue anything again.
+    expect((await postEvent(app, "comment.ask", "c1")).status).toBe(200);
+    const again = await watchComments(app, {
+      afterSequence: first.body.nextSequence - 1,
+    });
+    expect(again.body.events).toEqual([]);
+    expect(again.body.latestSequence).toBe(first.body.latestSequence);
+  });
+
   it("rejects comment events for missing, misplaced, or malformed targets", async () => {
     const app = makeApp();
     appendUserReply("c3", "c1", "And the cache?");
@@ -208,10 +292,15 @@ describe("agent comment events", () => {
     });
     expect(followupAgain.body.duplicate).toBe(true);
 
+    // The listener attaching also queues c2, an unanswered change request
+    // in the file that was never posted; c1's ask/follow-up are not repeated.
     const watched = await watchComments(app);
     expect(
-      watched.body.events.map((event: { type: string }) => event.type),
-    ).toEqual(["comment.ask", "comment.followup"]);
+      watched.body.events.map(
+        (event: { type: string; commentId: string }) =>
+          `${event.type} ${event.commentId}`,
+      ),
+    ).toEqual(["comment.ask c1", "comment.followup c3", "comment.change c2"]);
   });
 
   it("keeps the default watch on Done Reviewing only", async () => {
@@ -247,11 +336,12 @@ describe("agent comment events", () => {
       timeoutSeconds: 30,
     });
 
+    // latestSequence 2: attaching also queued c2's unanswered change request.
     for (const response of [ahead, otherInstance]) {
       expect(response.body).toMatchObject({
         events: [],
         cursorReset: true,
-        latestSequence: 1,
+        latestSequence: 2,
         instanceId: expect.any(String),
       });
     }
@@ -466,9 +556,15 @@ describe("agent comment events", () => {
         }
       };
 
+      // The snapshot names the server process, so the tab can tell a restart
+      // (in-memory thread status gone) from a reconnect.
+      const { instanceId } = (await (
+        await fetch(`${base}/api/agent/status?${query}`)
+      ).json()) as { instanceId: string };
       expect(await nextStatus()).toMatchObject({
         listening: false,
         threads: {},
+        instanceId,
       });
 
       await fetch(`${base}/api/review-events`, {
@@ -480,7 +576,10 @@ describe("agent comment events", () => {
           commentId: "c1",
         }),
       });
-      expect(await nextStatus()).toMatchObject({ threads: { c1: "pending" } });
+      expect(await nextStatus()).toMatchObject({
+        threads: { c1: "pending" },
+        instanceId,
+      });
 
       await fetch(`${base}/api/agent/ack`, {
         method: "POST",

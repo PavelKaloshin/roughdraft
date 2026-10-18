@@ -139,6 +139,49 @@ export function buildCommentEventInput(
   };
 }
 
+/** Agent replies are written `by: AI` (ADR 0006). */
+function isAgentAuthor(author: string | null): boolean {
+  return author?.trim().toLowerCase() === "ai";
+}
+
+/**
+ * Unresolved ask/change threads in which the user spoke last, as the event
+ * the browser would have posted for them: the root's ask/change when nobody
+ * replied yet, or a follow-up on the newest user reply. Plain `comment`
+ * threads never involve the agent, so they are not included.
+ */
+export function findUnansweredAgentThreads(
+  markdown: string,
+): Array<{ type: CommentEventType; commentId: string }> {
+  const { items } = extractRoughdraftReviewIndex(markdown);
+  const pending: Array<{ type: CommentEventType; commentId: string }> = [];
+
+  for (const root of items) {
+    if (root.kind !== "comment" || root.status === "resolved") continue;
+    if (root.intent !== "ask" && root.intent !== "change") continue;
+
+    const replies = items
+      .map((item, index) => ({ item, index }))
+      .filter(
+        ({ item }) =>
+          item.kind === "reply" && threadRootOf(items, item) === root.id,
+      )
+      .sort(
+        (a, b) =>
+          compareTimestamps(a.item.createdAt, b.item.createdAt) ||
+          a.index - b.index,
+      );
+    const last = replies.at(-1)?.item;
+    if (!last) {
+      pending.push({ type: `comment.${root.intent}`, commentId: root.id });
+    } else if (!isAgentAuthor(last.author)) {
+      pending.push({ type: "comment.followup", commentId: last.id });
+    }
+  }
+
+  return pending;
+}
+
 function threadRootOf(items: RfmReviewItem[], item: RfmReviewItem): string {
   const byId = new Map(items.map((candidate) => [candidate.id, candidate]));
   let current = item;

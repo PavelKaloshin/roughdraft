@@ -18,7 +18,7 @@ When no agent is listening, the app says so and shows the command to start one. 
 ## Consequences
 
 - The file stays the single source of truth: a thread with an agent's answer reads the same in any editor, and stays valid for tools that ignore `intent`.
-- Listener presence and thread status disappear with the server process. Events posted while no server is running are not delivered; the user re-submits.
+- Listener presence and thread status disappear with the server process. Queued events disappear too, but nothing is lost: the first time a listener attaches to a document, the server re-reads the file and queues every unresolved `ask`/`change` thread whose last message is not from the agent (`by: AI`). The file, not the queue, decides what is still waiting for an answer.
 - Agents need instructions to arm `listen` after opening a document (see `packages/skill/` and `setup.md`).
 
 ## What This Explicitly Does Not Mean

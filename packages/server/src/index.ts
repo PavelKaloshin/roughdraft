@@ -18,7 +18,11 @@ import {
   resolveBindHosts,
 } from "./network.js";
 import { AgentRegistry, type AgentThreadStatus } from "./agent-registry.js";
-import { buildCommentEventInput, lookupComment } from "./comment-events.js";
+import {
+  buildCommentEventInput,
+  findUnansweredAgentThreads,
+  lookupComment,
+} from "./comment-events.js";
 import {
   isCommentEvent,
   isCommentEventType,
@@ -584,6 +588,38 @@ export function createApp(options: CreateAppOptions = {}): CreateAppResult {
       isCommentEvent(event) && agentRegistry.isAwaitingAgent(event),
   });
   const remoteSessions = new Map<string, RemoteSession>();
+  const requeuedDocuments = new Set<string>();
+
+  /**
+   * Comment events live in memory, so asks posted before this process
+   * started (a restart, or no server at the time) are gone. The first time a
+   * listener attaches to a document, queue the ask/change threads that are
+   * still waiting for the agent according to the file itself. Events the tab
+   * posts later dedupe against these.
+   */
+  function requeueUnansweredThreads(target: {
+    absolutePath: string;
+    projectDir: string;
+    relativePath: string;
+  }): void {
+    if (requeuedDocuments.has(target.absolutePath)) return;
+    requeuedDocuments.add(target.absolutePath);
+
+    const markdown = fs.readFileSync(target.absolutePath, "utf-8");
+    const version = fileVersionFromFile(target.absolutePath);
+    for (const thread of findUnansweredAgentThreads(markdown)) {
+      const built = buildCommentEventInput(markdown, {
+        ...thread,
+        documentPath: target.absolutePath,
+        projectPath: target.projectDir,
+        relativePath: target.relativePath,
+        version,
+      });
+      if (!built.ok) continue;
+      const result = reviewEvents.emitComment(built.input);
+      if (!result.duplicate) agentRegistry.recordEvent(result.event);
+    }
+  }
 
   function isAuthorizedRemoteDocumentRequest(req: Request): boolean {
     if (!remoteDocumentToken) return true;
@@ -921,6 +957,10 @@ export function createApp(options: CreateAppOptions = {}): CreateAppResult {
     // re-armed listener does not redo finished work.
     const skipHandled = req.body?.skipHandled === true;
 
+    if (types.some(isCommentEventType)) {
+      requeueUnansweredThreads(target);
+    }
+
     // A cursor from an earlier server process (sequences restart at 1) would
     // silently skip new events; answer at once so the client resets it.
     const requestedAfter =
@@ -1044,8 +1084,12 @@ export function createApp(options: CreateAppOptions = {}): CreateAppResult {
     res.flushHeaders?.();
     res.write("retry: 1000\n\n");
 
-    const send = (status: unknown) => {
-      res.write(`event: status\ndata: ${JSON.stringify(status)}\n\n`);
+    // instanceId lets the tab tell a server restart (thread status and queued
+    // events gone) from a reconnect to the same process.
+    const send = (status: object) => {
+      res.write(
+        `event: status\ndata: ${JSON.stringify({ ...status, instanceId })}\n\n`,
+      );
     };
     send(agentRegistry.status(target.absolutePath));
     const unsubscribe = agentRegistry.subscribe(target.absolutePath, send);
