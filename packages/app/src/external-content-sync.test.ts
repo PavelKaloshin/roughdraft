@@ -3,7 +3,10 @@ import { TextSelection } from "@tiptap/pm/state";
 import { afterEach, describe, expect, it } from "vitest";
 import { criticMarkdownToEditorState } from "./critic-markup";
 import { createEditorExtensions } from "./editor-extensions";
-import { buildExternalContentTransaction } from "./external-content-sync";
+import {
+  buildExternalContentTransaction,
+  syncSelectionFromDom,
+} from "./external-content-sync";
 
 const editors: Editor[] = [];
 
@@ -208,5 +211,28 @@ describe("buildExternalContentTransaction", () => {
     editor.commands.undo();
 
     expect(editor.state.doc.textContent).toContain("Changed on disk.");
+  });
+});
+
+describe("syncSelectionFromDom", () => {
+  it("adopts a caret the browser moved before ProseMirror read it", () => {
+    const editor = createEditor(paragraphs(6));
+    editor.view.focus();
+    const target = findText(editor, "Paragraph 1 text") + "Paragraph 1".length;
+    // The browser moved the caret (an arrow key) but ProseMirror has not yet
+    // processed the selectionchange: its state still has the old caret.
+    const { node, offset } = editor.view.domAtPos(target);
+    const domSelection = window.getSelection();
+    domSelection?.collapse(node, offset);
+    expect(editor.state.selection.from).not.toBe(target);
+
+    syncSelectionFromDom(editor.view);
+    applyExternal(
+      editor,
+      paragraphs(6, { index: 4, text: "Paragraph 5 rewritten on disk." }),
+    );
+
+    // An external edit further down keeps the caret where the user put it.
+    expect(editor.state.selection.from).toBe(target);
   });
 });

@@ -37,7 +37,10 @@ import {
   SUGGESTED_PARAGRAPH_SENTINEL,
 } from "./editor-extensions";
 import { addExternalChangeHighlight } from "./external-change-highlight";
-import { buildExternalContentTransaction } from "./external-content-sync";
+import {
+  buildExternalContentTransaction,
+  syncSelectionFromDom,
+} from "./external-content-sync";
 import { cn } from "./lib/utils";
 import { mergeMarkdown } from "./markdown-merge";
 import {
@@ -1419,6 +1422,7 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
 
       let change: ReturnType<typeof buildExternalContentTransaction> = null;
       try {
+        syncSelectionFromDom(currentEditor.view);
         change = buildExternalContentTransaction(
           currentEditor.state,
           currentEditor.schema.nodeFromJSON(parsed.doc),

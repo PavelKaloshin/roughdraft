@@ -119,9 +119,23 @@ test.describe("live reload of external file changes", () => {
     const editor = richTextEditor(page);
     await expect(editor).toContainText("Paragraph 40");
 
-    // Caret inside paragraph 1.
-    await selectRichText(page, "Paragraph 1 is ordinary");
-    await page.keyboard.press("ArrowRight");
+    // Caret inside paragraph 1, placed the way a person does it (a click),
+    // then wait until ProseMirror itself has registered it.
+    const paragraphOne = editor
+      .locator("p") // selector-check-ignore
+      .filter({ hasText: "Paragraph 1 is ordinary" });
+    const box = await paragraphOne.boundingBox();
+    if (!box) throw new Error("paragraph 1 is not laid out");
+    await page.mouse.click(box.x + 60, box.y + box.height / 2);
+    await page.waitForFunction(() => {
+      const dom = document.querySelector(".ProseMirror") as
+        | (Element & {
+            editor?: { state: { selection: { empty: boolean; from: number } } };
+          })
+        | null;
+      const selection = dom?.editor?.state.selection;
+      return selection?.empty === true && selection.from > 1;
+    });
     // Tag DOM nodes with JS properties, not attributes: ProseMirror observes
     // attribute mutations and would redraw a node it sees changed.
     await page.evaluate(() => {

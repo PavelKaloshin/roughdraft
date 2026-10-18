@@ -1,6 +1,11 @@
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
-import type { EditorState, Transaction } from "@tiptap/pm/state";
+import {
+  type EditorState,
+  TextSelection,
+  type Transaction,
+} from "@tiptap/pm/state";
 import { Transform } from "@tiptap/pm/transform";
+import type { EditorView } from "@tiptap/pm/view";
 
 export interface ExternalContentChange {
   tr: Transaction;
@@ -132,4 +137,47 @@ export function buildExternalContentTransaction(
   tr.setMeta("preventUpdate", true);
 
   return { tr, insertedFrom, insertedTo };
+}
+
+/**
+ * ProseMirror reads the browser's selection on `selectionchange`, a moment
+ * after an arrow key or click moved it. An external change applied in that
+ * window would carry the old selection and write it back to the DOM, so the
+ * caret jumps back. Adopt the DOM selection first (only while focused).
+ */
+export function syncSelectionFromDom(view: EditorView): void {
+  // Never touch the selection mid-IME composition.
+  if (!view.hasFocus() || view.composing) return;
+  const domSelection = view.dom.ownerDocument.getSelection();
+  const { anchorNode, focusNode } = domSelection ?? {};
+  if (
+    !domSelection ||
+    !anchorNode ||
+    !focusNode ||
+    !view.dom.contains(anchorNode) ||
+    !view.dom.contains(focusNode)
+  ) {
+    return;
+  }
+
+  let anchor: number;
+  let head: number;
+  try {
+    anchor = view.posAtDOM(anchorNode, domSelection.anchorOffset);
+    head = view.posAtDOM(focusNode, domSelection.focusOffset);
+  } catch {
+    return;
+  }
+  const { selection } = view.state;
+  if (selection.anchor === anchor && selection.head === head) return;
+
+  const tr = view.state.tr.setSelection(
+    TextSelection.between(
+      view.state.doc.resolve(anchor),
+      view.state.doc.resolve(head),
+    ),
+  );
+  tr.setMeta("addToHistory", false);
+  tr.setMeta("preventUpdate", true);
+  view.dispatch(tr);
 }
