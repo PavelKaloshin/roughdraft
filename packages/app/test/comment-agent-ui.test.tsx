@@ -475,8 +475,9 @@ describe("Ask / Change comments", () => {
 
     // The agent's answer renders as Markdown.
     const answer = getThreadPart("c2-body");
-    expect(answer.querySelector("li strong")?.textContent).toBe("cache");
-    expect(answer.querySelector("li code")?.textContent).toBe("model");
+    // Rendered Markdown has no data-testid by design.
+    expect(answer.querySelector("li strong")?.textContent).toBe("cache"); // selector-check-ignore
+    expect(answer.querySelector("li code")?.textContent).toBe("model"); // selector-check-ignore
     await click(getThreadPart("c1-action-reply"));
     await flush();
     await typeInto(

@@ -223,11 +223,11 @@ describe("comment Markdown rendering", () => {
     const template = document.createElement("template");
     template.innerHTML = html;
 
-    expect(template.content.querySelector("strong")?.textContent).toBe("fast");
-    expect(template.content.querySelector("li code")?.textContent).toBe(
-      "cache",
-    );
-    const link = template.content.querySelector("a");
+    // Rendered Markdown has no data-testid by design.
+    expect(template.content.querySelector("strong")?.textContent).toBe("fast"); // selector-check-ignore
+    const listCode = template.content.querySelector("li code"); // selector-check-ignore
+    expect(listCode?.textContent).toBe("cache");
+    const link = template.content.querySelector("a"); // selector-check-ignore
     expect(link?.getAttribute("href")).toBe("https://example.com");
     expect(link?.getAttribute("target")).toBe("_blank");
     expect(link?.getAttribute("rel")).toBe("noopener noreferrer");

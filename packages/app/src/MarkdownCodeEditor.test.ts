@@ -96,10 +96,11 @@ describe("MarkdownCodeEditor external change highlight", () => {
     return { host, applyValueRef, render, cleanup };
   }
 
-  const highlighted = (host: HTMLElement) =>
-    Array.from(host.querySelectorAll(".external-change-highlight")).map(
-      (element) => element.textContent,
-    );
+  const highlighted = (host: HTMLElement) => {
+    // The decoration class is the behavior under test.
+    const marks = host.querySelectorAll(".external-change-highlight"); // selector-check-ignore
+    return Array.from(marks).map((element) => element.textContent);
+  };
 
   it("tints the text an external change inserted, then fades it after 1.5 s", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });

@@ -120,9 +120,10 @@ test.describe("Ask / Change comments", () => {
       "Answered",
     );
     const answer = page.getByTestId("comment-rail-c2-body");
-    await expect(answer.locator("strong")).toHaveText("first request");
-    await expect(answer.locator("li")).toHaveCount(2);
-    await expect(answer.locator("li code")).toHaveText("model");
+    // Rendered Markdown has no data-testid by design.
+    await expect(answer.locator("strong")).toHaveText("first request"); // selector-check-ignore
+    await expect(answer.locator("li")).toHaveCount(2); // selector-check-ignore
+    await expect(answer.locator("li code")).toHaveText("model"); // selector-check-ignore
     // Answered threads no longer wait for a listener.
     await expect(page.getByTestId("comment-rail-c1-agent-notice")).toHaveCount(
       0,
