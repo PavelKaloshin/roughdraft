@@ -150,6 +150,19 @@ function isAgentAuthor(author: string | null): boolean {
  * replied yet, or a follow-up on the newest user reply. Plain `comment`
  * threads never involve the agent, so they are not included.
  */
+/**
+ * Thread roots that are still open in the file: they exist and the user has
+ * not resolved them. An event for any other thread is stale.
+ */
+export function findOpenThreadRootIds(markdown: string): Set<string> {
+  const open = new Set<string>();
+  for (const item of extractRoughdraftReviewIndex(markdown).items) {
+    if (item.kind === "comment" && item.status !== "resolved")
+      open.add(item.id);
+  }
+  return open;
+}
+
 export function findUnansweredAgentThreads(
   markdown: string,
 ): Array<{ type: CommentEventType; commentId: string }> {

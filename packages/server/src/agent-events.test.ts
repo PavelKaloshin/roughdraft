@@ -2,7 +2,10 @@ import fs from "node:fs";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { extractRoughdraftReviewIndex } from "@roughdraft/rfm";
+import {
+  extractRoughdraftReviewIndex,
+  markRoughdraftResolved,
+} from "@roughdraft/rfm";
 import request from "supertest";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "./index";
@@ -522,6 +525,28 @@ describe("agent comment events", () => {
     expect((await status()).listening).toBe(true);
     await new Promise((resolve) => setTimeout(resolve, 80));
     expect((await status()).listening).toBe(false);
+  });
+
+  it("does not hand a listener an ask the user resolved before it was delivered", async () => {
+    const app = makeApp();
+    await postEvent(app, "comment.ask", "c1");
+    // The user resolves the thread in the tab (autosave writes the status).
+    fs.writeFileSync(
+      documentPath,
+      markRoughdraftResolved(fs.readFileSync(documentPath, "utf8"), {
+        targetId: "c1",
+      }),
+    );
+
+    const response = await watchComments(app, {
+      skipHandled: true,
+      listener: { id: "listener-1" },
+    });
+
+    const threadIds = (
+      response.body.events as Array<{ threadRootId: string }>
+    ).map((event) => event.threadRootId);
+    expect(threadIds).not.toContain("c1");
   });
 
   it("keeps a listener present for the grace it declares between waits", async () => {

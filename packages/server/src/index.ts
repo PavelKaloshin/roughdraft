@@ -20,6 +20,7 @@ import {
 import { AgentRegistry, type AgentThreadStatus } from "./agent-registry.js";
 import {
   buildCommentEventInput,
+  findOpenThreadRootIds,
   findUnansweredAgentThreads,
   lookupComment,
 } from "./comment-events.js";
@@ -956,6 +957,15 @@ export function createApp(options: CreateAppOptions = {}): CreateAppResult {
     // Skip ask/change events whose thread the agent already answered, so a
     // re-armed listener does not redo finished work.
     const skipHandled = req.body?.skipHandled === true;
+    const readOpenThreadRootIds = (): Set<string> => {
+      try {
+        return findOpenThreadRootIds(
+          fs.readFileSync(target.absolutePath, "utf-8"),
+        );
+      } catch {
+        return new Set();
+      }
+    };
 
     if (types.some(isCommentEventType)) {
       requeueUnansweredThreads(target);
@@ -1029,8 +1039,12 @@ export function createApp(options: CreateAppOptions = {}): CreateAppResult {
       batchWindowMs: batchWindowSeconds * 1000,
       types,
       filter: skipHandled
-        ? (event: ReviewEvent) =>
-            !isCommentEvent(event) || !agentRegistry.isHandled(event)
+        ? (event: ReviewEvent) => {
+            if (!isCommentEvent(event)) return true;
+            if (agentRegistry.isHandled(event)) return false;
+            // Resolved (or deleted) in the tab before any agent got to it.
+            return readOpenThreadRootIds().has(event.threadRootId);
+          }
         : undefined,
       signal: abort.signal,
     });
