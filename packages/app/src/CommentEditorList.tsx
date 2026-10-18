@@ -1,4 +1,16 @@
-import { Bot, Check, Pencil, Reply, Trash2, User, X } from "lucide-react";
+import {
+  Bot,
+  Check,
+  CircleCheck,
+  Clock,
+  Loader2,
+  Pencil,
+  Reply,
+  RotateCcw,
+  Trash2,
+  User,
+  X,
+} from "lucide-react";
 import {
   type KeyboardEvent,
   type MouseEvent,
@@ -9,8 +21,30 @@ import {
   useRef,
   useState,
 } from "react";
+import { NoListenerNotice } from "./AgentConnection";
+import { CommentMarkdown } from "./CommentMarkdown";
+import {
+  COMMENT_COMPOSER_MODE_LABELS,
+  COMMENT_COMPOSER_MODES,
+  type CommentComposerMode,
+  defaultCommentAgentContext,
+  getCommentSubmitEventType,
+  getThreadAgentDisplayStatus,
+  isHandledThreadStatus,
+  readComposerModePreference,
+  THREAD_AGENT_STATUS_LABELS,
+  useCommentAgent,
+  writeComposerModePreference,
+} from "./comment-agent";
+import {
+  getComposerModeShortcutLabel,
+  matchComposerModeShortcut,
+} from "./comment-shortcuts";
+import { Alert, AlertDescription, AlertTitle } from "./components/ui/alert";
+import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
 import { Textarea } from "./components/ui/textarea";
+import { ToggleGroup, ToggleGroupItem } from "./components/ui/toggle-group";
 import {
   Tooltip,
   TooltipContent,
@@ -19,9 +53,43 @@ import {
 import {
   buildCommentThreads,
   type CriticComment,
+  type CriticCommentIntent,
   type CriticCommentThread,
+  flattenCommentThreads,
+  isCriticCommentResolved,
 } from "./critic-markup";
 import { cn } from "./lib/utils";
+
+/** Metadata changes that travel with a content update. */
+export interface CommentUpdatePatch {
+  intent?: CriticCommentIntent;
+  status?: string | null;
+}
+
+export type UpdateCommentHandler = (
+  commentId: string,
+  nextContent: string,
+  patch?: CommentUpdatePatch,
+) => void;
+
+function getPlatform() {
+  return typeof navigator === "undefined" ? null : navigator.platform;
+}
+
+function findThreadRoot(
+  commentId: string,
+  commentMap: ReadonlyMap<string, CriticComment>,
+): CriticComment | null {
+  let current = commentMap.get(commentId) ?? null;
+  const seen = new Set<string>();
+  while (current?.parentCommentId && !seen.has(current.id)) {
+    seen.add(current.id);
+    const parent = commentMap.get(current.parentCommentId);
+    if (!parent) return null;
+    current = parent;
+  }
+  return current;
+}
 
 interface CommentEditorListProps {
   comments: CriticComment[];
@@ -32,7 +100,7 @@ interface CommentEditorListProps {
   testId?: string;
   interactive?: boolean;
   onDeleteComment: (commentId: string) => void;
-  onUpdateComment: (commentId: string, nextContent: string) => void;
+  onUpdateComment: UpdateCommentHandler;
   onSelectComment?: (commentId: string) => void;
   onHoverComment?: (commentId: string | null) => void;
   onFocusComment?: (commentId: string) => void;
@@ -113,6 +181,21 @@ export function CommentEditorList({
   const textareaRefs = useRef(new Map<string, HTMLTextAreaElement>());
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [editingCommentIds, setEditingCommentIds] = useState<string[]>([]);
+  const agent = useCommentAgent();
+  const [preferredMode, setPreferredMode] = useState<CommentComposerMode>(
+    readComposerModePreference,
+  );
+  const [draftModes, setDraftModes] = useState<
+    Record<string, CommentComposerMode>
+  >({});
+  const [localShowResolved, setLocalShowResolved] = useState(false);
+  const hasAgentProvider = agent !== defaultCommentAgentContext;
+  const showResolved = hasAgentProvider
+    ? agent.showResolved
+    : localShowResolved;
+  const setShowResolved = hasAgentProvider
+    ? agent.setShowResolved
+    : setLocalShowResolved;
   const threads = useMemo(() => buildCommentThreads(comments), [comments]);
   const commentMap = useMemo(
     () => new Map(comments.map((comment) => [comment.id, comment])),
@@ -195,6 +278,18 @@ export function CommentEditorList({
 
   if (comments.length === 0) return null;
 
+  function getDraftMode(commentId: string): CommentComposerMode {
+    return agent.available
+      ? (draftModes[commentId] ?? preferredMode)
+      : "comment";
+  }
+
+  const changeDraftMode = (commentId: string, mode: CommentComposerMode) => {
+    setDraftModes((current) => ({ ...current, [commentId]: mode }));
+    setPreferredMode(mode);
+    writeComposerModePreference(mode);
+  };
+
   const startEditingComment = (commentId: string) => {
     const comment = commentMap.get(commentId);
     if (!comment) return;
@@ -226,9 +321,42 @@ export function CommentEditorList({
       return;
     }
 
-    if (nextContent !== comment.content) {
-      onUpdateComment(commentId, nextContent);
+    // Only a brand-new comment (empty until now) can pick a mode or notify the
+    // agent; editing an existing comment never re-sends an event.
+    const isNewComment = comment.content.trim().length === 0;
+    const isRoot = !comment.parentCommentId;
+    const mode = isRoot && isNewComment ? getDraftMode(commentId) : "comment";
+    const patch: CommentUpdatePatch | undefined =
+      isRoot && isNewComment && mode !== "comment"
+        ? { intent: mode }
+        : undefined;
+
+    if (nextContent !== comment.content || patch) {
+      onUpdateComment(commentId, nextContent, patch);
     }
+
+    if (isNewComment && agent.available) {
+      const root = isRoot ? comment : findThreadRoot(commentId, commentMap);
+      const type = getCommentSubmitEventType({
+        isRoot,
+        intent: mode,
+        rootIntent: root?.intent,
+        authorType: comment.authorType,
+      });
+      if (type && root) {
+        agent.submitCommentEvent({
+          type,
+          commentId,
+          threadRootId: root.id,
+        });
+      }
+    }
+    setDraftModes((current) => {
+      if (!(commentId in current)) return current;
+      const next = { ...current };
+      delete next[commentId];
+      return next;
+    });
 
     setDrafts((current) => {
       const nextDrafts = { ...current };
@@ -273,42 +401,107 @@ export function CommentEditorList({
       )}
       onKeyDownCapture={handleKeyDownCapture}
     >
-      {threads.map((thread, index) => (
-        <CommentThreadNode
-          key={thread.comment.id}
-          thread={thread}
-          depth={0}
-          index={index}
-          isLast={index === threads.length - 1}
-          parentLines={[]}
-          variant={variant}
-          interactive={interactive}
-          drafts={drafts}
-          newCommentDraftIds={newCommentDraftIds}
-          editingCommentIds={editingCommentIds}
-          pendingFocusCommentId={pendingFocusCommentId}
-          selectedCommentId={selectedCommentId}
-          hoveredCommentId={hoveredCommentId}
-          textareaRefs={textareaRefs}
-          onDeleteComment={onDeleteComment}
-          onUpdateComment={onUpdateComment}
-          onSelectComment={onSelectComment}
-          onHoverComment={onHoverComment}
-          onFocusComment={onFocusComment}
-          onReplyComment={onReplyComment}
-          onStartEditingComment={startEditingComment}
-          onSubmitEditingComment={submitEditingComment}
-          onCancelEditingComment={cancelEditingComment}
-          renderCommentContent={renderCommentContent}
-          getCommentActions={getCommentActions}
-          onChangeDraft={(commentId, nextContent) => {
-            setDrafts((current) => ({
-              ...current,
-              [commentId]: nextContent,
-            }));
+      {threads.map((thread, index) =>
+        isCriticCommentResolved(thread.comment) && !showResolved ? (
+          <ResolvedThreadSummary
+            key={thread.comment.id}
+            thread={thread}
+            variant={variant}
+            interactive={interactive}
+            onShowResolved={() => setShowResolved(true)}
+          />
+        ) : (
+          <CommentThreadNode
+            key={thread.comment.id}
+            thread={thread}
+            depth={0}
+            index={index}
+            isLast={index === threads.length - 1}
+            parentLines={[]}
+            variant={variant}
+            interactive={interactive}
+            drafts={drafts}
+            newCommentDraftIds={newCommentDraftIds}
+            editingCommentIds={editingCommentIds}
+            pendingFocusCommentId={pendingFocusCommentId}
+            selectedCommentId={selectedCommentId}
+            hoveredCommentId={hoveredCommentId}
+            textareaRefs={textareaRefs}
+            onDeleteComment={onDeleteComment}
+            onUpdateComment={onUpdateComment}
+            onSelectComment={onSelectComment}
+            onHoverComment={onHoverComment}
+            onFocusComment={onFocusComment}
+            onReplyComment={onReplyComment}
+            onStartEditingComment={startEditingComment}
+            onSubmitEditingComment={submitEditingComment}
+            onCancelEditingComment={cancelEditingComment}
+            renderCommentContent={renderCommentContent}
+            getCommentActions={getCommentActions}
+            onChangeDraft={(commentId, nextContent) => {
+              setDrafts((current) => ({
+                ...current,
+                [commentId]: nextContent,
+              }));
+            }}
+            getDraftMode={getDraftMode}
+            onChangeDraftMode={changeDraftMode}
+            showResolved={showResolved}
+            onHideResolved={() => setShowResolved(false)}
+          />
+        ),
+      )}
+    </div>
+  );
+}
+
+function ResolvedThreadSummary({
+  thread,
+  variant,
+  interactive,
+  onShowResolved,
+}: {
+  thread: CriticCommentThread;
+  variant: "banner" | "rail";
+  interactive: boolean;
+  onShowResolved: () => void;
+}) {
+  const replyCount = flattenCommentThreads([thread]).length - 1;
+  const excerpt = thread.comment.content.replace(/\s+/g, " ").trim();
+
+  return (
+    <div
+      data-testid={`comment-${variant}-${thread.comment.id}-resolved`}
+      data-comment-thread-root-id={thread.comment.id}
+      data-comment-resolved="true"
+      className="flex min-w-0 items-center gap-1.5 text-[12px] leading-5 text-stone-400 dark:text-slate-500"
+    >
+      <CircleCheck className="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-500" />
+      <span className="shrink-0 font-medium text-stone-500 dark:text-slate-400">
+        Resolved
+      </span>
+      <span className="min-w-0 truncate">
+        {excerpt}
+        {replyCount > 0
+          ? ` · ${replyCount} ${replyCount === 1 ? "reply" : "replies"}`
+          : ""}
+      </span>
+      {interactive ? (
+        <Button
+          type="button"
+          variant="ghost"
+          size="xs"
+          data-testid={`comment-${variant}-${thread.comment.id}-show-resolved`}
+          className="ml-auto shrink-0 text-stone-500 dark:text-slate-400"
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            onShowResolved();
           }}
-        />
-      ))}
+        >
+          Show resolved
+        </Button>
+      ) : null}
     </div>
   );
 }
@@ -329,7 +522,7 @@ interface CommentThreadNodeProps {
   hoveredCommentId: string | null;
   textareaRefs: MutableRefObject<Map<string, HTMLTextAreaElement>>;
   onDeleteComment: (commentId: string) => void;
-  onUpdateComment: (commentId: string, nextContent: string) => void;
+  onUpdateComment: UpdateCommentHandler;
   onSelectComment?: (commentId: string) => void;
   onHoverComment?: (commentId: string | null) => void;
   onFocusComment?: (commentId: string) => void;
@@ -342,6 +535,10 @@ interface CommentThreadNodeProps {
     context: CommentActionsRenderContext,
   ) => CommentActionDefinition[];
   onChangeDraft: (commentId: string, nextContent: string) => void;
+  getDraftMode: (commentId: string) => CommentComposerMode;
+  onChangeDraftMode: (commentId: string, mode: CommentComposerMode) => void;
+  showResolved: boolean;
+  onHideResolved: () => void;
 }
 
 const COMMENT_TREE_INDENT = 16;
@@ -434,7 +631,12 @@ function CommentThreadNode({
   renderCommentContent,
   getCommentActions,
   onChangeDraft,
+  getDraftMode,
+  onChangeDraftMode,
+  showResolved,
+  onHideResolved,
 }: CommentThreadNodeProps) {
+  const agent = useCommentAgent();
   const { comment, replies } = thread;
   const hasReplies = replies.length > 0;
   const isRootThread = depth === 0;
@@ -470,7 +672,41 @@ function CommentThreadNode({
       ? "bg-[#DED8CE]/90 dark:bg-slate-600/90"
       : "bg-[#DED8CE]/85 dark:bg-slate-600/85";
   const hasCommentContent = comment.content.trim().length > 0;
-  const defaultContent = hasCommentContent ? comment.content : "Empty comment";
+  const isResolved = isRootThread && isCriticCommentResolved(comment);
+  const rootIntent = isRootThread ? comment.intent : undefined;
+  const showComposerModes =
+    isEditing && isRootThread && !hasCommentContent && agent.available;
+  const draftMode = showComposerModes ? getDraftMode(comment.id) : "comment";
+  const threadState = isRootThread ? agent.getThreadState(comment.id) : null;
+  const latestThreadComment = isRootThread
+    ? flattenCommentThreads([thread]).at(-1)
+    : undefined;
+  const agentDisplayStatus = isRootThread
+    ? getThreadAgentDisplayStatus({
+        intent: rootIntent,
+        resolved: isResolved,
+        sending: threadState?.sending ?? false,
+        serverStatus: agent.status?.threads[comment.id],
+        latestCommentIsFromAgent:
+          latestThreadComment !== undefined &&
+          latestThreadComment.id !== comment.id &&
+          latestThreadComment.authorType === "ai",
+      })
+    : null;
+  const showNoListenerNotice =
+    isRootThread &&
+    !isResolved &&
+    !!threadState?.undelivered &&
+    !agent.status?.listening &&
+    !isHandledThreadStatus(agentDisplayStatus);
+  const defaultContent = hasCommentContent ? (
+    <CommentMarkdown
+      content={comment.content}
+      testId={`comment-${variant}-${comment.id}-body`}
+    />
+  ) : (
+    "Empty comment"
+  );
   const isNewRootCommentDraft =
     isEditing &&
     depth === 0 &&
@@ -537,6 +773,35 @@ function CommentThreadNode({
             onDeleteComment(comment.id);
           },
         },
+        ...(isRootThread && hasCommentContent
+          ? [
+              isResolved
+                ? {
+                    key: "reopen",
+                    label: "Reopen thread",
+                    icon: <RotateCcw className="size-3.5" />,
+                    compact: true,
+                    onClick: (event: MouseEvent) => {
+                      event.stopPropagation();
+                      onUpdateComment(comment.id, comment.content, {
+                        status: null,
+                      });
+                    },
+                  }
+                : {
+                    key: "resolve",
+                    label: "Resolve thread",
+                    icon: <CircleCheck className="size-3.5" />,
+                    compact: true,
+                    onClick: (event: MouseEvent) => {
+                      event.stopPropagation();
+                      onUpdateComment(comment.id, comment.content, {
+                        status: "resolved",
+                      });
+                    },
+                  },
+            ]
+          : []),
       ];
   const defaultVisibleActions = isNewRootCommentDraft
     ? defaultActions.filter((action) => action.key !== "cancel")
@@ -686,8 +951,50 @@ function CommentThreadNode({
                 bodyTone,
               )}
             >
-              <div className="truncate text-xs font-semibold text-slate-900 dark:text-slate-100">
-                {authorLabel}
+              <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                <div className="max-w-full truncate text-xs font-semibold text-slate-900 dark:text-slate-100">
+                  {authorLabel}
+                </div>
+                {rootIntent ? (
+                  <Badge
+                    data-testid={`comment-${variant}-${comment.id}-intent`}
+                    variant="outline"
+                    className={cn(
+                      "h-4 px-1.5 text-[0.6rem]",
+                      rootIntent === "ask"
+                        ? "border-sky-200 bg-sky-50 text-sky-800 dark:border-sky-800 dark:bg-sky-950 dark:text-sky-300"
+                        : "border-violet-200 bg-violet-50 text-violet-800 dark:border-violet-800 dark:bg-violet-950 dark:text-violet-300",
+                    )}
+                  >
+                    {COMMENT_COMPOSER_MODE_LABELS[rootIntent]}
+                  </Badge>
+                ) : null}
+                {isResolved ? (
+                  <Badge
+                    data-testid={`comment-${variant}-${comment.id}-resolved-badge`}
+                    variant="secondary"
+                    className="h-4 px-1.5 text-[0.6rem]"
+                  >
+                    <CircleCheck />
+                    Resolved
+                  </Badge>
+                ) : null}
+                {isResolved && showResolved && interactive ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="xs"
+                    data-testid={`comment-${variant}-${comment.id}-hide-resolved`}
+                    className="h-4 px-1 text-[0.6rem] text-stone-400"
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onHideResolved();
+                    }}
+                  >
+                    Hide resolved
+                  </Button>
+                ) : null}
               </div>
               <div
                 className={cn(
@@ -700,6 +1007,55 @@ function CommentThreadNode({
               >
                 {isEditing ? null : renderedContent}
               </div>
+              {agentDisplayStatus ? (
+                <div
+                  data-testid={`comment-${variant}-${comment.id}-agent-status`}
+                  data-agent-status={agentDisplayStatus}
+                  className="mt-1 flex items-center gap-1 text-[11px] leading-4 font-medium text-stone-500 dark:text-slate-400"
+                >
+                  {agentDisplayStatus === "sending" ||
+                  agentDisplayStatus === "working" ? (
+                    <Loader2 className="size-3 animate-spin" />
+                  ) : agentDisplayStatus === "pending" ? (
+                    <Clock className="size-3" />
+                  ) : (
+                    <Check className="size-3 text-emerald-600 dark:text-emerald-500" />
+                  )}
+                  {THREAD_AGENT_STATUS_LABELS[agentDisplayStatus]}
+                </div>
+              ) : null}
+              {showNoListenerNotice ? (
+                <NoListenerNotice
+                  listenCommand={agent.listenCommand}
+                  testId={`comment-${variant}-${comment.id}-agent-notice`}
+                  className="mt-2"
+                />
+              ) : null}
+              {isRootThread && threadState?.error ? (
+                <Alert
+                  variant="destructive"
+                  data-testid={`comment-${variant}-${comment.id}-agent-error`}
+                  className="mt-2"
+                >
+                  <AlertTitle>{threadState.error}</AlertTitle>
+                  <AlertDescription>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="xs"
+                      data-testid={`comment-${variant}-${comment.id}-agent-retry`}
+                      className="mt-1"
+                      onPointerDown={(event) => event.stopPropagation()}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        agent.retryThread(comment.id);
+                      }}
+                    >
+                      Retry
+                    </Button>
+                  </AlertDescription>
+                </Alert>
+              ) : null}
               {isEditing ? (
                 <Textarea
                   data-testid={`comment-${variant}-${comment.id}-editor`}
@@ -729,6 +1085,22 @@ function CommentThreadNode({
                     event.stopPropagation();
                   }}
                   onKeyDown={(event) => {
+                    if (showComposerModes) {
+                      const target = matchComposerModeShortcut(
+                        event,
+                        getPlatform(),
+                      );
+                      if (target) {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        onChangeDraftMode(
+                          comment.id,
+                          draftMode === target ? "comment" : target,
+                        );
+                        return;
+                      }
+                    }
+
                     if (
                       (event.metaKey || event.ctrlKey) &&
                       event.key.toLowerCase() === "enter"
@@ -751,6 +1123,14 @@ function CommentThreadNode({
                   onChange={(event) => {
                     onChangeDraft(comment.id, event.target.value);
                   }}
+                />
+              ) : null}
+              {showComposerModes ? (
+                <ComposerModeToggle
+                  commentId={comment.id}
+                  variant={variant}
+                  mode={draftMode}
+                  onChange={(mode) => onChangeDraftMode(comment.id, mode)}
                 />
               ) : null}
               <div className="mt-2 flex flex-wrap items-center gap-1">
@@ -802,10 +1182,77 @@ function CommentThreadNode({
               renderCommentContent={renderCommentContent}
               getCommentActions={getCommentActions}
               onChangeDraft={onChangeDraft}
+              getDraftMode={getDraftMode}
+              onChangeDraftMode={onChangeDraftMode}
+              showResolved={showResolved}
+              onHideResolved={onHideResolved}
             />
           ))}
         </div>
       ) : null}
+    </div>
+  );
+}
+
+const composerModeHints: Record<CommentComposerMode, string> = {
+  comment: "A note for the document. Claude is not notified.",
+  ask: "Claude answers in this thread without editing the document.",
+  change: "Claude edits the document and replies with what changed.",
+};
+
+function ComposerModeToggle({
+  commentId,
+  variant,
+  mode,
+  onChange,
+}: {
+  commentId: string;
+  variant: "banner" | "rail";
+  mode: CommentComposerMode;
+  onChange: (mode: CommentComposerMode) => void;
+}) {
+  const platform = getPlatform();
+
+  return (
+    <div className="mt-2 space-y-1">
+      <ToggleGroup
+        aria-label="Comment type"
+        data-testid={`comment-${variant}-${commentId}-mode`}
+        variant="outline"
+        size="sm"
+        spacing={0}
+        value={[mode]}
+        onValueChange={(value) => {
+          const next = value[0];
+          if (next === "comment" || next === "ask" || next === "change") {
+            onChange(next);
+          }
+        }}
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={(event) => event.stopPropagation()}
+      >
+        {COMMENT_COMPOSER_MODES.map((option) => (
+          <ToggleGroupItem
+            key={option}
+            value={option}
+            data-testid={`comment-${variant}-${commentId}-mode-${option}`}
+            title={
+              option === "comment"
+                ? COMMENT_COMPOSER_MODE_LABELS[option]
+                : `${COMMENT_COMPOSER_MODE_LABELS[option]} (${getComposerModeShortcutLabel(option, platform)})`
+            }
+            className="h-6 px-2 text-[11px] aria-pressed:bg-stone-800 aria-pressed:text-white dark:aria-pressed:bg-slate-200 dark:aria-pressed:text-slate-900"
+          >
+            {COMMENT_COMPOSER_MODE_LABELS[option]}
+          </ToggleGroupItem>
+        ))}
+      </ToggleGroup>
+      <p
+        data-testid={`comment-${variant}-${commentId}-mode-hint`}
+        className="text-[11px] leading-4 text-stone-400 dark:text-slate-500"
+      >
+        {composerModeHints[mode]}
+      </p>
     </div>
   );
 }

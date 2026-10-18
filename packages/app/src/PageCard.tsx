@@ -2051,10 +2051,11 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
               selectedCommentId={selectedCommentId}
               hoveredCommentId={hoveredCommentId}
               onDeleteComment={deleteComment}
-              onUpdateComment={(commentId, nextContent) => {
+              onUpdateComment={(commentId, nextContent, patch) => {
                 updateComment(commentId, (current) => ({
                   ...current,
                   content: nextContent,
+                  ...patch,
                 }));
               }}
               onReplyComment={replyToComment}
@@ -2117,10 +2118,11 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
           hoveredChangeId={hoveredChangeId}
           contentHeight={contentHeight}
           onDeleteComment={deleteComment}
-          onUpdateComment={(commentId, nextContent) => {
+          onUpdateComment={(commentId, nextContent, patch) => {
             updateComment(commentId, (current) => ({
               ...current,
               content: nextContent,
+              ...patch,
             }));
           }}
           onReplyComment={replyToComment}

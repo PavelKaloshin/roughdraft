@@ -1,3 +1,9 @@
+import type {
+  AgentStatusSnapshot,
+  CommentEventResult,
+  CommentEventType,
+} from "./comment-agent";
+
 export interface Page {
   id: string;
   title: string;
@@ -78,6 +84,20 @@ export interface StorageBackend {
     options?: CompleteReviewOptions,
   ): Promise<CompleteReviewResult>;
   getReviewWatchStatus?(relativePath: string): Promise<ReviewWatchStatus>;
+  /**
+   * Tell a listening agent session about a saved Ask/Change comment or a
+   * follow-up reply. Call only after the comment is on disk: the server builds
+   * the event from the file, not from client text.
+   */
+  postCommentEvent?(
+    relativePath: string,
+    input: { type: CommentEventType; commentId: string },
+  ): Promise<CommentEventResult>;
+  /** Live agent presence and per-thread progress for one document. */
+  watchAgentStatus?(
+    relativePath: string,
+    onStatus: (status: AgentStatusSnapshot) => void,
+  ): () => void;
   saveAsset(file: File): Promise<StoredAsset>;
   resolveFileUrl(path: string): string | null;
   openProject(path: string): Promise<void>;
