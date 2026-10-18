@@ -110,6 +110,10 @@ After `roughdraft open` opens the document, leave the command running. Do not in
 
 After the user finishes reviewing in Roughdraft, read the Markdown file from disk and respond to any CriticMarkup comments or suggested changes.
 
+### Live review from Claude Code
+
+If you are Claude Code and have the Monitor tool, you can stay connected while the user reviews instead of blocking: run `roughdraft open --print-url "/absolute/path/to/file.md"`, give the user the URL, then arm Monitor on `roughdraft listen "/absolute/path/to/file.md"` with the 30-minute maximum `timeout_ms`. Each Monitor line is one event and ends with the command to run: answer an Ask comment in its thread with `roughdraft reply … --stdin` without editing the file; apply a Change comment with a minimal edit, then `roughdraft reply … --status applied`; a `done` line means the user clicked Done Reviewing. When `listen` expires, re-arm Monitor with the exact command it prints.
+
 Use Roughdraft-flavored CriticMarkup when reading or writing inline review feedback in Markdown. The base markers are:
 
 Comment: `{>>comment<<}`
