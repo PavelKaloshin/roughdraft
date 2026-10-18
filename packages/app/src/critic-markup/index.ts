@@ -8,7 +8,13 @@ import {
   type Tokens,
 } from "marked";
 import type TurndownService from "turndown";
-import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import {
+  isMap,
+  isScalar,
+  parseDocument,
+  parse as parseYaml,
+  Document as YamlDocument,
+} from "yaml";
 
 // Endmatter is read by people too: write multiline bodies as literal `|`
 // blocks and never re-wrap long lines (the default folds them with `>`).
@@ -482,21 +488,77 @@ function serializeReviewEndmatter(
     return existingEndmatter;
   }
 
-  const data: Record<string, unknown> = { ...(parsed.data ?? {}) };
-  if (commentEntries.size > 0) {
-    data.comments = Object.fromEntries(commentEntries);
-  } else {
-    delete data.comments;
-  }
-  if (suggestionEntries.size > 0) {
-    data.suggestions = Object.fromEntries(suggestionEntries);
-  } else {
-    delete data.suggestions;
+  // Edit the existing YAML in place (Document API), so entries and keys the
+  // user did not change keep their exact bytes: quotes, comments, blank
+  // lines, flow style. Only changed keys and new entries are re-serialized.
+  const document = parseEndmatterDocument(existingEndmatter);
+  updateEndmatterSection(document, "comments", parsed.comments, commentEntries);
+  updateEndmatterSection(
+    document,
+    "suggestions",
+    parsed.suggestions,
+    suggestionEntries,
+  );
+
+  if (!isMap(document.contents) || document.contents.items.length === 0) {
+    return null;
   }
 
-  if (Object.keys(data).length === 0) return null;
+  return `---\n${document.toString(ENDMATTER_YAML_OPTIONS)}`;
+}
 
-  return `---\n${stringifyYaml(data, ENDMATTER_YAML_OPTIONS)}`;
+function parseEndmatterDocument(endmatter: string | null): YamlDocument {
+  if (endmatter) {
+    const parsed = parseDocument(
+      endmatter.replace(/^---[ \t]*(?:\r\n|\n)/, ""),
+    );
+    if (parsed.errors.length === 0 && isMap(parsed.contents)) {
+      return parsed as unknown as YamlDocument;
+    }
+  }
+  // Unparseable endmatter was never usable review state; start over, as the
+  // previous whole-object writer did.
+  return new YamlDocument({});
+}
+
+function updateEndmatterSection(
+  document: YamlDocument,
+  section: "comments" | "suggestions",
+  existing: Map<string, Record<string, unknown>>,
+  next: Map<string, Record<string, unknown>>,
+) {
+  if (next.size === 0) {
+    document.deleteIn([section]);
+    return;
+  }
+  // A section that is missing or not a map is rewritten as a whole.
+  if (!isMap(document.getIn([section], true))) {
+    document.setIn([section], document.createNode({}));
+  }
+
+  for (const id of existing.keys()) {
+    if (!next.has(id)) document.deleteIn([section, id]);
+  }
+
+  for (const [id, entry] of next) {
+    const current = existing.get(id);
+    if (!current || !isMap(document.getIn([section, id], true))) {
+      const node = document.createNode(entry);
+      // Match the spec's examples (and rfm): quote `at`.
+      const at = node.get("at", true);
+      if (isScalar(at)) at.type = "QUOTE_DOUBLE";
+      document.setIn([section, id], node);
+      continue;
+    }
+
+    for (const key of Object.keys(current)) {
+      if (!(key in entry)) document.deleteIn([section, id, key]);
+    }
+    for (const [key, value] of Object.entries(entry)) {
+      if (current[key] === value) continue;
+      document.setIn([section, id, key], value);
+    }
+  }
 }
 
 export function createNextCommentId(
@@ -1538,6 +1600,18 @@ export function criticMarkdownHasReviewRail(
   parser.parse(protectRichTextRoundTripMarkdown(body));
   addEndmatterFeedback(comments, parsedEndmatter);
   return comments.size > 0 || changes.size > 0;
+}
+
+/** Only the comments of a document (inline and endmatter), without a doc. */
+export function criticMarkdownComments(
+  markdown: string,
+): Map<string, CriticComment> {
+  const { body, endmatter } = splitYamlDocumentMetadata(markdown);
+  const parsedEndmatter = parseReviewEndmatter(endmatter);
+  const { parser, comments } = createCriticMarked(undefined, parsedEndmatter);
+  parser.parse(protectRichTextRoundTripMarkdown(body));
+  addEndmatterFeedback(comments, parsedEndmatter);
+  return comments;
 }
 
 export function criticMarkdownToRenderedHtml(

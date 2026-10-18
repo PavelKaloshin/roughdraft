@@ -1,5 +1,11 @@
 import { createContext, useContext } from "react";
-import type { CriticComment, CriticCommentIntent } from "./critic-markup";
+import {
+  buildCommentThreads,
+  type CriticComment,
+  type CriticCommentIntent,
+  flattenCommentThreads,
+  isCriticCommentResolved,
+} from "./critic-markup";
 
 /**
  * Client-side contract for talking to a Claude Code session through comment
@@ -81,6 +87,33 @@ export function getCommentSubmitEventType({
   }
   if (authorType === "ai") return null;
   return rootIntent ? "comment.followup" : null;
+}
+
+/** An unresolved Ask/Change thread in the document. */
+export interface OpenAgentThread {
+  rootId: string;
+  intent: CriticCommentIntent;
+  /** The thread's latest comment (the root itself when it has no replies). */
+  latestCommentId: string;
+  latestCommentIsFromAgent: boolean;
+}
+
+export function getOpenAgentThreads(
+  comments: Iterable<CriticComment>,
+): OpenAgentThread[] {
+  const threads: OpenAgentThread[] = [];
+  for (const thread of buildCommentThreads(comments)) {
+    const root = thread.comment;
+    if (!root.intent || isCriticCommentResolved(root)) continue;
+    const latest = flattenCommentThreads([thread]).at(-1) ?? root;
+    threads.push({
+      rootId: root.id,
+      intent: root.intent,
+      latestCommentId: latest.id,
+      latestCommentIsFromAgent: latest.authorType === "ai",
+    });
+  }
+  return threads;
 }
 
 export function isHandledThreadStatus(

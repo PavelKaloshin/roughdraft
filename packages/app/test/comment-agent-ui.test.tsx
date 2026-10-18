@@ -141,6 +141,11 @@ function setupDomMocks() {
     },
   });
   window.scrollBy = vi.fn();
+  // jsdom has no layout, so `offsetParent` is always null and the composer
+  // never auto-focuses (which is what ends its pending-focus state).
+  vi.spyOn(HTMLElement.prototype, "offsetParent", "get").mockReturnValue(
+    document.body,
+  );
 }
 
 let container: HTMLDivElement;
@@ -487,6 +492,139 @@ describe("Ask / Change comments", () => {
       commentId: "c3",
     });
     expect(server.diskAtEachEvent[0]).toContain("body: And the model load?");
+  });
+
+  const plainThread = [
+    "Cold start {==target==}{>>Plain note<<}{#c1}.",
+    "",
+    "---",
+    "comments:",
+    "  c1:",
+    "    by: user",
+    '    at: "2026-10-18T12:00:00.000Z"',
+    "",
+  ].join("\n");
+
+  it("lets a reply escalate a plain thread to Ask, then sends a follow-up", async () => {
+    const server = createFakeServer({ initialContent: plainThread });
+    await renderWorkspace(server);
+    await click(getThreadPart("c1"));
+    await flush();
+    await click(getThreadPart("c1-action-reply"));
+    await flush();
+
+    // A reply in a plain thread starts as a plain comment.
+    expect(getThreadPart("c2-mode-comment").getAttribute("aria-pressed")).toBe(
+      "true",
+    );
+    await click(getThreadPart("c2-mode-ask"));
+    await typeInto(
+      getThreadPart<HTMLTextAreaElement>("c2-editor"),
+      "Claude, why this?",
+    );
+    await click(getThreadPart("c2-action-save"));
+    await flush(6);
+
+    expect(server.postCommentEvent).toHaveBeenCalledTimes(1);
+    expect(server.postCommentEvent).toHaveBeenCalledWith("plan.md", {
+      type: "comment.followup",
+      commentId: "c2",
+    });
+    // The thread root carried the intent on disk before the event went out.
+    expect(server.diskAtEachEvent[0]).toMatch(
+      / {2}c1:\n( {4}.*\n)* {4}intent: ask\n/,
+    );
+    expect(server.diskAtEachEvent[0]).toContain("body: Claude, why this?");
+    expect(server.diskAtEachEvent[0]).not.toMatch(
+      / {2}c2:\n( {4}.*\n)* {4}intent:/,
+    );
+    expect(getThreadPart("c1-intent").textContent).toBe("Ask");
+  });
+
+  it("keeps a plain reply in a plain thread silent", async () => {
+    const server = createFakeServer({ initialContent: plainThread });
+    await renderWorkspace(server);
+    await click(getThreadPart("c1"));
+    await flush();
+    await click(getThreadPart("c1-action-reply"));
+    await flush();
+    await typeInto(getThreadPart<HTMLTextAreaElement>("c2-editor"), "Noted.");
+    await click(getThreadPart("c2-action-save"));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 700));
+    });
+    await flush();
+
+    expect(server.disk.content).toContain("body: Noted.");
+    expect(server.disk.content).not.toContain("intent");
+    expect(server.postCommentEvent).not.toHaveBeenCalled();
+  });
+
+  it("offers no mode picker when replying in an Ask thread or editing a comment", async () => {
+    const server = createFakeServer({
+      initialContent: plainThread.replace(
+        '    at: "2026-10-18T12:00:00.000Z"\n',
+        '    at: "2026-10-18T12:00:00.000Z"\n    intent: ask\n',
+      ),
+    });
+    await renderWorkspace(server);
+    await click(getThreadPart("c1"));
+    await flush();
+    await click(getThreadPart("c1-action-reply"));
+    await flush();
+    expect(getThreadPart("c2-editor")).not.toBeNull();
+    expect(queryThreadPart("c2-mode")).toBeNull();
+
+    await click(getThreadPart("c2-action-cancel"));
+    await flush();
+    await click(getThreadPart("c1-action-edit"));
+    await flush();
+    expect(getThreadPart("c1-editor")).not.toBeNull();
+    expect(queryThreadPart("c1-mode")).toBeNull();
+  });
+
+  it("drops the header no-listener notice once the waiting thread is resolved", async () => {
+    const server = createFakeServer({ initialContent: "Cold start target.\n" });
+    await renderWorkspace(server);
+    await addCommentOn("target");
+    await click(getThreadPart("c1-mode-change"));
+    await typeInto(getThreadPart<HTMLTextAreaElement>("c1-editor"), "Fix it");
+    await click(getThreadPart("c1-action-save"));
+    await flush(6);
+    expect(query("agent-no-listener-notice")).not.toBeNull();
+
+    await click(getThreadPart("c1-action-resolve"));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 700));
+    });
+    // The server's in-memory status still lists the thread as pending.
+    await act(async () => {
+      server.pushStatus({
+        listening: false,
+        listenerCount: 0,
+        threads: { c1: "pending" },
+      });
+    });
+    await flush();
+
+    expect(server.disk.content).toContain("status: resolved");
+    expect(query("agent-no-listener-notice")).toBeNull();
+  });
+
+  it("drops the header no-listener notice once the waiting thread is deleted", async () => {
+    const server = createFakeServer({ initialContent: "Cold start target.\n" });
+    await renderWorkspace(server);
+    await addCommentOn("target");
+    await click(getThreadPart("c1-mode-ask"));
+    await typeInto(getThreadPart<HTMLTextAreaElement>("c1-editor"), "Why?");
+    await click(getThreadPart("c1-action-save"));
+    await flush(6);
+    expect(query("agent-no-listener-notice")).not.toBeNull();
+
+    await click(getThreadPart("c1-action-delete"));
+    await flush();
+
+    expect(query("agent-no-listener-notice")).toBeNull();
   });
 
   it("resolves a thread into the file and collapses it until shown", async () => {

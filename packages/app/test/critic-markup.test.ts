@@ -241,7 +241,8 @@ describe("CriticMarkup comments", () => {
     expect(output).toContain("suggestions:");
     expect(output).toContain("s1:");
     expect(output).toContain("s2:");
-    expect(output).toContain("at: 2026-05-24T11:00:00.000Z");
+    // New entries quote `at`, like rfm and the spec's examples.
+    expect(output).toContain('at: "2026-05-24T11:00:00.000Z"');
   });
 
   it("removes deleted comments and replies from YAML endmatter", () => {

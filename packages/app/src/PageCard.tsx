@@ -7,6 +7,14 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { CommentEditorList } from "./CommentEditorList";
 import {
+  applyCommentIdRenames,
+  buildCommentIdRenameTransaction,
+  type CommentIdRename,
+  CommentDraftRenamesContext,
+  collectMarkedCommentIds,
+  planDraftsAcrossExternalChange,
+} from "./comment-draft-renames";
+import {
   type CriticChangeAttrs,
   type CriticComment,
   createCriticChange,
@@ -32,7 +40,10 @@ import { addExternalChangeHighlight } from "./external-change-highlight";
 import { buildExternalContentTransaction } from "./external-content-sync";
 import { cn } from "./lib/utils";
 import { mergeMarkdown } from "./markdown-merge";
-import { MarkdownCodeEditor } from "./MarkdownCodeEditor";
+import {
+  type ApplyCodeValueOptions,
+  MarkdownCodeEditor,
+} from "./MarkdownCodeEditor";
 import {
   buildLocationForLinkedMarkdownDocument,
   joinPath,
@@ -141,7 +152,9 @@ interface CodeEditorSurfaceProps {
   layout: "default" | "embedded-demo";
   onMarkdownChange: (markdown: string) => void;
   outlineJumpRequest: OutlineJumpRequest | null;
-  applyValueRef: { current: ((value: string) => void) | null };
+  applyValueRef: {
+    current: ((value: string, options?: ApplyCodeValueOptions) => void) | null;
+  };
 }
 
 export interface DraftSuggestionState {
@@ -317,6 +330,7 @@ function addCommentIdsToAnchor(
   editor: Editor | null,
   anchorCommentId: string,
   commentIdsToAdd: string[],
+  options: { silent?: boolean } = {},
 ): string[] | null {
   if (!editor) return null;
 
@@ -356,6 +370,10 @@ function addCommentIdsToAnchor(
 
   if (!found) return null;
 
+  if (options.silent) {
+    tr.setMeta("addToHistory", false);
+    tr.setMeta("preventUpdate", true);
+  }
   editor.view.dispatch(tr);
   return nextCommentIds;
 }
@@ -660,6 +678,9 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
   const [newCommentDraftIds, setNewCommentDraftIds] = useState<string[]>([]);
   const newCommentDraftIdsRef = useRef<string[]>([]);
   newCommentDraftIdsRef.current = newCommentDraftIds;
+  const [commentDraftRenames, setCommentDraftRenames] = useState<
+    readonly CommentIdRename[]
+  >([]);
   // Bumped when an external change rewrites part of the doc, so DOM listeners
   // bound to rendered comment/change anchors are re-attached.
   const [externalContentRevision, setExternalContentRevision] = useState(0);
@@ -1342,15 +1363,35 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
       headingSpacingRef.current = parsed.headingSpacing;
 
       // An open comment draft lives only in the editor until it is submitted;
-      // keep it (and its anchor) across the external change.
-      const draftIds = newCommentDraftIdsRef.current.filter(
-        (id) => !parsed.comments.has(id) && commentsRef.current.has(id),
+      // keep it (and its anchor) across the external change. A draft whose id
+      // the change claims (the agent added its own `c2`) moves to a fresh id.
+      const { drafts, renames } = planDraftsAcrossExternalChange(
+        newCommentDraftIdsRef.current,
+        commentsRef.current,
+        parsed.comments,
       );
-      const nextComments = new Map(parsed.comments);
-      for (const id of draftIds) {
-        const draft = commentsRef.current.get(id);
-        if (draft) nextComments.set(id, draft);
+      if (renames.length > 0) {
+        const renameTr = buildCommentIdRenameTransaction(
+          currentEditor.state,
+          renames,
+        );
+        if (renameTr) currentEditor.view.dispatch(renameTr);
+        const rename = (id: string | null) =>
+          id == null ? id : applyCommentIdRenames(id, renames);
+        newCommentDraftIdsRef.current = newCommentDraftIdsRef.current.map(
+          (id) => applyCommentIdRenames(id, renames),
+        );
+        setNewCommentDraftIds((current) =>
+          current.map((id) => applyCommentIdRenames(id, renames)),
+        );
+        setSelectedCommentId(rename);
+        setHoveredCommentId(rename);
+        setPendingFocusCommentId(rename);
+        setCommentDraftRenames((current) => [...current, ...renames]);
       }
+      const draftIds = [...drafts.keys()];
+      const nextComments = new Map(parsed.comments);
+      for (const [id, draft] of drafts) nextComments.set(id, draft);
       commentsRef.current = nextComments;
       setComments(nextComments);
 
@@ -1385,6 +1426,16 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
             : current,
         );
         setExternalContentRevision((current) => current + 1);
+      }
+
+      // A reply draft is anchored by adding its id to the thread's anchor; if
+      // the change rewrote that anchor (the agent replied too), re-attach it.
+      const markedIds = collectMarkedCommentIds(currentEditor.state.doc);
+      for (const [id, draft] of drafts) {
+        if (!draft.parentCommentId || markedIds.has(id)) continue;
+        addCommentIdsToAnchor(currentEditor, draft.parentCommentId, [id], {
+          silent: true,
+        });
       }
 
       refreshCriticChanges();
@@ -1890,6 +1941,10 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
       nextComments.set(comment.id, comment);
       commentsRef.current = nextComments;
       setComments(nextComments);
+      // Tracked like a new root draft so it survives external changes.
+      setNewCommentDraftIds((current) =>
+        current.includes(comment.id) ? current : [...current, comment.id],
+      );
       setSelectedCommentId(comment.id);
       setHoveredCommentId(null);
       setPendingFocusCommentId(comment.id);
@@ -2099,7 +2154,16 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
   const hasReviewRail = comments.size > 0 || criticChanges.length > 0;
   const documentShellRef =
     useReviewLayoutShiftAnimation<HTMLDivElement>(hasReviewRail);
-  const activeComments = activeCommentIds
+  // Endmatter-only replies (e.g. an agent's answer) are not in the anchor's
+  // mark; they belong to the thread through `parentCommentId`.
+  const activeComments = [
+    ...new Set(
+      activeCommentIds.flatMap((commentId) => [
+        commentId,
+        ...getCommentDescendantIds(commentId, comments),
+      ]),
+    ),
+  ]
     .map((commentId) => comments.get(commentId))
     .filter((comment): comment is CriticComment => Boolean(comment));
   const contentCardClass =
@@ -2133,127 +2197,132 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
   );
 
   return (
-    <div
-      className="cursor-text bg-transparent"
-      data-testid="page-card-rich-text"
-    >
+    <CommentDraftRenamesContext.Provider value={commentDraftRenames}>
       <div
-        ref={documentShellRef}
-        data-testid="document-page-shell"
-        className={documentShellClass}
+        className="cursor-text bg-transparent"
+        data-testid="page-card-rich-text"
       >
-        <div className={documentMainClass}>
-          {activeComments.length > 0 ? (
-            <CommentEditorList
-              comments={activeComments}
-              className={fallbackClass}
-              testId="document-comment-fallback"
-              selectedCommentId={selectedCommentId}
-              hoveredCommentId={hoveredCommentId}
-              onDeleteComment={deleteComment}
-              onUpdateComment={(commentId, nextContent, patch) => {
-                updateComment(commentId, (current) => ({
-                  ...current,
-                  content: nextContent,
-                  ...patch,
-                }));
-              }}
-              onReplyComment={replyToComment}
-              onSelectComment={selectComment}
-              onHoverComment={setHoveredCommentId}
-              pendingFocusCommentId={pendingFocusCommentId}
-              newCommentDraftIds={newCommentDraftIds}
-              onAutoFocusComment={(commentId) => {
-                setPendingFocusCommentId((current) =>
-                  current === commentId ? null : current,
-                );
-              }}
-            />
-          ) : null}
-          <div className={contentInsetClass}>
-            <div
-              data-testid="document-content-card"
-              className={cn(contentCardClass, "px-10 py-10 sm:px-14 sm:py-14")}
-            >
-              <EditorContextMenu
-                editor={editor}
-                backend={backend}
-                resolveLinkUrl={resolveLinkUrl}
-                onAddComment={
-                  interactionMode === "viewing" ? undefined : handleAddComment
-                }
-                onSuggestDeletion={
-                  interactionMode === "viewing"
-                    ? undefined
-                    : handleSuggestDeletion
-                }
-                onSuggestReplacement={
-                  interactionMode === "viewing"
-                    ? undefined
-                    : handleSuggestReplacement
-                }
-                onSuggestInsertion={
-                  interactionMode === "viewing"
-                    ? undefined
-                    : handleSuggestInsertion
-                }
+        <div
+          ref={documentShellRef}
+          data-testid="document-page-shell"
+          className={documentShellClass}
+        >
+          <div className={documentMainClass}>
+            {activeComments.length > 0 ? (
+              <CommentEditorList
+                comments={activeComments}
+                className={fallbackClass}
+                testId="document-comment-fallback"
+                selectedCommentId={selectedCommentId}
+                hoveredCommentId={hoveredCommentId}
+                onDeleteComment={deleteComment}
+                onUpdateComment={(commentId, nextContent, patch) => {
+                  updateComment(commentId, (current) => ({
+                    ...current,
+                    content: nextContent,
+                    ...patch,
+                  }));
+                }}
+                onReplyComment={replyToComment}
+                onSelectComment={selectComment}
+                onHoverComment={setHoveredCommentId}
+                pendingFocusCommentId={pendingFocusCommentId}
+                newCommentDraftIds={newCommentDraftIds}
+                onAutoFocusComment={(commentId) => {
+                  setPendingFocusCommentId((current) =>
+                    current === commentId ? null : current,
+                  );
+                }}
+              />
+            ) : null}
+            <div className={contentInsetClass}>
+              <div
+                data-testid="document-content-card"
+                className={cn(
+                  contentCardClass,
+                  "px-10 py-10 sm:px-14 sm:py-14",
+                )}
               >
-                <div data-testid="rich-text-editor">
-                  <EditorContent editor={editor} />
-                </div>
-              </EditorContextMenu>
+                <EditorContextMenu
+                  editor={editor}
+                  backend={backend}
+                  resolveLinkUrl={resolveLinkUrl}
+                  onAddComment={
+                    interactionMode === "viewing" ? undefined : handleAddComment
+                  }
+                  onSuggestDeletion={
+                    interactionMode === "viewing"
+                      ? undefined
+                      : handleSuggestDeletion
+                  }
+                  onSuggestReplacement={
+                    interactionMode === "viewing"
+                      ? undefined
+                      : handleSuggestReplacement
+                  }
+                  onSuggestInsertion={
+                    interactionMode === "viewing"
+                      ? undefined
+                      : handleSuggestInsertion
+                  }
+                >
+                  <div data-testid="rich-text-editor">
+                    <EditorContent editor={editor} />
+                  </div>
+                </EditorContextMenu>
+              </div>
             </div>
           </div>
+          <DocumentReviewRail
+            className={reviewRailClass}
+            layout={layout === "embedded-demo" ? "flow" : "anchored"}
+            testId="document-review-rail"
+            commentGroups={commentGroups}
+            comments={comments}
+            suggestions={criticChanges}
+            selectedCommentId={selectedCommentId}
+            hoveredCommentId={hoveredCommentId}
+            selectedChangeId={selectedChangeId}
+            hoveredChangeId={hoveredChangeId}
+            contentHeight={contentHeight}
+            onDeleteComment={deleteComment}
+            onUpdateComment={(commentId, nextContent, patch) => {
+              updateComment(commentId, (current) => ({
+                ...current,
+                content: nextContent,
+                ...patch,
+              }));
+            }}
+            onReplyComment={replyToComment}
+            onSelectComment={selectComment}
+            onFocusComment={focusComment}
+            onHoverComment={setHoveredCommentId}
+            onAcceptSuggestion={acceptSuggestion}
+            onRejectSuggestion={rejectSuggestion}
+            onReplySuggestion={replyToSuggestion}
+            onSelectSuggestion={selectSuggestion}
+            onFocusSuggestion={focusSuggestion}
+            onHoverSuggestion={setHoveredChangeId}
+            pendingFocusCommentId={pendingFocusCommentId}
+            newCommentDraftIds={newCommentDraftIds}
+            onAutoFocusComment={(commentId) => {
+              setPendingFocusCommentId((current) =>
+                current === commentId ? null : current,
+              );
+            }}
+            draftSuggestion={draftSuggestion}
+            onDraftSuggestionTextChange={(text) => {
+              setDraftSuggestion((current) =>
+                current ? { ...current, text } : current,
+              );
+            }}
+            onApplyDraftSuggestion={applyDraftSuggestion}
+            onCancelDraftSuggestion={() => setDraftSuggestion(null)}
+            editor={editor}
+          />
         </div>
-        <DocumentReviewRail
-          className={reviewRailClass}
-          layout={layout === "embedded-demo" ? "flow" : "anchored"}
-          testId="document-review-rail"
-          commentGroups={commentGroups}
-          comments={comments}
-          suggestions={criticChanges}
-          selectedCommentId={selectedCommentId}
-          hoveredCommentId={hoveredCommentId}
-          selectedChangeId={selectedChangeId}
-          hoveredChangeId={hoveredChangeId}
-          contentHeight={contentHeight}
-          onDeleteComment={deleteComment}
-          onUpdateComment={(commentId, nextContent, patch) => {
-            updateComment(commentId, (current) => ({
-              ...current,
-              content: nextContent,
-              ...patch,
-            }));
-          }}
-          onReplyComment={replyToComment}
-          onSelectComment={selectComment}
-          onFocusComment={focusComment}
-          onHoverComment={setHoveredCommentId}
-          onAcceptSuggestion={acceptSuggestion}
-          onRejectSuggestion={rejectSuggestion}
-          onReplySuggestion={replyToSuggestion}
-          onSelectSuggestion={selectSuggestion}
-          onFocusSuggestion={focusSuggestion}
-          onHoverSuggestion={setHoveredChangeId}
-          pendingFocusCommentId={pendingFocusCommentId}
-          newCommentDraftIds={newCommentDraftIds}
-          onAutoFocusComment={(commentId) => {
-            setPendingFocusCommentId((current) =>
-              current === commentId ? null : current,
-            );
-          }}
-          draftSuggestion={draftSuggestion}
-          onDraftSuggestionTextChange={(text) => {
-            setDraftSuggestion((current) =>
-              current ? { ...current, text } : current,
-            );
-          }}
-          onApplyDraftSuggestion={applyDraftSuggestion}
-          onCancelDraftSuggestion={() => setDraftSuggestion(null)}
-          editor={editor}
-        />
       </div>
-    </div>
+    </CommentDraftRenamesContext.Provider>
   );
 });
 
@@ -2340,6 +2409,16 @@ const CodeEditorSurface = memo(function CodeEditorSurface({
   );
 });
 
+/** What the rich-text editor writes for markdown it loaded and did not edit. */
+function normalizeRichTextMarkdown(markdown: string): string {
+  const parsed = criticMarkdownToEditorState(markdown);
+  return editorStateToCriticMarkdown(parsed.doc, parsed.comments, {
+    frontmatter: parsed.frontmatter,
+    endmatter: parsed.endmatter,
+    headingSpacing: parsed.headingSpacing,
+  });
+}
+
 const PageCardEditorSurface = memo(function PageCardEditorSurface({
   page,
   activeDocumentPath,
@@ -2374,7 +2453,9 @@ const PageCardEditorSurface = memo(function PageCardEditorSurface({
   const editorViewModeRef = useRef<EditorViewMode>(editorViewMode);
   editorViewModeRef.current = editorViewMode;
   const richTextSyncRef = useRef<ExternalMarkdownSync | null>(null);
-  const codeApplyValueRef = useRef<((value: string) => void) | null>(null);
+  const codeApplyValueRef = useRef<
+    ((value: string, options?: ApplyCodeValueOptions) => void) | null
+  >(null);
   const performSaveRef = useRef<
     ((nextMarkdown: string) => Promise<ManualSaveResult>) | null
   >(null);
@@ -2395,7 +2476,7 @@ const PageCardEditorSurface = memo(function PageCardEditorSurface({
   const applyMarkdownToSurface = useCallback(
     (nextMarkdown: string, highlight: boolean) => {
       if (editorViewModeRef.current === "code") {
-        codeApplyValueRef.current?.(nextMarkdown);
+        codeApplyValueRef.current?.(nextMarkdown, { highlight });
       } else {
         richTextSyncRef.current?.(nextMarkdown, { highlight });
       }
@@ -2569,6 +2650,12 @@ const PageCardEditorSurface = memo(function PageCardEditorSurface({
         base: lastAcceptedMarkdownRef.current,
         mine,
         theirs,
+        // The raw editor's draft is the user's own text; only the rich-text
+        // draft is a re-serialization.
+        normalize:
+          editorViewModeRef.current === "code"
+            ? undefined
+            : normalizeRichTextMarkdown,
       });
       if (result.status === "conflict") return { status: "conflict" };
 

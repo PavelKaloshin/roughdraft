@@ -474,10 +474,26 @@ export function DocumentWorkspace({
     async () => saveControllerRef.current?.flushSave(),
     [],
   );
+  // The editor's current markdown (draft), for thread state shown in the
+  // header. Starts from the loaded page and follows every local change.
+  const [localDocumentMarkdown, setLocalDocumentMarkdown] = useState<
+    string | null
+  >(documentPage?.content ?? null);
+  useEffect(() => {
+    setLocalDocumentMarkdown(documentPage?.content ?? null);
+  }, [documentPage?.content]);
+  const handleLocalContentChange = useCallback(
+    (markdown: string) => {
+      setLocalDocumentMarkdown(markdown);
+      onDocumentLocalContentChange(markdown);
+    },
+    [onDocumentLocalContentChange],
+  );
   const commentAgent = useCommentAgentController({
     backend,
     documentPath: activeDocumentPath,
     absolutePath: documentCopyPath,
+    markdown: localDocumentMarkdown,
     flushSave: flushDocumentSave,
   });
 
@@ -1252,7 +1268,7 @@ export function DocumentWorkspace({
                 backend={backend}
                 onCommentRailPresenceChange={setDocumentHasComments}
                 onDirtyStateChange={handleDocumentDirtyStateChange}
-                onLocalContentChange={onDocumentLocalContentChange}
+                onLocalContentChange={handleLocalContentChange}
                 onSaveControllerChange={handleSaveControllerChange}
                 saveBlocked={documentDiskChangeState !== "clean"}
                 forceResetKey={documentForceResetKey}

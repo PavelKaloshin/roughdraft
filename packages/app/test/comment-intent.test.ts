@@ -204,3 +204,78 @@ describe("comment resolved status", () => {
     );
   });
 });
+
+// The app saves the whole document; its endmatter write must only touch the
+// entries the user changed, so agent/merge diffs stay small (like rfm).
+describe("endmatter writes keep untouched entries byte-identical", () => {
+  const body = [
+    "Keep {==this claim==}{>>Why?<<}{#c1} and {==that==}{>>Note<<}{#c5}.",
+    "",
+  ];
+  const endmatter = [
+    "---",
+    "# review state",
+    "comments:",
+    "  c1:",
+    "    by: pavel",
+    '    at: "2026-10-18T12:00:00.000Z"',
+    "    intent: ask",
+    "",
+    "  c2:",
+    "    body: 'Single-quoted: kept'",
+    "    by: AI",
+    "    at: 2026-10-18T12:01:00.000Z",
+    "    re: c1",
+    "  c5:",
+    "    by: user",
+    '    at: "2026-10-18T12:02:00.000Z"',
+    "workflow:",
+    "  owner: editorial # who triages",
+    "",
+  ];
+  const markdown = [...body, ...endmatter].join("\n");
+
+  it("resolving one thread adds a line to that entry only", () => {
+    const output = roundTrip(markdown, (comments) =>
+      update(comments, "c5", { status: "resolved" }),
+    );
+
+    expect(output).toBe(
+      [
+        ...body,
+        ...endmatter.slice(0, 16),
+        "    status: resolved",
+        ...endmatter.slice(16),
+      ].join("\n"),
+    );
+  });
+
+  it("a new reply appends its own lines (literal block, quoted at)", () => {
+    const output = roundTrip(markdown, (comments) => {
+      comments.set(
+        "c6",
+        createCriticComment({
+          id: "c6",
+          content: "Line one\nline two",
+          parentCommentId: "c1",
+          createdAt: "2026-10-18T12:03:00.000Z",
+        }),
+      );
+    });
+
+    expect(output).toBe(
+      [
+        ...body,
+        ...endmatter.slice(0, 16),
+        "  c6:",
+        "    by: user",
+        '    at: "2026-10-18T12:03:00.000Z"',
+        "    body: |-",
+        "      Line one",
+        "      line two",
+        "    re: c1",
+        ...endmatter.slice(16),
+      ].join("\n"),
+    );
+  });
+});

@@ -3,6 +3,7 @@ import { EditorView } from "@codemirror/view";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { describe, expect, it, vi } from "vitest";
+import { EXTERNAL_CHANGE_HIGHLIGHT_MS } from "./external-change-highlight";
 import {
   computeMinimalTextChange,
   createMarkdownCodeEditorExtensions,
@@ -60,6 +61,95 @@ describe("MarkdownCodeEditor external value changes", () => {
 
     await act(async () => root.unmount());
     host.remove();
+  });
+});
+
+describe("MarkdownCodeEditor external change highlight", () => {
+  async function renderEditor(value: string) {
+    (
+      globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
+    ).IS_REACT_ACT_ENVIRONMENT = true;
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    const applyValueRef: {
+      current:
+        | ((value: string, options?: { highlight?: boolean }) => void)
+        | null;
+    } = { current: null };
+    const render = async (nextValue: string) => {
+      await act(async () => {
+        root.render(
+          createElement(MarkdownCodeEditor, {
+            value: nextValue,
+            onChange: vi.fn(),
+            applyValueRef,
+          }),
+        );
+      });
+    };
+    await render(value);
+    const cleanup = async () => {
+      await act(async () => root.unmount());
+      host.remove();
+    };
+    return { host, applyValueRef, render, cleanup };
+  }
+
+  const highlighted = (host: HTMLElement) =>
+    Array.from(host.querySelectorAll(".external-change-highlight")).map(
+      (element) => element.textContent,
+    );
+
+  it("tints the text an external change inserted, then fades it after 1.5 s", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const initial = "# Title\n\nFirst paragraph.\n\nFifth paragraph.\n";
+    const editor = await renderEditor(initial);
+
+    await act(async () => {
+      editor.applyValueRef.current?.(
+        initial.replace("Fifth paragraph.", "Fifth, from the agent."),
+        { highlight: true },
+      );
+    });
+
+    expect(highlighted(editor.host).join("")).toBe(", from the agent");
+
+    await act(async () => {
+      vi.advanceTimersByTime(EXTERNAL_CHANGE_HIGHLIGHT_MS);
+    });
+    expect(highlighted(editor.host)).toEqual([]);
+
+    vi.useRealTimers();
+    await editor.cleanup();
+  });
+
+  it("flashes the surrounding line for a pure deletion", async () => {
+    const initial = "Keep this.\n\nDrop this sentence. Keep that.\n";
+    const editor = await renderEditor(initial);
+
+    await act(async () => {
+      editor.applyValueRef.current?.(
+        initial.replace("Drop this sentence. ", ""),
+        { highlight: true },
+      );
+    });
+
+    expect(highlighted(editor.host)).toEqual(["Keep that."]);
+    await editor.cleanup();
+  });
+
+  it("does not highlight values that are not external changes", async () => {
+    const initial = "Alpha.\n";
+    const editor = await renderEditor(initial);
+
+    await editor.render("Alpha, reset.\n");
+    await act(async () => {
+      editor.applyValueRef.current?.("Alpha, silent.\n");
+    });
+
+    expect(highlighted(editor.host)).toEqual([]);
+    await editor.cleanup();
   });
 });
 

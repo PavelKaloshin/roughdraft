@@ -201,4 +201,68 @@ test.describe("Ask / Change comments", () => {
       "intent: change",
     );
   });
+
+  test("escalates a plain thread to Ask from a reply and sends a follow-up @smoke", async ({
+    page,
+    request,
+  }) => {
+    const relativePath = "escalate.md";
+    writeProjectFile(
+      projectDir,
+      relativePath,
+      [
+        "# Escalate",
+        "",
+        "Cold start {==takes about four seconds==}{>>Seems slow.<<}{#c1}.",
+        "",
+        "---",
+        "comments:",
+        "  c1:",
+        "    by: user",
+        '    at: "2026-10-18T12:00:00.000Z"',
+        "",
+      ].join("\n"),
+    );
+    const watch = request.post("/api/review-events/watch", {
+      data: {
+        projectPath: projectDir,
+        path: relativePath,
+        types: ["comment.followup"],
+        timeoutSeconds: 20,
+      },
+    });
+    pendingWatch = watch;
+
+    await openMarkdownFile(page, path.join(projectDir, relativePath));
+    await page.getByTestId("comment-thread-c1").click();
+    await page.getByTestId("comment-rail-c1-action-reply").click();
+    await expect(
+      page.getByTestId("comment-rail-c2-mode-comment"),
+    ).toHaveAttribute("aria-pressed", "true");
+    await page.getByTestId("comment-rail-c2-mode-ask").click();
+    await page
+      .getByTestId("comment-rail-c2-editor")
+      .fill("Claude, what dominates it?");
+    await snap(page, "28-agent-reply-escalates-plain-thread");
+    await page.getByTestId("comment-rail-c2-action-save").click();
+
+    const payload = (await (
+      (await watch) as { json: () => Promise<unknown> }
+    ).json()) as { events: Array<Record<string, unknown>> };
+    expect(payload.events).toHaveLength(1);
+    expect(payload.events[0]).toMatchObject({
+      type: "comment.followup",
+      commentId: "c2",
+      intent: "ask",
+    });
+    const saved = readProjectFile(projectDir, relativePath);
+    expect(saved).toMatch(/ {2}c1:\n(?: {4}.*\n)*? {4}intent: ask\n/);
+    expect(saved).toMatch(
+      / {2}c2:\n(?: {4}.*\n)*? {4}body: Claude, what dominates it\?\n/,
+    );
+    await expect(page.getByTestId("comment-rail-c1-intent")).toHaveText("Ask");
+    await expect(page.getByTestId("comment-rail-c1-agent-status")).toHaveText(
+      "Waiting for Claude",
+    );
+  });
 });
