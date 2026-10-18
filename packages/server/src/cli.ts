@@ -10,12 +10,6 @@ import {
   validateRoughdraftMarkdown,
 } from "@roughdraft/rfm";
 import {
-  ROUGHDRAFT_BIND_HOST,
-  ROUGHDRAFT_DEFAULT_PORT,
-  ROUGHDRAFT_LOOPBACK_HOSTS,
-  ROUGHDRAFT_PUBLIC_HOST,
-} from "./network.js";
-import {
   type AgentCliTarget,
   DEFAULT_LISTEN_MAX_SECONDS,
   type ParsedAgentArgs,
@@ -25,6 +19,12 @@ import {
   runReply,
   runResolve,
 } from "./agent-cli.js";
+import {
+  ROUGHDRAFT_BIND_HOST,
+  ROUGHDRAFT_DEFAULT_PORT,
+  ROUGHDRAFT_LOOPBACK_HOSTS,
+  ROUGHDRAFT_PUBLIC_HOST,
+} from "./network.js";
 import { findAvailablePort } from "./ports.js";
 import { resolveUpdateStatus, type UpdateStatus } from "./update-status.js";
 
@@ -1057,8 +1057,9 @@ function printCommandHelp(
       "Registers as the agent listening to one Markdown file and prints exactly one",
     );
     log(
-      "line per Ask, Change, or follow-up comment posted from Roughdraft. Each line",
+      "line per Ask, Change, or follow-up comment posted from Roughdraft, and one",
     );
+    log("when the user clicks Done Reviewing. Each line");
     log(
       "is self-contained and ends with the command to answer it. Designed to run",
     );
@@ -1070,6 +1071,9 @@ function printCommandHelp(
     log("  [roughdraft] listening on <file> (session <id>) since=<seq>");
     log(
       '  [roughdraft] ask c3 seq=12 file=<file> by=<who> anchor="..." text="..." → ...',
+    );
+    log(
+      "  [roughdraft] done seq=13 file=<file> comments=<n> unresolved=<n> → ...",
     );
     log(
       "  [roughdraft] listen expired; re-arm with: roughdraft listen <file> --since <seq>",

@@ -1,6 +1,10 @@
 import crypto from "node:crypto";
 import path from "node:path";
-import type { CommentEvent } from "./review-events.js";
+import type {
+  CommentEvent,
+  ReviewCompletedEvent,
+  ReviewEvent,
+} from "./review-events.js";
 
 /**
  * `roughdraft listen | reply | ack | resolve`: the agent half of comment
@@ -10,6 +14,7 @@ import type { CommentEvent } from "./review-events.js";
  */
 
 export const LISTEN_EVENT_TYPES = [
+  "review.completed",
   "comment.ask",
   "comment.change",
   "comment.followup",
@@ -43,7 +48,7 @@ export interface AgentCliTarget {
 }
 
 interface WatchPayload {
-  events: CommentEvent[];
+  events: ReviewEvent[];
   timedOut: boolean;
   nextSequence: number;
   latestSequence?: number;
@@ -117,6 +122,28 @@ export function formatListenEventLine(
   return parts.join(" ");
 }
 
+/** The user clicked Done Reviewing in the browser. */
+export function formatListenDoneLine(
+  event: ReviewCompletedEvent,
+  options: { documentPath: string },
+): string {
+  const parts = [
+    "[roughdraft] done",
+    `seq=${event.sequence}`,
+    `file=${shellQuote(options.documentPath)}`,
+    `comments=${event.summary.comments}`,
+    `unresolved=${event.summary.unresolved}`,
+  ];
+  if (event.overallComment) {
+    const text = clip(event.overallComment, MAX_TEXT_CHARS);
+    parts.push(`note="${escapeInline(text.text)}"`);
+  }
+  parts.push(
+    "→ the user clicked Done Reviewing: read the file and handle any remaining feedback",
+  );
+  return parts.join(" ");
+}
+
 function isRetryableError(error: unknown): boolean {
   if (error instanceof FatalListenError) return false;
   // Network failures (server restarting), undici timeouts, our own round
@@ -143,6 +170,7 @@ export async function runListen(
   let instanceId: string | null = null;
   let announced = false;
   let retryDelay = RETRY_MIN_DELAY_MS;
+  let completedBefore = 0;
 
   const poll = async (timeoutSeconds: number): Promise<WatchPayload> => {
     const response = await io.fetchImpl(watchUrl, {
@@ -216,6 +244,9 @@ export async function runListen(
 
     if (!announced) {
       announced = true;
+      if (options.since === undefined) {
+        completedBefore = payload.latestSequence ?? payload.nextSequence - 1;
+      }
       io.log(
         `[roughdraft] listening on ${file} (${sessionId ? `session ${sessionId}` : "no session id"}) since=${cursor}`,
       );
@@ -223,13 +254,22 @@ export async function runListen(
     }
 
     for (const event of payload.events) {
+      cursor = Math.max(cursor, event.sequence);
+      if (event.type === "review.completed") {
+        // Unanswered comment events are replayed on purpose, but a Done
+        // Reviewing from before this listener started is stale news.
+        if (event.sequence <= completedBefore) continue;
+        io.log(
+          formatListenDoneLine(event, { documentPath: target.documentPath }),
+        );
+        continue;
+      }
       io.log(
         formatListenEventLine(event, {
           cliName: cli,
           documentPath: target.documentPath,
         }),
       );
-      cursor = Math.max(cursor, event.sequence);
     }
     cursor = Math.max(cursor, payload.nextSequence - 1);
   }

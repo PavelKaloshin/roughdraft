@@ -228,6 +228,36 @@ describe("agent CLI commands", () => {
     );
   });
 
+  it("reports Done Reviewing as a line, but not a completion from before it started", async () => {
+    const postCompleted = () =>
+      fetch(`http://127.0.0.1:${server.port}/api/review-events`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectPath: projectDir, path: "plan.md" }),
+      });
+    // An old review session finished before this listener existed.
+    await postCompleted();
+
+    const { deps, logs } = makeDeps();
+    const listening = runCli(
+      ["listen", documentPath, "--max-seconds", "1"],
+      deps,
+    );
+    await waitForLog(logs, (line) => line.includes("listening on"));
+    await postCompleted();
+    await listening;
+
+    const doneLines = logs.filter((line) =>
+      line.startsWith("[roughdraft] done"),
+    );
+    expect(doneLines).toHaveLength(1);
+    expect(doneLines[0]).toMatch(
+      new RegExp(
+        `^\\[roughdraft\\] done seq=\\d+ file=${documentPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} comments=2 unresolved=2 → the user clicked Done Reviewing: read the file and handle any remaining feedback`,
+      ),
+    );
+  });
+
   it("replays only unanswered events when started without --since", async () => {
     await postEvent("comment.ask", "c1");
     await postEvent("comment.change", "c2");
@@ -249,7 +279,8 @@ describe("agent CLI commands", () => {
   it("keeps listening across a server restart", async () => {
     const { deps, logs } = makeDeps();
     const listening = runCli(
-      ["listen", documentPath, "--max-seconds", "3"],
+      // Leaves room for reconnect backoff (0.5s, 1s, 2s…) on a loaded machine.
+      ["listen", documentPath, "--max-seconds", "5"],
       deps,
     );
     await waitForLog(logs, (line) => line.includes("listening on"));
@@ -265,10 +296,10 @@ describe("agent CLI commands", () => {
     await waitForLog(
       logs,
       (line) => line.startsWith("[roughdraft] change c2 seq=1 "),
-      3_000,
+      4_500,
     );
     expect(await listening).toBe(0);
-  }, 10_000);
+  }, 12_000);
 
   it("writes a multiline reply from stdin through the server", async () => {
     const body = "Two parts:\n- cache warm-up\n- `model.load()`\n";
