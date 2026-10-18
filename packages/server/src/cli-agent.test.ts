@@ -187,7 +187,7 @@ describe("agent CLI commands", () => {
     expect(instanceId).toMatch(/^[0-9a-f-]{36}$/);
     expect(logs).toEqual([
       `[roughdraft] listening on ${documentPath} (session session-abc) since=0`,
-      `[roughdraft] ask c1 seq=1 → roughdraft ack ${documentPath} c1, answer without editing the file: roughdraft reply ${documentPath} c1 --stdin | by=pavel anchor="about \\"four\\" seconds" text="What is included?\\nAnd why \\"four\\"?"`,
+      `[roughdraft] ask c1 seq=1 → roughdraft ack ${documentPath} c1 --delegated, hand to a forked subagent that acks without --delegated and answers without editing the file: roughdraft reply ${documentPath} c1 --stdin | by=pavel anchor="about \\"four\\" seconds" text="What is included?\\nAnd why \\"four\\"?"`,
       `[roughdraft] change c2 seq=2 → roughdraft ack ${documentPath} c2, edit the file, then: roughdraft reply ${documentPath} c2 --status applied --stdin | by=pavel anchor="this paragraph" text="One sentence please."`,
       `[roughdraft] listen expired; re-arm with: roughdraft listen ${documentPath} --since 2 --instance ${instanceId}`,
     ]);
@@ -410,6 +410,29 @@ describe("agent CLI commands", () => {
     expect(status.threads).toEqual({ c2: "applied" });
   });
 
+  it("marks a thread as handed to a subagent with ack --delegated", async () => {
+    const { deps, logs } = makeDeps();
+    const threads = async () =>
+      (
+        await fetch(
+          `http://127.0.0.1:${server.port}/api/agent/status?${new URLSearchParams({ projectPath: projectDir, path: "plan.md" })}`,
+        ).then((response) => response.json())
+      ).threads;
+
+    expect(await runCli(["ack", documentPath, "c1", "--delegated"], deps)).toBe(
+      0,
+    );
+    expect(await threads()).toEqual({ c1: "delegated" });
+
+    // The subagent acks without the flag once it starts.
+    expect(await runCli(["ack", documentPath, "c1"], deps)).toBe(0);
+    expect(await threads()).toEqual({ c1: "working" });
+    expect(logs).toEqual([
+      `[roughdraft] c1 is now delegated in ${documentPath}`,
+      `[roughdraft] c1 is now working in ${documentPath}`,
+    ]);
+  });
+
   it("acks and resolves a thread", async () => {
     const { deps, logs } = makeDeps();
 
@@ -468,9 +491,14 @@ describe("agent CLI commands", () => {
 
     await runCli(["help"], deps);
     await runCli(["help", "listen"], deps);
+    await runCli(["help", "ack"], deps);
 
     const output = logs.join("\n");
-    for (const command of ["listen <file.md>", "reply <file.md> <id>"]) {
+    for (const command of [
+      "listen <file.md>",
+      "reply <file.md> <id>",
+      "roughdraft ack <file.md> <commentId> [--delegated]",
+    ]) {
       expect(output).toContain(command);
     }
     expect(output).toContain("--max-seconds <seconds>");
@@ -510,6 +538,35 @@ describe("formatListenEventLine", () => {
     expect(line).toContain(`text="${"x".repeat(300)}…"`);
     expect(line).toContain("(truncated; read comment c1 in the file)");
     expect(line).toContain("roughdraft reply '/docs/my plan.md' c1 --stdin");
+  });
+
+  it("hands an ask follow-up to a subagent with the command first", () => {
+    const line = formatListenEventLine(
+      {
+        ...baseEvent,
+        type: "comment.followup",
+        commentId: "c3",
+        threadRootId: "c1",
+        body: "And the cache?",
+      },
+      { cliName: "roughdraft", documentPath: "/docs/plan.md" },
+    );
+
+    expect(line).toBe(
+      '[roughdraft] followup c1 reply=c3 intent=ask seq=7 → roughdraft ack /docs/plan.md c1 --delegated, hand to a forked subagent that acks without --delegated and answers without editing the file: roughdraft reply /docs/plan.md c1 --stdin | by=pavel text="And the cache?"',
+    );
+  });
+
+  it("keeps the instructions of an ask well inside Monitor's line budget", () => {
+    // Monitor truncates around 480 characters; the part before "|" (what to
+    // do) must survive even with a long path.
+    const documentPath = `/Users/someone/git_repos/project/.context/${"deep/".repeat(6)}plan.md`;
+    const line = formatListenEventLine(
+      { ...baseEvent, documentPath },
+      { cliName: "roughdraft", documentPath },
+    );
+
+    expect(line.indexOf(" | ")).toBeLessThan(400);
   });
 
   it("describes a follow-up with its thread intent and the change action", () => {

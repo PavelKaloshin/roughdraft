@@ -100,11 +100,13 @@ export function formatListenEventLine(
     (event.type === "comment.followup" && event.intent === "change");
 
   // Monitor truncates long notification lines, so the command to run comes
-  // first and the (clipped) comment context last.
+  // first and the (clipped) comment context last. A change is edited by the
+  // session itself (one writer); an ask goes to a forked subagent so the
+  // answer does not wait for the session's current work.
   const ack = `${cli} ack ${file} ${threadId}`;
   const action = wantsChange
     ? `${ack}, edit the file, then: ${cli} reply ${file} ${threadId} --status applied --stdin`
-    : `${ack}, answer without editing the file: ${cli} reply ${file} ${threadId} --stdin`;
+    : `${ack} --delegated, hand to a forked subagent that acks without --delegated and answers without editing the file: ${cli} reply ${file} ${threadId} --stdin`;
 
   const parts = [`[roughdraft] ${kind} ${threadId}`];
   if (event.type === "comment.followup") {
@@ -357,10 +359,11 @@ export async function runReply(
 export async function runAck(
   io: AgentCliIo,
   target: AgentCliTarget,
-  options: { commentId: string; json: boolean },
+  options: { commentId: string; delegated?: boolean; json: boolean },
 ): Promise<number> {
   const result = await postJson(io, target, "/api/agent/ack", {
     commentId: options.commentId,
+    ...(options.delegated ? { delegated: true } : {}),
   });
   if (result.status !== 200) {
     io.error(
@@ -373,7 +376,7 @@ export async function runAck(
     return 0;
   }
   io.log(
-    `[roughdraft] ${String(result.payload.threadRootId)} is now working in ${target.documentPath}`,
+    `[roughdraft] ${String(result.payload.threadRootId)} is now ${String(result.payload.status)} in ${target.documentPath}`,
   );
   return 0;
 }
@@ -408,6 +411,7 @@ export interface ParsedAgentArgs {
   help: boolean;
   json: boolean;
   stdin: boolean;
+  delegated: boolean;
   body?: string;
   status?: string;
   summary?: string;
@@ -438,13 +442,14 @@ type ValueFlag = keyof typeof VALUE_FLAGS;
 export function parseAgentArgs(
   args: string[],
   allowed: readonly ValueFlag[],
-  options: { allowStdin?: boolean } = {},
+  options: { allowStdin?: boolean; allowDelegated?: boolean } = {},
 ): ParsedAgentArgs {
   const parsed: ParsedAgentArgs = {
     positionals: [],
     help: false,
     json: false,
     stdin: false,
+    delegated: false,
   };
 
   const assign = (flag: ValueFlag, value: string) => {
@@ -476,6 +481,10 @@ export function parseAgentArgs(
     }
     if (arg === "--stdin" && options.allowStdin) {
       parsed.stdin = true;
+      continue;
+    }
+    if (arg === "--delegated" && options.allowDelegated) {
+      parsed.delegated = true;
       continue;
     }
 

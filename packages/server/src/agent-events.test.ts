@@ -399,6 +399,138 @@ describe("agent comment events", () => {
     expect(items.find((item) => item.id === "c1")?.intent).toBe("ask");
   });
 
+  describe("thread lifecycle", () => {
+    const status = async (app: ReturnType<typeof makeApp>) =>
+      (await request(app).get("/api/agent/status").query(target())).body;
+    const ack = (
+      app: ReturnType<typeof makeApp>,
+      commentId: string,
+      extra: Record<string, unknown> = {},
+    ) =>
+      request(app)
+        .post("/api/agent/ack")
+        .send({ ...target(), commentId, ...extra });
+
+    it("moves an ask from pending to queued once a listening session receives it", async () => {
+      const app = makeApp();
+
+      await postEvent(app, "comment.ask", "c1");
+      expect((await status(app)).threads).toEqual({ c1: "pending" });
+
+      // Attaching also re-queues c2 from the file; both are now delivered.
+      await watchComments(app, { listener: { id: "listener-1" } });
+      expect((await status(app)).threads).toEqual({
+        c1: "queued",
+        c2: "queued",
+      });
+    });
+
+    it("leaves an event pending for a watcher that is not a listening session", async () => {
+      const app = makeApp();
+      await postEvent(app, "comment.ask", "c1");
+
+      await watchComments(app);
+
+      // c2 is re-queued from the file, but nobody received either event.
+      expect((await status(app)).threads).toEqual({
+        c1: "pending",
+        c2: "pending",
+      });
+    });
+
+    it("goes queued, delegated, working, answered", async () => {
+      const app = makeApp();
+      await postEvent(app, "comment.ask", "c1");
+      await watchComments(app, { listener: { id: "listener-1" } });
+
+      const delegated = await ack(app, "c1", { delegated: true });
+      expect(delegated.status).toBe(200);
+      expect(delegated.body).toMatchObject({
+        threadRootId: "c1",
+        status: "delegated",
+      });
+      expect((await status(app)).threads.c1).toBe("delegated");
+
+      const working = await ack(app, "c1");
+      expect(working.body).toMatchObject({ status: "working" });
+      expect((await status(app)).threads.c1).toBe("working");
+
+      await request(app)
+        .post("/api/comments/reply")
+        .send({ ...target(), commentId: "c1", body: "Cache warm-up." });
+      expect((await status(app)).threads.c1).toBe("answered");
+    });
+
+    it("never moves a thread backwards on a late delivery or ack", async () => {
+      const app = makeApp();
+      await postEvent(app, "comment.ask", "c1");
+      await ack(app, "c1");
+
+      // A second listener re-receiving the event, or the session marking
+      // the hand-off after the subagent already started, keeps "working".
+      await watchComments(app, { listener: { id: "listener-2" } });
+      const lateDelegate = await ack(app, "c1", { delegated: true });
+
+      expect(lateDelegate.body).toMatchObject({ status: "working" });
+      expect((await status(app)).threads.c1).toBe("working");
+
+      await request(app)
+        .post("/api/comments/reply")
+        .send({ ...target(), commentId: "c1", body: "Done." });
+      await ack(app, "c1");
+      expect((await status(app)).threads.c1).toBe("answered");
+    });
+
+    it("resets an answered thread when the user sends a follow-up", async () => {
+      const app = makeApp();
+      await postEvent(app, "comment.ask", "c1");
+      await request(app)
+        .post("/api/comments/reply")
+        .send({ ...target(), commentId: "c1", body: "Cache warm-up." });
+      appendUserReply("c9", "c1", "And the model load?");
+
+      await postEvent(app, "comment.followup", "c9");
+      expect((await status(app)).threads.c1).toBe("pending");
+
+      await watchComments(app, {
+        listener: { id: "listener-1" },
+        skipHandled: true,
+      });
+      expect((await status(app)).threads.c1).toBe("queued");
+    });
+
+    it("reports when each thread entered its status and when the user asked", async () => {
+      const app = makeApp();
+      const before = Date.now();
+      await postEvent(app, "comment.ask", "c1");
+
+      const pending = (await status(app)).threadDetails.c1;
+      expect(pending).toEqual({
+        status: "pending",
+        since: expect.any(String),
+        requestedAt: expect.any(String),
+      });
+      expect(Date.parse(pending.requestedAt)).toBeGreaterThanOrEqual(before);
+
+      await ack(app, "c1");
+      const working = (await status(app)).threadDetails.c1;
+      expect(working.status).toBe("working");
+      expect(working.requestedAt).toBe(pending.requestedAt);
+      expect(Date.parse(working.since)).toBeGreaterThanOrEqual(
+        Date.parse(pending.since),
+      );
+    });
+
+    it("rejects a non-boolean delegated flag", async () => {
+      const app = makeApp();
+      await postEvent(app, "comment.ask", "c1");
+
+      const response = await ack(app, "c1", { delegated: "yes" });
+
+      expect(response.status).toBe(400);
+    });
+  });
+
   it("records applied status and replies to the thread root when given a reply id", async () => {
     const app = makeApp();
     appendUserReply("c3", "c2", "Keep the numbers.");

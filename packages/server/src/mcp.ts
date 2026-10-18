@@ -132,7 +132,7 @@ const tools: ToolDefinition[] = [
   {
     name: "roughdraft_ack_thread",
     description:
-      "Tell the reviewer you are working on a comment thread (shows 'working' in Roughdraft). commentId may be the thread root or any reply in it.",
+      "Tell the reviewer you are working on a comment thread (shows 'working' in Roughdraft). With delegated: true it shows 'passed to a subagent' instead; the subagent then acks without it when it starts. commentId may be the thread root or any reply in it.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -141,6 +141,7 @@ const tools: ToolDefinition[] = [
         documentPath: { type: "string" },
         projectPath: { type: "string" },
         commentId: { type: "string" },
+        delegated: { type: "boolean" },
       },
     },
   },
@@ -398,6 +399,7 @@ export async function callTool(
     const target = requireServerTarget(args, env);
     return postThreadAction(fetchImpl, target, "/api/agent/ack", 200, {
       commentId: requireString(args, "commentId"),
+      ...(args.delegated === true ? { delegated: true } : {}),
     });
   }
 

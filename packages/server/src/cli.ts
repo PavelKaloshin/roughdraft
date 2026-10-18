@@ -898,7 +898,9 @@ function printHelp(log: (message: string) => void) {
     "  listen <file.md>   Print one line per Ask/Change comment (for an agent's Monitor)",
   );
   log("  reply <file.md> <id>    Reply to a comment thread as AI");
-  log("  ack <file.md> <id>      Mark a comment thread as being worked on");
+  log(
+    "  ack <file.md> <id>      Mark a comment thread as being worked on (--delegated: passed to a subagent)",
+  );
   log("  resolve <file.md> <id>  Mark a comment thread resolved");
   log("  mcp                Start the experimental stdio MCP server");
   log("  doctor [path]      Diagnose setup or validate Markdown");
@@ -1139,13 +1141,18 @@ function printCommandHelp(
 
   if (command === "ack") {
     log("Usage:");
-    log("  roughdraft ack <file.md> <commentId>");
+    log("  roughdraft ack <file.md> <commentId> [--delegated]");
     log("");
     log(
       "Tells the Roughdraft UI that the agent is working on this comment thread.",
     );
+    log(
+      "With --delegated, it shows the thread as passed to a subagent; the subagent",
+    );
+    log("then runs ack without the flag when it starts.");
     log("");
     log("Flags:");
+    log("  --delegated             The thread was handed to a subagent");
     log("  --json                  Print machine-readable output");
     log("  --state-file <path>     Server state file");
     log("  --state-dir <dir>       Directory containing server.json");
@@ -2386,7 +2393,7 @@ const AGENT_COMMAND_USAGE = {
     "Usage: roughdraft listen <file.md> [--since <seq>] [--max-seconds <seconds>]",
   reply:
     "Usage: roughdraft reply <file.md> <commentId> (--stdin | --body <text>) [--status answered|applied]",
-  ack: "Usage: roughdraft ack <file.md> <commentId>",
+  ack: "Usage: roughdraft ack <file.md> <commentId> [--delegated]",
   resolve: "Usage: roughdraft resolve <file.md> <commentId> [--summary <text>]",
 } as const;
 
@@ -2414,7 +2421,7 @@ async function runAgentCommand(
             })
           : command === "resolve"
             ? parseAgentArgs(rest, [...commonFlags, "--summary"])
-            : parseAgentArgs(rest, commonFlags);
+            : parseAgentArgs(rest, commonFlags, { allowDelegated: true });
   } catch (error) {
     baseDeps.error(error instanceof Error ? error.message : "Invalid usage.");
     baseDeps.error(usage);
@@ -2512,7 +2519,11 @@ async function runAgentCommand(
     });
   }
   if (command === "ack") {
-    return runAck(deps, target, { commentId, json });
+    return runAck(deps, target, {
+      commentId,
+      delegated: options.delegated,
+      json,
+    });
   }
   return runResolve(deps, target, {
     commentId,

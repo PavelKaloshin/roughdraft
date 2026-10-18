@@ -9,7 +9,42 @@ import type { CommentEvent } from "./review-events.js";
  * thread content itself.
  */
 
-export type AgentThreadStatus = "pending" | "working" | "answered" | "applied";
+/**
+ * Thread lifecycle, in order:
+ * - `pending`: the event is stored, but no listening session received it yet.
+ * - `queued`: a listening session received it; the session handles it at its
+ *   next pause between steps.
+ * - `delegated`: the session handed the thread to a subagent
+ *   (`roughdraft ack --delegated`).
+ * - `working`: someone acknowledged it and is writing the answer.
+ * - `answered` / `applied`: a reply was written.
+ *
+ * Transitions only move forward; a new user event (follow-up) starts over.
+ */
+export type AgentThreadStatus =
+  | "pending"
+  | "queued"
+  | "delegated"
+  | "working"
+  | "answered"
+  | "applied";
+
+const STATUS_RANK: Record<AgentThreadStatus, number> = {
+  pending: 0,
+  queued: 1,
+  delegated: 2,
+  working: 3,
+  answered: 4,
+  applied: 4,
+};
+
+export interface AgentThreadDetail {
+  status: AgentThreadStatus;
+  /** When the thread entered its current status (ISO 8601). */
+  since: string;
+  /** When the user's latest Ask/Change/follow-up reached the server. */
+  requestedAt?: string;
+}
 
 export interface AgentStatus {
   documentPath: string;
@@ -19,6 +54,8 @@ export interface AgentStatus {
   /** When the current listener first connected (ISO 8601). */
   since?: string;
   threads: Record<string, AgentThreadStatus>;
+  /** Per-thread timing, keyed like `threads` (additive to the status map). */
+  threadDetails: Record<string, AgentThreadDetail>;
 }
 
 export interface AgentListenerIdentity {
@@ -42,6 +79,8 @@ interface ListenerRecord {
 
 interface ThreadRecord {
   status: AgentThreadStatus;
+  statusSince: number;
+  requestedAt: number | null;
   /** Highest comment-event sequence emitted for this thread. */
   lastEventSequence: number;
   /** Highest comment-event sequence handed to a listener for this thread. */
@@ -124,7 +163,10 @@ export class AgentRegistry {
   /** A new ask/change/follow-up event puts its thread back to pending. */
   recordEvent(event: CommentEvent): void {
     const thread = this.thread(event.documentPath, event.threadRootId);
+    const now = this.now();
     thread.status = "pending";
+    thread.statusSince = now;
+    thread.requestedAt = now;
     thread.lastEventSequence = Math.max(
       thread.lastEventSequence,
       event.sequence,
@@ -138,15 +180,31 @@ export class AgentRegistry {
       thread.lastDeliveredSequence,
       event.sequence,
     );
+    // Delivered to a listening session: it reads the line at its next pause.
+    if (
+      thread.status === "pending" &&
+      event.sequence >= thread.lastEventSequence
+    ) {
+      this.transition(thread, "queued");
+      this.broadcast(event.documentPath);
+    }
   }
 
+  /**
+   * Moves a thread forward, never back: a late ack or a re-delivery does not
+   * undo progress. An answer is always recorded. Returns the status after.
+   */
   setThreadStatus(
     documentPath: string,
     threadRootId: string,
     status: AgentThreadStatus,
-  ): void {
+  ): AgentThreadStatus {
     const thread = this.thread(documentPath, threadRootId);
-    thread.status = status;
+    const isAnswer = status === "answered" || status === "applied";
+    if (!isAnswer && STATUS_RANK[status] <= STATUS_RANK[thread.status]) {
+      return thread.status;
+    }
+    this.transition(thread, status);
     if (status === "answered" || status === "applied") {
       // An answer covers what the agent was shown. If it answered without
       // ever being shown an event (e.g. replied by hand), it covers them all.
@@ -156,6 +214,7 @@ export class AgentRegistry {
       );
     }
     this.broadcast(documentPath);
+    return thread.status;
   }
 
   clearThread(documentPath: string, threadRootId: string): void {
@@ -180,7 +239,7 @@ export class AgentRegistry {
       ?.threads.get(event.threadRootId);
     if (!thread) return false;
     return (
-      (thread.status === "pending" || thread.status === "working") &&
+      STATUS_RANK[thread.status] < STATUS_RANK.answered &&
       !this.isHandled(event)
     );
   }
@@ -189,17 +248,26 @@ export class AgentRegistry {
     const resolved = path.resolve(documentPath);
     const state = this.documents.get(resolved);
     const threads: Record<string, AgentThreadStatus> = {};
+    const threadDetails: Record<string, AgentThreadDetail> = {};
     if (!state) {
       return {
         documentPath: resolved,
         listening: false,
         listenerCount: 0,
         threads,
+        threadDetails,
       };
     }
 
     for (const [id, thread] of state.threads) {
       threads[id] = thread.status;
+      threadDetails[id] = {
+        status: thread.status,
+        since: new Date(thread.statusSince).toISOString(),
+        ...(thread.requestedAt !== null
+          ? { requestedAt: new Date(thread.requestedAt).toISOString() }
+          : {}),
+      };
     }
 
     const present = this.presentListeners(state);
@@ -213,6 +281,7 @@ export class AgentRegistry {
         ? { since: new Date(current.connectedAt).toISOString() }
         : {}),
       threads,
+      threadDetails,
     };
   }
 
@@ -273,12 +342,19 @@ export class AgentRegistry {
     }
   }
 
+  private transition(thread: ThreadRecord, status: AgentThreadStatus): void {
+    if (thread.status !== status) thread.statusSince = this.now();
+    thread.status = status;
+  }
+
   private thread(documentPath: string, threadRootId: string): ThreadRecord {
     const state = this.state(documentPath);
     let thread = state.threads.get(threadRootId);
     if (!thread) {
       thread = {
         status: "pending",
+        statusSince: this.now(),
+        requestedAt: null,
         lastEventSequence: 0,
         lastDeliveredSequence: 0,
         handledThroughSequence: 0,

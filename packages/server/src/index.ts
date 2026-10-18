@@ -1149,6 +1149,12 @@ export function createApp(options: CreateAppOptions = {}): CreateAppResult {
     const commentId = requestedCommentId(req, res);
     if (!commentId) return;
 
+    const delegated: unknown = req.body?.delegated ?? false;
+    if (typeof delegated !== "boolean") {
+      res.status(400).json({ error: "delegated must be true or false" });
+      return;
+    }
+
     const lookup = lookupComment(
       fs.readFileSync(target.absolutePath, "utf-8"),
       commentId,
@@ -1158,15 +1164,17 @@ export function createApp(options: CreateAppOptions = {}): CreateAppResult {
       return;
     }
 
-    agentRegistry.setThreadStatus(
+    // `delegated`: the session handed the thread to a subagent, which acks
+    // again (without the flag) once it starts working.
+    const status = agentRegistry.setThreadStatus(
       target.absolutePath,
       lookup.threadRootId,
-      "working",
+      delegated ? "delegated" : "working",
     );
     res.json({
       commentId,
       threadRootId: lookup.threadRootId,
-      status: "working",
+      status,
     });
   });
 

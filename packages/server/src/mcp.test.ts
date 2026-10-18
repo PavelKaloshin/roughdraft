@@ -206,6 +206,20 @@ describe("mcp agent threads against a running server", () => {
       .threads;
   };
 
+  it("marks a thread as passed to a subagent", async () => {
+    await postEvent({ type: "comment.ask", commentId: "c1" });
+
+    const ack = await callTool(
+      "roughdraft_ack_thread",
+      { documentPath, commentId: "c1", delegated: true },
+      env,
+      fetch,
+    );
+
+    expect(ack).toMatchObject({ threadRootId: "c1", status: "delegated" });
+    expect(await threads()).toEqual({ c1: "delegated" });
+  });
+
   it("acks, replies to, and resolves a thread through the server", async () => {
     await postEvent({ type: "comment.ask", commentId: "c1" });
 
