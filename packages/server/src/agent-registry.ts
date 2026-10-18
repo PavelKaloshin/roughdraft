@@ -1,5 +1,6 @@
 import path from "node:path";
 import type { CommentEvent } from "./review-events.js";
+import type { DocumentOwner, SessionSummary } from "./session-ownership.js";
 
 /**
  * Transient, in-memory view of which agent sessions are listening to which
@@ -56,6 +57,13 @@ export interface AgentStatus {
   threads: Record<string, AgentThreadStatus>;
   /** Per-thread timing, keyed like `threads` (additive to the status map). */
   threadDetails: Record<string, AgentThreadDetail>;
+  /**
+   * The session that owns the document (ADR 0007), or null. When set,
+   * `listening` and `sessionId` describe the owner.
+   */
+  owner?: DocumentOwner | null;
+  /** Live sessions the user can connect the document to. */
+  sessions?: SessionSummary[];
 }
 
 export interface AgentListenerIdentity {
@@ -105,6 +113,8 @@ export interface AgentRegistryOptions {
    */
   graceMs?: number;
   now?: () => number;
+  /** Adds document ownership to every status snapshot. */
+  decorate?: (status: AgentStatus) => AgentStatus;
 }
 
 export const DEFAULT_LISTENER_GRACE_MS = 15_000;
@@ -113,10 +123,19 @@ export class AgentRegistry {
   private documents = new Map<string, DocumentState>();
   private readonly graceMs: number;
   private readonly now: () => number;
+  private readonly decorate: (status: AgentStatus) => AgentStatus;
 
   constructor(options: AgentRegistryOptions = {}) {
     this.graceMs = options.graceMs ?? DEFAULT_LISTENER_GRACE_MS;
     this.now = options.now ?? Date.now;
+    this.decorate = options.decorate ?? ((status) => status);
+  }
+
+  /** Re-sends every watched document's snapshot that changed. */
+  refreshAll(): void {
+    for (const documentPath of this.documents.keys()) {
+      this.broadcast(documentPath);
+    }
   }
 
   /**
@@ -250,13 +269,13 @@ export class AgentRegistry {
     const threads: Record<string, AgentThreadStatus> = {};
     const threadDetails: Record<string, AgentThreadDetail> = {};
     if (!state) {
-      return {
+      return this.decorate({
         documentPath: resolved,
         listening: false,
         listenerCount: 0,
         threads,
         threadDetails,
-      };
+      });
     }
 
     for (const [id, thread] of state.threads) {
@@ -272,7 +291,7 @@ export class AgentRegistry {
 
     const present = this.presentListeners(state);
     const current = present.sort((a, b) => b.connectedAt - a.connectedAt)[0];
-    return {
+    return this.decorate({
       documentPath: resolved,
       listening: present.length > 0,
       listenerCount: present.length,
@@ -282,7 +301,7 @@ export class AgentRegistry {
         : {}),
       threads,
       threadDetails,
-    };
+    });
   }
 
   subscribe(

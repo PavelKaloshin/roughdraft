@@ -20,7 +20,11 @@ import {
   ROUGHDRAFT_PUBLIC_HOST,
   resolveBindHosts,
 } from "./network.js";
-import { AgentRegistry, type AgentThreadStatus } from "./agent-registry.js";
+import {
+  AgentRegistry,
+  type AgentThreadStatus,
+  DEFAULT_LISTENER_GRACE_MS,
+} from "./agent-registry.js";
 import {
   buildCommentEventInput,
   findOpenThreadRootIds,
@@ -36,6 +40,8 @@ import {
   type ReviewEventType,
 } from "./review-events.js";
 import { resolveUpdateStatus } from "./update-status.js";
+import { SessionOwnership } from "./session-ownership.js";
+import { registerSessionRoutes } from "./session-routes.js";
 import {
   fileVersionFromContent,
   fileVersionFromFile,
@@ -508,8 +514,28 @@ export function createApp(options: CreateAppOptions = {}): CreateAppResult {
   // Identifies this server process so listeners notice a restart (event
   // sequences start over) and reset their cursor instead of missing events.
   const instanceId = crypto.randomUUID();
-  const agentRegistry = new AgentRegistry({
+  // Document → owner session (ADR 0007). Ownership changes re-send the
+  // status snapshot of every document a tab watches.
+  const ownership = new SessionOwnership({
+    graceMs: options.agentListenerGraceMs ?? DEFAULT_LISTENER_GRACE_MS,
+    onChange: () => agentRegistry.refreshAll(),
+  });
+  const agentRegistry: AgentRegistry = new AgentRegistry({
     graceMs: options.agentListenerGraceMs,
+    decorate: (status) => {
+      const owner = ownership.owner(status.documentPath);
+      const sessions = ownership.liveSessions();
+      if (!owner) return { ...status, owner: null, sessions };
+      // An owned document is "listened to" only by its owner.
+      const { sessionId: _listenerSession, ...rest } = status;
+      return {
+        ...rest,
+        listening: owner.live,
+        ...(owner.live ? { sessionId: owner.sessionId } : {}),
+        owner,
+        sessions,
+      };
+    },
   });
   const reviewEvents = new ReviewEventQueue({
     isPinned: (event) =>
@@ -1036,12 +1062,39 @@ export function createApp(options: CreateAppOptions = {}): CreateAppResult {
         })
       : null;
 
+    // A per-file listener that reports its session counts as that session
+    // being present, and (`listen <file>`) claims the file if nobody live
+    // owns it (ADR 0007).
+    const listenerSessionId =
+      listenerId &&
+      typeof listener?.sessionId === "string" &&
+      listener.sessionId.trim().length > 0
+        ? listener.sessionId.trim()
+        : null;
+    const endSessionPresence = listenerSessionId
+      ? ownership.beginPresence(listenerSessionId, listenerId as string)
+      : null;
+    if (listenerSessionId && types.some(isCommentEventType)) {
+      ownership.claim(target.absolutePath, listenerSessionId, {
+        restore: true,
+      });
+    }
+    // Once a document has an owner, only the owner's listeners get its
+    // events. Watches that are not listeners (`roughdraft open` waiting for
+    // Done Reviewing) are unaffected.
+    const ownedByAnother = (): boolean => {
+      if (!listenerId) return false;
+      const owner = ownership.ownerId(target.absolutePath);
+      return owner !== null && owner !== listenerSessionId;
+    };
+
     // Free the waiter (and the listener's presence) as soon as the client
     // goes away instead of holding it until the round times out.
     const abort = new AbortController();
     res.on("close", () => {
       abort.abort();
       endListen?.();
+      endSessionPresence?.();
     });
 
     const fromNow = req.body?.fromNow !== false;
@@ -1063,14 +1116,16 @@ export function createApp(options: CreateAppOptions = {}): CreateAppResult {
         timeoutSeconds !== undefined ? timeoutSeconds * 1000 : undefined,
       batchWindowMs: batchWindowSeconds * 1000,
       types,
-      filter: skipHandled
-        ? (event: ReviewEvent) => {
-            if (!isCommentEvent(event)) return true;
-            if (agentRegistry.isHandled(event)) return false;
-            // Resolved (or deleted) in the tab before any agent got to it.
-            return readOpenThreadRootIds().has(event.threadRootId);
-          }
-        : undefined,
+      filter:
+        skipHandled || listenerId
+          ? (event: ReviewEvent) => {
+              if (ownedByAnother()) return false;
+              if (!skipHandled || !isCommentEvent(event)) return true;
+              if (agentRegistry.isHandled(event)) return false;
+              // Resolved (or deleted) in the tab before any agent got to it.
+              return readOpenThreadRootIds().has(event.threadRootId);
+            }
+          : undefined,
       signal: abort.signal,
     });
 
@@ -1086,7 +1141,32 @@ export function createApp(options: CreateAppOptions = {}): CreateAppResult {
       ...result,
       instanceId,
       latestSequence: reviewEvents.latestSequence(),
+      ...(listenerId ? { owner: ownership.owner(target.absolutePath) } : {}),
     });
+  });
+
+  registerSessionRoutes(app, {
+    ownership,
+    reviewEvents,
+    instanceId,
+    isHandled: (event) =>
+      isCommentEvent(event) && agentRegistry.isHandled(event),
+    recordDelivered: (event) => {
+      if (isCommentEvent(event)) agentRegistry.recordDelivered(event);
+    },
+    requeueUnansweredThreads,
+    resolveProjectDocument: (projectPath, relativePath) => {
+      const projectDir = path.resolve(projectPath);
+      if (!isExistingDirectory(projectDir)) return null;
+      const absolutePath = ensureProjectPath(projectDir, relativePath);
+      if (
+        !absolutePath?.toLowerCase().endsWith(".md") ||
+        !fs.existsSync(absolutePath)
+      ) {
+        return null;
+      }
+      return absolutePath;
+    },
   });
 
   app.get("/api/review-events/status", (req, res) => {
