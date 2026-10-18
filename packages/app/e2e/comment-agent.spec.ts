@@ -100,9 +100,9 @@ test.describe("Ask / Change comments", () => {
     await expect(
       page.getByTestId("agent-no-listener-notice-command"),
     ).toHaveText(`roughdraft listen ${filePath}`);
-    await expect(page.getByTestId("comment-rail-c1-agent-status")).toHaveText(
-      "Waiting for Claude",
-    );
+    await expect(
+      page.getByTestId("comment-rail-c1-agent-status-label"),
+    ).toHaveText("Waiting for a Claude session");
     await snap(page, "22-agent-no-listener-notice-waiting");
 
     // The agent answers through the server, which rewrites the file.
@@ -203,6 +203,139 @@ test.describe("Ask / Change comments", () => {
     );
   });
 
+  test("shows an Ask going queued, to a subagent, working and answered @smoke", async ({
+    page,
+    request,
+  }) => {
+    const relativePath = "lifecycle.md";
+    const filePath = writeProjectFile(
+      projectDir,
+      relativePath,
+      ["# Lifecycle", "", "Cold start takes about four seconds.", ""].join(
+        "\n",
+      ),
+    );
+    const target = { projectPath: projectDir, path: relativePath };
+
+    // A listening session (`roughdraft listen`) receives the Ask.
+    const watch = request.post("/api/review-events/watch", {
+      data: {
+        ...target,
+        types: ["comment.ask"],
+        timeoutSeconds: 20,
+        listener: { id: "e2e-lifecycle", sessionId: "abcd1234-0000-1111" },
+      },
+    });
+    pendingWatch = watch;
+
+    await openMarkdownFile(page, filePath);
+    await selectRichText(page, "about four seconds");
+    await page.getByTestId("selection-menu-action-comment").click();
+    await page.getByTestId("comment-rail-c1-mode-ask").click();
+    await page
+      .getByTestId("comment-rail-c1-editor")
+      .fill("What is included in that time?");
+    await page.getByTestId("comment-rail-c1-action-save").click();
+
+    const payload = (await (
+      (await watch) as { json: () => Promise<unknown> }
+    ).json()) as { events: Array<Record<string, unknown>> };
+    expect(payload.events[0]).toMatchObject({
+      type: "comment.ask",
+      commentId: "c1",
+    });
+
+    const status = page.getByTestId("comment-rail-c1-agent-status");
+    const label = page.getByTestId("comment-rail-c1-agent-status-label");
+    const summary = page.getByTestId("agent-thread-summary");
+
+    await expect(label).toHaveText("Queued in Claude's session");
+    await expect(status).toHaveAttribute("data-agent-status", "queued");
+    await expect(
+      page.getByTestId("comment-rail-c1-agent-status-elapsed"),
+    ).toHaveText(/^\d+s$/);
+    await expect(summary).toHaveText("1 queued");
+    await snap(page, "30-agent-thread-queued");
+
+    const delegated = await request.post("/api/agent/ack", {
+      data: { ...target, commentId: "c1", delegated: true },
+    });
+    expect(delegated.status()).toBe(200);
+    await expect(label).toHaveText("Passed to a subagent");
+    await expect(summary).toHaveText("1 with a subagent");
+    await snap(page, "31-agent-thread-delegated");
+
+    await request.post("/api/agent/ack", {
+      data: { ...target, commentId: "c1" },
+    });
+    await expect(label).toHaveText("Claude is working…");
+    await expect(summary).toHaveText("1 working");
+    await snap(page, "32-agent-thread-working");
+
+    const reply = await request.post("/api/comments/reply", {
+      data: {
+        ...target,
+        commentId: "c1",
+        body: "Cache warm-up and model load.",
+      },
+    });
+    expect(reply.status()).toBe(201);
+    await expect(label).toHaveText("Answered");
+    await expect(
+      page.getByTestId("comment-rail-c1-agent-status-elapsed"),
+    ).toHaveCount(0);
+    await expect(summary).toHaveCount(0);
+  });
+
+  test("hints that Claude is busy when an Ask sits queued for over a minute", async ({
+    page,
+    request,
+  }) => {
+    const relativePath = "busy.md";
+    const filePath = writeProjectFile(
+      projectDir,
+      relativePath,
+      ["# Busy", "", "Cold start takes about four seconds.", ""].join("\n"),
+    );
+    const target = { projectPath: projectDir, path: relativePath };
+    const watch = request.post("/api/review-events/watch", {
+      data: {
+        ...target,
+        types: ["comment.ask"],
+        timeoutSeconds: 20,
+        listener: { id: "e2e-busy", graceSeconds: 120 },
+      },
+    });
+    pendingWatch = watch;
+
+    // The browser's clock runs normally, but can jump ahead.
+    await page.clock.install();
+    await openMarkdownFile(page, filePath);
+    await selectRichText(page, "about four seconds");
+    await page.getByTestId("selection-menu-action-comment").click();
+    await page.getByTestId("comment-rail-c1-mode-ask").click();
+    await page.getByTestId("comment-rail-c1-editor").fill("Why four?");
+    await page.getByTestId("comment-rail-c1-action-save").click();
+    await watch;
+
+    await expect(
+      page.getByTestId("comment-rail-c1-agent-status-label"),
+    ).toHaveText("Queued in Claude's session");
+    await expect(
+      page.getByTestId("comment-rail-c1-agent-status-busy-hint"),
+    ).toHaveCount(0);
+
+    await page.clock.fastForward(61_000);
+
+    await expect(
+      page.getByTestId("comment-rail-c1-agent-status-busy-hint"),
+    ).toHaveText("Claude is busy; it will answer after its current step");
+    await expect(
+      page.getByTestId("comment-rail-c1-agent-status-elapsed"),
+    ).toHaveText(/^1m \d+s$/);
+    await snap(page, "33-agent-thread-queued-busy-hint");
+  });
+
   test("escalates a plain thread to Ask from a reply and sends a follow-up @smoke", async ({
     page,
     request,
@@ -262,9 +395,9 @@ test.describe("Ask / Change comments", () => {
       / {2}c2:\n(?: {4}.*\n)*? {4}body: Claude, what dominates it\?\n/,
     );
     await expect(page.getByTestId("comment-rail-c1-intent")).toHaveText("Ask");
-    await expect(page.getByTestId("comment-rail-c1-agent-status")).toHaveText(
-      "Waiting for Claude",
-    );
+    await expect(
+      page.getByTestId("comment-rail-c1-agent-status-label"),
+    ).toHaveText("Waiting for a Claude session");
   });
 
   test("writes, picks Ask and sends a comment with the keyboard only @smoke", async ({

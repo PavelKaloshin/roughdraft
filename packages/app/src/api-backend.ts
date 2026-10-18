@@ -1,8 +1,10 @@
-import type {
-  AgentStatusSnapshot,
-  AgentThreadStatus,
-  CommentEventResult,
-  CommentEventType,
+import {
+  AGENT_THREAD_STATUSES,
+  type AgentStatusSnapshot,
+  type AgentThreadStatus,
+  type AgentThreadTiming,
+  type CommentEventResult,
+  type CommentEventType,
 } from "./comment-agent";
 import { getLiveConnection, type LiveConnection } from "./live-connection";
 import {
@@ -280,12 +282,7 @@ export class ApiBackend implements StorageBackend {
   }
 }
 
-const agentThreadStatuses = new Set<AgentThreadStatus>([
-  "pending",
-  "working",
-  "answered",
-  "applied",
-]);
+const agentThreadStatuses = new Set<AgentThreadStatus>(AGENT_THREAD_STATUSES);
 
 export function parseAgentStatusSnapshot(value: unknown): AgentStatusSnapshot {
   const record =
@@ -302,6 +299,20 @@ export function parseAgentStatusSnapshot(value: unknown): AgentStatusSnapshot {
       }
     }
   }
+  // Timing for threads with a known status; each timestamp is optional.
+  const threadDetails: Record<string, AgentThreadTiming> = {};
+  if (record.threadDetails && typeof record.threadDetails === "object") {
+    for (const [id, detail] of Object.entries(
+      record.threadDetails as Record<string, unknown>,
+    )) {
+      if (!threads[id] || !detail || typeof detail !== "object") continue;
+      const { since, requestedAt } = detail as Record<string, unknown>;
+      threadDetails[id] = {
+        ...(typeof since === "string" ? { since } : {}),
+        ...(typeof requestedAt === "string" ? { requestedAt } : {}),
+      };
+    }
+  }
   return {
     listening: record.listening === true,
     listenerCount:
@@ -310,5 +321,6 @@ export function parseAgentStatusSnapshot(value: unknown): AgentStatusSnapshot {
       ? { sessionId: record.sessionId }
       : {}),
     threads,
+    threadDetails,
   };
 }

@@ -342,8 +342,60 @@ describe("Ask / Change comments", () => {
     await flush();
     expect(server.postCommentEvent).toHaveBeenCalledTimes(1);
     expect(getThreadPart("c1-agent-status").textContent).toBe(
-      "Waiting for Claude",
+      "Waiting for a Claude session",
     );
+  });
+
+  it("follows the server through queued, delegated and working, with counts in the header", async () => {
+    const server = createFakeServer({
+      initialContent: "Cold start target.\n",
+      listening: true,
+    });
+    await renderWorkspace(server);
+    await addCommentOn("target");
+    await click(getThreadPart("c1-mode-ask"));
+    await typeInto(getThreadPart<HTMLTextAreaElement>("c1-editor"), "Why?");
+    await click(getThreadPart("c1-action-save"));
+    await flush(6);
+
+    const askedAt = new Date(Date.now() - 5_000).toISOString();
+    const push = async (status: "queued" | "delegated" | "working") => {
+      await act(async () => {
+        server.pushStatus({
+          listening: true,
+          listenerCount: 1,
+          threads: { c1: status },
+          threadDetails: {
+            c1: { since: new Date().toISOString(), requestedAt: askedAt },
+          },
+        });
+      });
+      await flush();
+    };
+
+    await push("queued");
+    expect(getThreadPart("c1-agent-status").dataset.agentStatus).toBe("queued");
+    expect(getThreadPart("c1-agent-status-label").textContent).toBe(
+      "Queued in Claude's session",
+    );
+    expect(getThreadPart("c1-agent-status-elapsed").textContent).toMatch(
+      /^\d+s$/,
+    );
+    expect(query("agent-thread-summary")?.textContent).toBe("1 queued");
+
+    await push("delegated");
+    expect(getThreadPart("c1-agent-status-label").textContent).toBe(
+      "Passed to a subagent",
+    );
+    expect(query("agent-thread-summary")?.textContent).toBe(
+      "1 with a subagent",
+    );
+
+    await push("working");
+    expect(getThreadPart("c1-agent-status-label").textContent).toBe(
+      "Claude is working…",
+    );
+    expect(query("agent-thread-summary")?.textContent).toBe("1 working");
   });
 
   it("shows the no-listener notice with the listen command, then clears it when a session connects", async () => {

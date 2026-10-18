@@ -13,18 +13,48 @@ import {
  * thread got); the Markdown file owns the thread content.
  */
 
-export type AgentThreadStatus = "pending" | "working" | "answered" | "applied";
+/**
+ * Server-side thread lifecycle, in order: stored without a listener
+ * (`pending`), received by a listening session (`queued`), handed to a
+ * subagent (`delegated`), acknowledged (`working`), replied to.
+ */
+export type AgentThreadStatus =
+  | "pending"
+  | "queued"
+  | "delegated"
+  | "working"
+  | "answered"
+  | "applied";
+
+export const AGENT_THREAD_STATUSES: readonly AgentThreadStatus[] = [
+  "pending",
+  "queued",
+  "delegated",
+  "working",
+  "answered",
+  "applied",
+];
 
 export type CommentEventType =
   | "comment.ask"
   | "comment.change"
   | "comment.followup";
 
+/** Server timestamps for a thread (ISO 8601). */
+export interface AgentThreadTiming {
+  /** When the thread entered its current status. */
+  since?: string;
+  /** When the user's latest Ask/Change/follow-up reached the server. */
+  requestedAt?: string;
+}
+
 export interface AgentStatusSnapshot {
   listening: boolean;
   listenerCount: number;
   sessionId?: string;
   threads: Record<string, AgentThreadStatus>;
+  /** Absent from older servers. */
+  threadDetails?: Record<string, AgentThreadTiming>;
 }
 
 export interface CommentEventResult {
@@ -122,23 +152,86 @@ export function isHandledThreadStatus(
   return status === "answered" || status === "applied";
 }
 
-export type ThreadAgentDisplayStatus =
-  | "sending"
-  | "pending"
-  | "working"
-  | "answered"
-  | "applied";
+export type ThreadAgentDisplayStatus = "sending" | AgentThreadStatus;
 
 export const THREAD_AGENT_STATUS_LABELS: Record<
   ThreadAgentDisplayStatus,
   string
 > = {
   sending: "Sending to Claude…",
-  pending: "Waiting for Claude",
+  pending: "Waiting for a Claude session",
+  queued: "Queued in Claude's session",
+  delegated: "Passed to a subagent",
   working: "Claude is working…",
   answered: "Answered",
   applied: "Applied",
 };
+
+/**
+ * `pending` with a session listening means the session has not polled yet
+ * (between `listen` rounds, or an MCP agent between waits).
+ */
+export function getThreadAgentStatusLabel(
+  status: ThreadAgentDisplayStatus,
+  { listening }: { listening: boolean },
+) {
+  if (status === "pending" && listening) {
+    return "Waiting for Claude to pick it up";
+  }
+  return THREAD_AGENT_STATUS_LABELS[status];
+}
+
+/** Statuses that are still waiting on Claude: they show a live timer. */
+export function isActiveThreadStatus(
+  status: ThreadAgentDisplayStatus | null | undefined,
+) {
+  return (
+    status === "pending" ||
+    status === "queued" ||
+    status === "delegated" ||
+    status === "working"
+  );
+}
+
+/** After this long in `queued`, the session is busy with a long step. */
+export const QUEUED_BUSY_HINT_AFTER_MS = 60_000;
+export const QUEUED_BUSY_HINT =
+  "Claude is busy; it will answer after its current step";
+
+export function formatAgentElapsed(ms: number) {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  if (totalMinutes < 60) return `${totalMinutes}m ${totalSeconds % 60}s`;
+  return `${Math.floor(totalMinutes / 60)}h ${totalMinutes % 60}m`;
+}
+
+const SUMMARY_PARTS: ReadonlyArray<[AgentThreadStatus, string]> = [
+  ["queued", "queued"],
+  ["delegated", "with a subagent"],
+  ["working", "working"],
+];
+
+/**
+ * Header summary of threads a session has picked up, e.g. "2 queued · 1
+ * working". `openThreadIds` limits it to threads still open in the document
+ * (the server keeps a thread the user resolved locally).
+ */
+export function summarizeAgentThreads(
+  threads: Record<string, AgentThreadStatus>,
+  openThreadIds?: ReadonlySet<string> | null,
+): string | null {
+  const counts = new Map<AgentThreadStatus, number>();
+  for (const [id, status] of Object.entries(threads)) {
+    if (openThreadIds && !openThreadIds.has(id)) continue;
+    counts.set(status, (counts.get(status) ?? 0) + 1);
+  }
+  const parts = SUMMARY_PARTS.flatMap(([status, label]) => {
+    const count = counts.get(status) ?? 0;
+    return count > 0 ? [`${count} ${label}`] : [];
+  });
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
 
 /**
  * The status line shown on an Ask/Change thread. The live server state wins;
@@ -189,6 +282,8 @@ export interface CommentAgentContextValue {
   /** False outside a document backed by the local server. */
   available: boolean;
   status: AgentStatusSnapshot | null;
+  /** Header summary such as "2 queued · 1 working", or null. */
+  threadSummary: string | null;
   /** Some event was accepted while no session listened and is still waiting. */
   hasUndeliveredEvents: boolean;
   listenCommand: string | null;
@@ -216,6 +311,7 @@ const idleThreadState: CommentAgentThreadState = {
 export const defaultCommentAgentContext: CommentAgentContextValue = {
   available: false,
   status: null,
+  threadSummary: null,
   hasUndeliveredEvents: false,
   listenCommand: null,
   showResolved: false,

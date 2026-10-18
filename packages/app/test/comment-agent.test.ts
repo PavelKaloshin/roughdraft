@@ -3,9 +3,13 @@ import { parseAgentStatusSnapshot } from "../src/api-backend";
 import { renderCommentMarkdown } from "../src/CommentMarkdown";
 import {
   buildListenCommand,
+  formatAgentElapsed,
   getCommentSubmitEventType,
   getThreadAgentDisplayStatus,
+  getThreadAgentStatusLabel,
   readComposerModePreference,
+  summarizeAgentThreads,
+  type ThreadAgentDisplayStatus,
   writeComposerModePreference,
 } from "../src/comment-agent";
 import {
@@ -123,20 +127,87 @@ describe("agent status snapshot", () => {
         listening: true,
         listenerCount: 1,
         sessionId: "abc",
-        threads: { c1: "working", c2: "bogus" },
+        threads: { c1: "working", c2: "bogus", c3: "queued", c4: "delegated" },
+        threadDetails: {
+          c1: {
+            status: "working",
+            since: "2026-10-18T12:00:05.000Z",
+            requestedAt: "2026-10-18T12:00:00.000Z",
+          },
+          c2: { status: "bogus", since: "2026-10-18T12:00:00.000Z" },
+          c3: { status: "queued", since: 42 },
+        },
         latestSequence: 4,
       }),
     ).toEqual({
       listening: true,
       listenerCount: 1,
       sessionId: "abc",
-      threads: { c1: "working" },
+      threads: { c1: "working", c3: "queued", c4: "delegated" },
+      threadDetails: {
+        c1: {
+          since: "2026-10-18T12:00:05.000Z",
+          requestedAt: "2026-10-18T12:00:00.000Z",
+        },
+        c3: {},
+      },
     });
     expect(parseAgentStatusSnapshot(null)).toEqual({
       listening: false,
       listenerCount: 0,
       threads: {},
+      threadDetails: {},
     });
+  });
+});
+
+describe("thread lifecycle labels", () => {
+  it("names every step from sending to answered", () => {
+    const label = (status: ThreadAgentDisplayStatus, listening = true) =>
+      getThreadAgentStatusLabel(status, { listening });
+
+    expect(label("sending")).toBe("Sending to Claude…");
+    expect(label("pending", false)).toBe("Waiting for a Claude session");
+    expect(label("pending", true)).toBe("Waiting for Claude to pick it up");
+    expect(label("queued")).toBe("Queued in Claude's session");
+    expect(label("delegated")).toBe("Passed to a subagent");
+    expect(label("working")).toBe("Claude is working…");
+    expect(label("answered")).toBe("Answered");
+    expect(label("applied")).toBe("Applied");
+  });
+
+  it("passes the new server states through to the status line", () => {
+    for (const serverStatus of ["queued", "delegated"] as const) {
+      expect(
+        getThreadAgentDisplayStatus({
+          intent: "ask",
+          resolved: false,
+          sending: false,
+          serverStatus,
+          latestCommentIsFromAgent: false,
+        }),
+      ).toBe(serverStatus);
+    }
+  });
+
+  it("formats elapsed time compactly", () => {
+    expect(formatAgentElapsed(-500)).toBe("0s");
+    expect(formatAgentElapsed(12_400)).toBe("12s");
+    expect(formatAgentElapsed(65_000)).toBe("1m 5s");
+    expect(formatAgentElapsed(3_725_000)).toBe("1h 2m");
+  });
+
+  it("summarizes threads waiting on or with Claude for the header", () => {
+    expect(
+      summarizeAgentThreads({ c1: "queued", c2: "queued", c3: "working" }),
+    ).toBe("2 queued · 1 working");
+    expect(
+      summarizeAgentThreads(
+        { c1: "delegated", c2: "answered", c3: "queued" },
+        new Set(["c1", "c2"]),
+      ),
+    ).toBe("1 with a subagent");
+    expect(summarizeAgentThreads({ c1: "pending", c2: "applied" })).toBe(null);
   });
 });
 

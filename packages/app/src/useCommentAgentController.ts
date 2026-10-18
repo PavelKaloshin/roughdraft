@@ -8,6 +8,7 @@ import {
   getOpenAgentThreads,
   idleThreadState,
   isHandledThreadStatus,
+  summarizeAgentThreads,
 } from "./comment-agent";
 import { criticMarkdownComments } from "./critic-markup";
 import type { ManualSaveResult } from "./PageCard";
@@ -178,18 +179,29 @@ export function useCommentAgentController({
     .filter(([, state]) => state.undelivered)
     .map(([threadRootId]) => threadRootId);
   const hasUndeliveredState = undeliveredThreadIds.length > 0;
-  // Parsed only while some event waits for delivery (not on every keystroke).
+  const hasPickedUpThreads = Object.values(status?.threads ?? {}).some(
+    (threadStatus) =>
+      threadStatus === "queued" ||
+      threadStatus === "delegated" ||
+      threadStatus === "working",
+  );
+  // Parsed only while some thread waits on Claude (not on every keystroke
+  // of an ordinary review).
   const openThreadIds = useMemo(
     () =>
-      hasUndeliveredState && markdown != null
+      (hasUndeliveredState || hasPickedUpThreads) && markdown != null
         ? new Set(
             getOpenAgentThreads(criticMarkdownComments(markdown).values()).map(
               (thread) => thread.rootId,
             ),
           )
         : null,
-    [hasUndeliveredState, markdown],
+    [hasUndeliveredState, hasPickedUpThreads, markdown],
   );
+  const threadSummary =
+    hasPickedUpThreads && status
+      ? summarizeAgentThreads(status.threads, openThreadIds)
+      : null;
   // A thread the agent already answered (e.g. via `roughdraft reply` without
   // a listener), or one the user resolved or deleted, no longer waits.
   const hasUndeliveredEvents =
@@ -204,6 +216,7 @@ export function useCommentAgentController({
     () => ({
       available,
       status,
+      threadSummary,
       hasUndeliveredEvents,
       listenCommand,
       showResolved,
@@ -221,6 +234,7 @@ export function useCommentAgentController({
       showResolved,
       status,
       submitCommentEvent,
+      threadSummary,
     ],
   );
 }

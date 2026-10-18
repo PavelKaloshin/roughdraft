@@ -33,7 +33,9 @@ The user reviews your Markdown file in Roughdraft and can leave three kinds of c
 
 ## On each event line
 
-- `[roughdraft] ask cN seq=… → … | … text="…"` — run the `ack` it names, read the anchor and the surrounding text in the file, then answer with Markdown on stdin:
+The user watches each thread move through `Queued in Claude's session` (the line reached you) → `Passed to a subagent` (`ack --delegated`) → `Claude is working…` (`ack`) → `Answered`, with a timer. Run each `ack` as soon as it applies, so the status is never stale.
+
+- `[roughdraft] ask cN seq=… → … | … text="…"` — answer fast, without stopping your current work: immediately run `roughdraft ack "/abs/file.md" cN --delegated` and hand the question to a **forked subagent** (it inherits this conversation, so it knows why the document says what it says) running in the background. Give it the event line and these instructions: run `roughdraft ack "/abs/file.md" cN`, read the anchor and the surrounding text in the file, then answer with Markdown on stdin:
 
   ```bash
   roughdraft reply "/abs/file.md" cN --stdin <<'EOF'
@@ -42,11 +44,13 @@ The user reviews your Markdown file in Roughdraft and can leave three kinds of c
   EOF
   ```
 
-  Do not edit the document for an Ask. If the answer shows the text should change, say so in the reply and let the user turn it into a Change.
+  Then continue what you were doing. If you cannot fork a subagent, answer the Ask yourself right after your current step.
 
-- `[roughdraft] change cN seq=… → … | … text="…"` — run `ack`, make the smallest edit to the file with your Edit tool (never rewrite the whole file; the user may be typing in it and sees your edit live), then reply with `--status applied` and one or two sentences on what changed.
+  Nobody edits the document for an Ask. If the answer shows the text should change, say so in the reply and let the user turn it into a Change.
 
-- `[roughdraft] followup cN reply=cM intent=…` — the user replied in an existing thread. Handle it like its thread's intent (`ask` → answer, `change` → edit and reply).
+- `[roughdraft] change cN seq=… → … | … text="…"` — do this yourself, never in a subagent (only one writer may edit the file): finish your current step, run `ack`, make the smallest edit to the file with your Edit tool (never rewrite the whole file; the user may be typing in it and sees your edit live), then reply with `--status applied` and one or two sentences on what changed.
+
+- `[roughdraft] followup cN reply=cM intent=…` — the user replied in an existing thread. Handle it like its thread's intent (`ask` → forked subagent, `change` → you edit and reply).
 
 - `[roughdraft] done … comments=N unresolved=M` — the user clicked Done Reviewing. Read the file and handle remaining plain comments and suggestions as usual. Keep listening only if the user is still reviewing.
 

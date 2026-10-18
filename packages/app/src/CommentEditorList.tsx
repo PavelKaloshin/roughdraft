@@ -2,8 +2,6 @@ import {
   Bot,
   Check,
   CircleCheck,
-  Clock,
-  Loader2,
   Pencil,
   Reply,
   RotateCcw,
@@ -24,6 +22,7 @@ import {
   useState,
 } from "react";
 import { NoListenerNotice } from "./AgentConnection";
+import { AgentThreadStatusLine } from "./AgentThreadStatus";
 import {
   applyCommentIdRenames,
   CommentDraftRenamesContext,
@@ -39,7 +38,6 @@ import {
   getThreadAgentDisplayStatus,
   isHandledThreadStatus,
   readComposerModePreference,
-  THREAD_AGENT_STATUS_LABELS,
   useCommentAgent,
   writeComposerModePreference,
 } from "./comment-agent";
@@ -1114,21 +1112,17 @@ function CommentThreadNode({
                 {isEditing ? null : renderedContent}
               </div>
               {agentDisplayStatus ? (
-                <div
-                  data-testid={`comment-${variant}-${comment.id}-agent-status`}
-                  data-agent-status={agentDisplayStatus}
-                  className="mt-1 flex items-center gap-1 text-[11px] leading-4 font-medium text-stone-500 dark:text-slate-400"
-                >
-                  {agentDisplayStatus === "sending" ||
-                  agentDisplayStatus === "working" ? (
-                    <Loader2 className="size-3 animate-spin" />
-                  ) : agentDisplayStatus === "pending" ? (
-                    <Clock className="size-3" />
-                  ) : (
-                    <Check className="size-3 text-emerald-600 dark:text-emerald-500" />
-                  )}
-                  {THREAD_AGENT_STATUS_LABELS[agentDisplayStatus]}
-                </div>
+                <AgentThreadStatusLine
+                  status={agentDisplayStatus}
+                  listening={agent.status?.listening === true}
+                  since={agent.status?.threadDetails?.[comment.id]?.since}
+                  requestedAt={
+                    agentDisplayStatus === "sending"
+                      ? undefined
+                      : agent.status?.threadDetails?.[comment.id]?.requestedAt
+                  }
+                  testId={`comment-${variant}-${comment.id}-agent-status`}
+                />
               ) : null}
               {showNoListenerNotice ? (
                 <NoListenerNotice

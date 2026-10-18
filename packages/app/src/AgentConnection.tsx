@@ -107,12 +107,36 @@ export function NoListenerNotice({
 export function AgentConnectionIndicator({
   agent,
 }: {
-  agent: Pick<CommentAgentContextValue, "available" | "status">;
+  agent: Pick<CommentAgentContextValue, "available" | "status"> &
+    Partial<Pick<CommentAgentContextValue, "threadSummary">>;
 }) {
   if (!agent.available) return null;
   const listening = agent.status?.listening === true;
   const sessionId = agent.status?.sessionId;
 
+  return (
+    <>
+      {agent.threadSummary ? (
+        <span
+          data-testid="agent-thread-summary"
+          title="Ask/Change threads a Claude session has picked up"
+          className="shrink-0 px-1 text-[0.72rem] font-medium text-stone-500 tabular-nums dark:text-slate-400"
+        >
+          {agent.threadSummary}
+        </span>
+      ) : null}
+      <AgentListeningLabel listening={listening} sessionId={sessionId} />
+    </>
+  );
+}
+
+function AgentListeningLabel({
+  listening,
+  sessionId,
+}: {
+  listening: boolean;
+  sessionId?: string;
+}) {
   return (
     <span
       data-testid="agent-connection-indicator"

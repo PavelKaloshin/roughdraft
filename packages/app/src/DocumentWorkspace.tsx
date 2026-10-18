@@ -1203,7 +1203,9 @@ export function DocumentWorkspace({
                   />
                   <TooltipContent>Reload from disk</TooltipContent>
                 </Tooltip>
-                <div className="ml-auto flex min-w-0 items-center gap-1">
+                {/* basis-0: the agent labels truncate instead of pushing the
+                    mode select onto a second row. */}
+                <div className="flex min-w-0 flex-1 basis-0 items-center justify-end gap-1">
                   <AgentConnectionIndicator agent={commentAgent} />
                 </div>
                 <div className="inline-flex h-[1.25rem] shrink-0 items-center">
