@@ -208,10 +208,21 @@ test.describe("markdown round-trips", () => {
     await expect(richTextEditor(page)).toContainText("Type here.");
     // Plain editing (the default mode turns typing into suggestions).
     await page.getByTestId("document-mode-trigger").click();
-    await page.getByRole("option", { name: "Editing" }).click();
+    await page.getByTestId("document-mode-option-editing").click();
+    await expect(page.getByTestId("document-mode-option-editing")).toBeHidden();
+    await expect(page.getByTestId("document-mode-trigger")).toContainText(
+      "Editing",
+    );
     await selectRichText(page, "Type here.");
-    // Collapse the selection to its end, then type.
+    // The selection menu shows once the editor has taken the selection;
+    // collapse it to its end, then type.
+    await expect(
+      page.getByTestId("selection-menu-action-comment"),
+    ).toBeVisible();
     await page.keyboard.press("ArrowRight");
+    await expect(
+      page.getByTestId("selection-menu-action-comment"),
+    ).toBeHidden();
     await page.keyboard.type(" Typed by the user.");
 
     const expected = initial.replace(

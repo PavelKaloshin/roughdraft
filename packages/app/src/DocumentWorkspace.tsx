@@ -1230,6 +1230,7 @@ export function DocumentWorkspace({
                             key={value}
                             value={value}
                             label={label}
+                            data-testid={`document-mode-option-${value}`}
                             className="text-[0.8rem]"
                           >
                             <Icon className="size-3 text-stone-500 dark:text-slate-400" />
