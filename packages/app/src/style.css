@@ -764,6 +764,31 @@
   font-weight: 600;
 }
 
+/* Thread reader dialog: a readable measure and size for long answers. */
+.comment-reader-markdown {
+  max-width: 68ch;
+  font-size: 15px;
+  line-height: 1.7;
+  overflow-wrap: break-word;
+}
+
+.comment-reader-markdown > * + * {
+  margin-top: 0.75rem;
+}
+
+.comment-reader-markdown pre {
+  max-width: 100%;
+  padding: 0.6rem 0.8rem;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.comment-reader-markdown h1,
+.comment-reader-markdown h2,
+.comment-reader-markdown h3 {
+  font-size: 1.05em;
+}
+
 @keyframes review-handoff-robots-hop {
   0%,
   100% {

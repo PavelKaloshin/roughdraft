@@ -2,6 +2,7 @@ import {
   Bot,
   Check,
   CircleCheck,
+  Maximize2,
   Pencil,
   Reply,
   RotateCcw,
@@ -29,6 +30,7 @@ import {
   rekeyRecord,
 } from "./comment-draft-renames";
 import { CommentMarkdown } from "./CommentMarkdown";
+import { isLongCommentBody, useCommentReader } from "./comment-reader-context";
 import {
   COMMENT_COMPOSER_MODE_LABELS,
   COMMENT_COMPOSER_MODES,
@@ -166,6 +168,16 @@ function isReplyShortcut(event: KeyboardEvent) {
   );
 }
 
+/** O on a focused thread opens the reader (see comment-shortcuts.ts). */
+function isOpenReaderKey(event: KeyboardEvent) {
+  return (
+    event.key.toLowerCase() === "o" &&
+    !event.metaKey &&
+    !event.ctrlKey &&
+    !event.altKey
+  );
+}
+
 export function CommentEditorList({
   comments,
   variant = "banner",
@@ -226,9 +238,12 @@ export function CommentEditorList({
   const hasActiveSelection =
     !!selectedCommentId &&
     comments.some((comment) => comment.id === selectedCommentId);
+  const reader = useCommentReader();
   const handleKeyDownCapture = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (!interactive || !onReplyComment) return;
-    if (!isReplyShortcut(event)) return;
+    if (!interactive) return;
+    const isReply = isReplyShortcut(event) && !!onReplyComment;
+    const isOpen = isOpenReaderKey(event) && !!reader;
+    if (!isReply && !isOpen) return;
     if (isEditableShortcutTarget(event.target)) return;
 
     const target = event.target;
@@ -239,10 +254,15 @@ export function CommentEditorList({
     );
     const rootCommentId = rootThread?.dataset.commentThreadRootId;
     if (!rootCommentId) return;
+    if (isOpen && !reader?.canOpen(rootCommentId)) return;
 
     event.preventDefault();
     event.stopPropagation();
-    onReplyComment(rootCommentId);
+    if (isOpen) {
+      reader?.open(rootCommentId);
+    } else {
+      onReplyComment?.(rootCommentId);
+    }
   };
 
   useEffect(() => {
@@ -823,6 +843,14 @@ function CommentThreadNode({
       isEditing,
       defaultContent,
     }) ?? defaultContent;
+  const reader = useCommentReader();
+  const canOpenReader =
+    !!reader && hasCommentContent && reader.canOpen(comment.id);
+  // Long bodies (typically agent answers) clamp in the narrow rail; "Read
+  // more" expands in place and the reader dialog shows the whole thread.
+  const isLongBody = hasCommentContent && isLongCommentBody(comment.content);
+  const [isBodyExpanded, setBodyExpanded] = useState(false);
+  const isBodyClamped = isLongBody && !isBodyExpanded;
   const defaultActions: CommentActionDefinition[] = isEditing
     ? [
         {
@@ -856,6 +884,20 @@ function CommentThreadNode({
             onReplyComment?.(comment.id);
           },
         },
+        ...(canOpenReader
+          ? [
+              {
+                key: "open",
+                label: "Open in reader",
+                icon: <Maximize2 className="size-3.5" />,
+                compact: true,
+                onClick: (event: MouseEvent) => {
+                  event.stopPropagation();
+                  reader?.open(comment.id);
+                },
+              },
+            ]
+          : []),
         {
           key: "edit",
           label: "Edit",
@@ -1109,8 +1151,57 @@ function CommentThreadNode({
                     : "text-slate-700 dark:text-slate-300",
                 )}
               >
-                {isEditing ? null : renderedContent}
+                {isEditing ? null : isLongBody ? (
+                  <div
+                    data-testid={`comment-${variant}-${comment.id}-body-clamp`}
+                    data-clamped={isBodyClamped ? "true" : "false"}
+                    className={cn(
+                      isBodyClamped &&
+                        "max-h-[7.5rem] overflow-hidden [mask-image:linear-gradient(to_bottom,black_55%,transparent)]",
+                    )}
+                  >
+                    {renderedContent}
+                  </div>
+                ) : (
+                  renderedContent
+                )}
               </div>
+              {!isEditing && isLongBody ? (
+                <div className="mt-1 flex flex-wrap items-center gap-1">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="xs"
+                    data-testid={`comment-${variant}-${comment.id}-read-more`}
+                    aria-expanded={!isBodyClamped}
+                    className="h-5 px-1.5 text-[11px] font-medium text-sky-700 hover:text-sky-800 dark:text-sky-400 dark:hover:text-sky-300"
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setBodyExpanded((current) => !current);
+                    }}
+                  >
+                    {isBodyClamped ? "Read more" : "Show less"}
+                  </Button>
+                  {canOpenReader ? (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="xs"
+                      data-testid={`comment-${variant}-${comment.id}-read-in-reader`}
+                      className="h-5 px-1.5 text-[11px] font-medium text-stone-500 dark:text-slate-400"
+                      onPointerDown={(event) => event.stopPropagation()}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        reader?.open(comment.id);
+                      }}
+                    >
+                      <Maximize2 className="size-3" />
+                      Open
+                    </Button>
+                  ) : null}
+                </div>
+              ) : null}
               {agentDisplayStatus ? (
                 <AgentThreadStatusLine
                   status={agentDisplayStatus}
