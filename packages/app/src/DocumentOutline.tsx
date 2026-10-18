@@ -1,5 +1,5 @@
 import { Hash, ListTree, PanelLeftClose } from "lucide-react";
-import type { CSSProperties } from "react";
+import { type CSSProperties, useEffect, useState } from "react";
 import { outlineBaseLevel, type OutlineHeading } from "./markdown-outline";
 import { Button } from "./components/ui/button";
 import {
@@ -129,14 +129,25 @@ interface DocumentOutlineRailProps {
 /**
  * Single-file mode has no directory tree, so the outline gets its own
  * collapsible rail left of the document. Collapsed it is a thin strip with just
- * the toggle, so the document keeps the width.
+ * the toggle, so the document keeps the width. The top-left corner belongs to
+ * the fixed save status, so the toggle and the label start below or beside it.
  */
 export function DocumentOutlineRail({
   headings,
-  expanded,
+  expanded: preferredExpanded,
   onExpandedChange,
   onSelectHeading,
 }: DocumentOutlineRailProps) {
+  // A 15rem rail next to a phone-width document leaves the document almost no
+  // width. There it starts as a strip, opens over the document, and is not
+  // remembered: the saved preference is about wide screens.
+  const narrow = useNarrowViewport();
+  const [narrowOpen, setNarrowOpen] = useState(false);
+  const expanded = narrow ? narrowOpen : preferredExpanded;
+  const setExpanded = (next: boolean) => {
+    if (narrow) setNarrowOpen(next);
+    else onExpandedChange(next);
+  };
   const toggleLabel = expanded ? "Hide outline" : "Show outline";
   const toggleButton = (
     <Tooltip>
@@ -149,7 +160,7 @@ export function DocumentOutlineRail({
         aria-label={toggleLabel}
         aria-expanded={expanded}
         data-testid="document-outline-toggle"
-        onClick={() => onExpandedChange(!expanded)}
+        onClick={() => setExpanded(!expanded)}
       />
       <TooltipContent>{toggleLabel}</TooltipContent>
     </Tooltip>
@@ -160,20 +171,24 @@ export function DocumentOutlineRail({
       <nav
         aria-label="Document outline"
         data-testid="document-outline-rail"
-        className="flex h-screen w-10 shrink-0 flex-col items-center border-r border-slate-200 bg-slate-50 pt-3 dark:border-slate-800 dark:bg-slate-900/40"
+        className="flex h-screen w-10 shrink-0 flex-col items-center border-r border-slate-200 bg-slate-50 pt-12 dark:border-slate-800 dark:bg-slate-900/40"
       >
         {toggleButton}
       </nav>
     );
   }
 
-  return (
+  const rail = (
     <nav
       aria-label="Document outline"
       data-testid="document-outline-rail"
-      className="flex h-screen w-60 shrink-0 flex-col border-r border-slate-200 bg-slate-50 dark:border-slate-800 dark:bg-slate-900/40"
+      className={cn(
+        "flex h-screen w-60 shrink-0 flex-col border-r border-slate-200 bg-slate-50 dark:border-slate-800 dark:bg-slate-900/40",
+        narrow &&
+          "fixed inset-y-0 left-0 z-[70] max-w-[calc(100vw-3rem)] shadow-xl dark:bg-slate-900",
+      )}
     >
-      <div className="flex items-center justify-between gap-2 border-b border-slate-200 px-3 py-2 dark:border-slate-800">
+      <div className="flex items-center justify-between gap-2 border-b border-slate-200 py-2 pr-3 pl-11 dark:border-slate-800">
         <p className="text-xs font-medium tracking-wide text-slate-400 uppercase">
           Outline
         </p>
@@ -182,7 +197,10 @@ export function DocumentOutlineRail({
       <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
         <DocumentOutlineBox
           headings={headings}
-          onSelectHeading={onSelectHeading}
+          onSelectHeading={(heading) => {
+            if (narrow) setNarrowOpen(false);
+            onSelectHeading(heading);
+          }}
           status="ready"
           testId="document-outline-box"
           testIdPrefix="document-outline"
@@ -190,4 +208,36 @@ export function DocumentOutlineRail({
       </div>
     </nav>
   );
+
+  if (!narrow) return rail;
+
+  // Keep the strip's width in the layout while the open rail floats.
+  return (
+    <>
+      <div aria-hidden="true" className="h-screen w-10 shrink-0" />
+      {rail}
+    </>
+  );
+}
+
+const NARROW_VIEWPORT_QUERY = "(max-width: 767px)";
+
+function useNarrowViewport(): boolean {
+  const [narrow, setNarrow] = useState(
+    () =>
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia(NARROW_VIEWPORT_QUERY).matches,
+  );
+
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const query = window.matchMedia(NARROW_VIEWPORT_QUERY);
+    const update = () => setNarrow(query.matches);
+    update();
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, []);
+
+  return narrow;
 }

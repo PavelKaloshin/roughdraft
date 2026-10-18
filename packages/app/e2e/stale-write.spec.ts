@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import { expect, test } from "@playwright/test";
+import { expect, type Locator, test } from "@playwright/test";
 import {
   appendInCodeEditor,
   blockMarkdownFileEvents,
@@ -196,6 +196,11 @@ test.describe("stale writes", () => {
   test("rejects autosave after external content changes with stable metadata", async ({
     page,
   }) => {
+    // Without this, the live file channel (which compares content versions,
+    // not mtime and size) reloads the external edit before the user types, so
+    // the save would correctly succeed and the conflict path is never taken.
+    await blockMarkdownFileEvents(page);
+
     const fixedTimestamp = new Date("2026-01-01T00:00:00.000Z");
     const filePath = writeProjectFile(
       projectDir,
@@ -273,16 +278,44 @@ test.describe("stale writes", () => {
     ).toBeVisible();
   });
 
-  test("keeps conflict banner and save status stack from overlapping", async ({
+  test("keeps conflict banner clear of the save status and the handoff stack", async ({
     page,
+    request,
   }) => {
     await blockMarkdownFileEvents(page);
 
+    const relativePath = "layout-conflict.md";
     const filePath = writeProjectFile(
       projectDir,
-      "layout-conflict.md",
+      relativePath,
       "# Layout conflict\n\nOriginal body.\n",
     );
+    // The right-hand status stack only holds the review handoff button, which
+    // shows while an agent watches the document; the save status sits in its
+    // own top-left corner. Keep a watcher connected so both are on screen.
+    const pendingWatch = request
+      .post("/api/review-events/watch", {
+        data: {
+          projectPath: projectDir,
+          path: relativePath,
+          timeoutSeconds: 25,
+        },
+      })
+      .catch(() => undefined);
+
+    const boxOf = async (locator: Locator) => {
+      const box = await locator.boundingBox();
+      if (!box) throw new Error("Expected element bounds");
+      return box;
+    };
+    const intersects = (
+      a: { x: number; y: number; width: number; height: number },
+      b: { x: number; y: number; width: number; height: number },
+    ) =>
+      a.x < b.x + b.width &&
+      a.x + a.width > b.x &&
+      a.y < b.y + b.height &&
+      a.y + a.height > b.y;
 
     for (const viewport of [
       { width: 1280, height: 720 },
@@ -300,28 +333,27 @@ test.describe("stale writes", () => {
       await appendInCodeEditor(page, `\nLocal body ${viewport.width}.\n`);
 
       const conflictNotice = fileConflictNotice(page);
-      const statusStack = page.getByTestId("document-status-stack");
+      const handoffStack = page.getByTestId("review-handoff-split-button");
+      const saveStatus = documentSaveStatus(page);
       await expect(conflictNotice).toBeVisible();
-      await expect(statusStack).toBeVisible();
+      await expect(handoffStack).toBeVisible();
+      await expect(saveStatus).toHaveAttribute("aria-label", "Save conflict");
 
-      const conflictBox = await conflictNotice.boundingBox();
-      const stackBox = await statusStack.boundingBox();
-      expect(conflictBox).not.toBeNull();
-      expect(stackBox).not.toBeNull();
+      const conflictBox = await boxOf(conflictNotice);
+      expect(
+        intersects(conflictBox, await boxOf(handoffStack)),
+        `handoff stack overlaps the conflict banner at ${viewport.width}px`,
+      ).toBe(false);
+      expect(
+        intersects(conflictBox, await boxOf(saveStatus)),
+        `save status overlaps the conflict banner at ${viewport.width}px`,
+      ).toBe(false);
 
-      if (!conflictBox || !stackBox) {
-        throw new Error("Expected conflict and status stack bounds");
-      }
-
-      const intersects =
-        conflictBox.x < stackBox.x + stackBox.width &&
-        conflictBox.x + conflictBox.width > stackBox.x &&
-        conflictBox.y < stackBox.y + stackBox.height &&
-        conflictBox.y + conflictBox.height > stackBox.y;
-
-      expect(intersects).toBe(false);
       await page.getByTestId("file-conflict-action-reload").click();
       await expect(conflictNotice).toBeHidden();
     }
+
+    // The watcher only has to stay connected for the checks above.
+    void pendingWatch;
   });
 });

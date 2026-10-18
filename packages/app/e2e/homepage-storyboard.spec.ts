@@ -516,7 +516,7 @@ test.describe("homepage workflow storyboard", () => {
             '[data-testid="homepage-workflow-sticky-visual"]',
           );
           const sceneCopy = element.querySelector(
-            ".homepage-workflow-scene-copy",
+            '[data-testid="homepage-workflow-scene-copy"]',
           );
           const documentTitle = document.querySelector(
             '[data-testid="homepage-workflow-document-title"]',
@@ -528,7 +528,7 @@ test.describe("homepage workflow storyboard", () => {
             '[data-testid="homepage-workflow-document-workspace"]',
           );
           const popupHeader = document.querySelector(
-            ".homepage-workflow-popup .homepage-workflow-panel-header",
+            '[data-testid="homepage-workflow-popup-header"]',
           );
           if (
             !sticky ||
@@ -565,7 +565,7 @@ test.describe("homepage workflow storyboard", () => {
               stage >= 3 && popupHeaderRect
                 ? popupHeaderRect.top < stickyRect.top &&
                   headerHitTarget?.closest(
-                    ".homepage-workflow-popup .homepage-workflow-panel-header",
+                    '[data-testid="homepage-workflow-popup-header"]',
                   ) !== null
                 : null,
             popupHeaderTop:

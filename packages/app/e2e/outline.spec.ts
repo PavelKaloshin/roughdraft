@@ -180,7 +180,46 @@ test.describe("markdown outline", () => {
     await page.getByTestId("document-outline-toggle").click();
     await expect(page.getByTestId("document-outline-box")).toBeHidden();
     await expect(page.getByTestId("document-outline-toggle")).toBeVisible();
+    // ...and the strip's toggle is not covered by the corner save status.
+    await page.getByTestId("document-outline-toggle").click();
+    await expect(page.getByTestId("document-outline-box")).toBeVisible();
 
     logE2eEvent("outline.single-file-rail", { projectDir });
+  });
+
+  test("keeps the document usable next to the outline at phone width", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    const filePath = writeProjectFile(
+      projectDir,
+      "phone.md",
+      longDocument(["# Plan", "## Goals", "## Risks"]),
+    );
+
+    await page.goto(`/?${new URLSearchParams({ path: filePath }).toString()}`);
+    await expect(page.getByTestId("document-outline-rail")).toBeVisible();
+    await expect(richTextEditor(page)).toContainText("Filler line 1 under");
+
+    // The rail starts as a strip, so the document keeps the width.
+    await expect(page.getByTestId("document-outline-box")).toBeHidden();
+    const editorWidth = async () =>
+      (await richTextEditor(page).boundingBox())?.width ?? 0;
+    const collapsedWidth = await editorWidth();
+    // With the expanded rail in the layout it was squeezed to a sliver.
+    expect(collapsedWidth).toBeGreaterThan(180);
+
+    // Opened, the outline floats over the document instead of squeezing it,
+    // and picking a heading puts it away again.
+    await page.getByTestId("document-outline-toggle").click();
+    await expect(page.getByTestId("document-outline-box")).toBeVisible();
+    expect(await editorWidth()).toBe(collapsedWidth);
+    await page.getByTestId("document-outline-heading-2").click();
+    await expect(page.getByTestId("document-outline-box")).toBeHidden();
+    await expect
+      .poll(async () => await renderedHeadingTop(page, "Risks"), {
+        timeout: 5_000,
+      })
+      .toBeLessThan(844 / 2);
   });
 });
