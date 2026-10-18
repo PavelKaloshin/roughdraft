@@ -70,7 +70,7 @@ test.describe("Session ownership", () => {
     return response;
   }
 
-  const after = (body: SessionListenBody) => ({
+  const cursorsFrom = (body: SessionListenBody) => ({
     afterSequence: body.nextSequence - 1,
     afterNotice: body.noticeCursor,
   });
@@ -117,21 +117,21 @@ test.describe("Session ownership", () => {
     await expect(indicator).toHaveText("Claude · docs pass · other-project");
 
     // The previous owner is told; the new owner hears about the file.
-    const a1 = await listen(request, sessionA, after(a0));
+    const a1 = await listen(request, sessionA, cursorsFrom(a0));
     expect(a1.notices).toEqual([
       expect.objectContaining({ type: "released", documentPath: filePath }),
     ]);
-    const b1 = await listen(request, sessionB, after(b0));
+    const b1 = await listen(request, sessionB, cursorsFrom(b0));
     expect(b1.notices).toEqual([
       expect.objectContaining({ type: "claimed", documentPath: filePath }),
     ]);
 
     const aWait = listen(request, sessionA, {
-      ...after(a1),
+      ...cursorsFrom(a1),
       timeoutSeconds: 4,
     });
     const bWait = listen(request, sessionB, {
-      ...after(b1),
+      ...cursorsFrom(b1),
       timeoutSeconds: 20,
     });
 

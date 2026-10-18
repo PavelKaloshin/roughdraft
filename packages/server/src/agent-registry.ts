@@ -39,8 +39,16 @@ const STATUS_RANK: Record<AgentThreadStatus, number> = {
   applied: 4,
 };
 
+/**
+ * Who a `delegated` thread was handed to. Absent means a subagent of the
+ * listening session; `fork-process` is a headless `claude -p --fork-session`
+ * the listener started because the session was busy.
+ */
+export type AgentDelegatedTo = "fork-process";
+
 export interface AgentThreadDetail {
   status: AgentThreadStatus;
+  delegatedTo?: AgentDelegatedTo;
   /** When the thread entered its current status (ISO 8601). */
   since: string;
   /** When the user's latest Ask/Change/follow-up reached the server. */
@@ -87,6 +95,7 @@ interface ListenerRecord {
 
 interface ThreadRecord {
   status: AgentThreadStatus;
+  delegatedTo: AgentDelegatedTo | null;
   statusSince: number;
   requestedAt: number | null;
   /** Highest comment-event sequence emitted for this thread. */
@@ -184,6 +193,7 @@ export class AgentRegistry {
     const thread = this.thread(event.documentPath, event.threadRootId);
     const now = this.now();
     thread.status = "pending";
+    thread.delegatedTo = null;
     thread.statusSince = now;
     thread.requestedAt = now;
     thread.lastEventSequence = Math.max(
@@ -236,6 +246,49 @@ export class AgentRegistry {
     return thread.status;
   }
 
+  /**
+   * Hands a thread nobody picked up yet to a headless fork. Fails (returns
+   * false) once the session delegated, acked or answered it, so the session
+   * and the fork never both own one thread.
+   */
+  claimForFork(documentPath: string, threadRootId: string): boolean {
+    const thread = this.thread(documentPath, threadRootId);
+    if (STATUS_RANK[thread.status] >= STATUS_RANK.delegated) return false;
+    this.transition(thread, "delegated");
+    thread.delegatedTo = "fork-process";
+    this.broadcast(documentPath);
+    return true;
+  }
+
+  /**
+   * A fork gave up without answering: back to `queued` (the session already
+   * has the event line). The only backward move, and only for a thread the
+   * fork owns; an answer always stays.
+   */
+  requeueThread(documentPath: string, threadRootId: string): AgentThreadStatus {
+    const thread = this.thread(documentPath, threadRootId);
+    if (
+      thread.delegatedTo !== "fork-process" ||
+      STATUS_RANK[thread.status] >= STATUS_RANK.answered
+    ) {
+      return thread.status;
+    }
+    this.transition(thread, "queued");
+    thread.delegatedTo = null;
+    this.broadcast(documentPath);
+    return thread.status;
+  }
+
+  delegatedTo(
+    documentPath: string,
+    threadRootId: string,
+  ): AgentDelegatedTo | null {
+    return (
+      this.documents.get(path.resolve(documentPath))?.threads.get(threadRootId)
+        ?.delegatedTo ?? null
+    );
+  }
+
   clearThread(documentPath: string, threadRootId: string): void {
     const state = this.documents.get(path.resolve(documentPath));
     if (!state?.threads.delete(threadRootId)) return;
@@ -282,6 +335,7 @@ export class AgentRegistry {
       threads[id] = thread.status;
       threadDetails[id] = {
         status: thread.status,
+        ...(thread.delegatedTo ? { delegatedTo: thread.delegatedTo } : {}),
         since: new Date(thread.statusSince).toISOString(),
         ...(thread.requestedAt !== null
           ? { requestedAt: new Date(thread.requestedAt).toISOString() }
@@ -372,6 +426,7 @@ export class AgentRegistry {
     if (!thread) {
       thread = {
         status: "pending",
+        delegatedTo: null,
         statusSince: this.now(),
         requestedAt: null,
         lastEventSequence: 0,

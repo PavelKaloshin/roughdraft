@@ -1235,6 +1235,22 @@ export function createApp(options: CreateAppOptions = {}): CreateAppResult {
       return;
     }
 
+    const delegatedTo: unknown = req.body?.delegatedTo;
+    if (
+      delegatedTo !== undefined &&
+      (delegatedTo !== "fork-process" || delegated !== true)
+    ) {
+      res.status(400).json({
+        error: 'delegatedTo must be "fork-process", together with delegated',
+      });
+      return;
+    }
+    const requeue: unknown = req.body?.requeue ?? false;
+    if (typeof requeue !== "boolean") {
+      res.status(400).json({ error: "requeue must be true or false" });
+      return;
+    }
+
     const lookup = lookupComment(
       fs.readFileSync(target.absolutePath, "utf-8"),
       commentId,
@@ -1243,19 +1259,52 @@ export function createApp(options: CreateAppOptions = {}): CreateAppResult {
       res.status(lookup.status).json({ error: lookup.error });
       return;
     }
+    const threadRootId = lookup.threadRootId;
+    const respond = (code: number, status: string) => {
+      const owner = agentRegistry.delegatedTo(
+        target.absolutePath,
+        threadRootId,
+      );
+      res.status(code).json({
+        commentId,
+        threadRootId,
+        status,
+        ...(owner ? { delegatedTo: owner } : {}),
+        ...(code === 409
+          ? { error: `${threadRootId} is already ${status}` }
+          : {}),
+      });
+    };
+
+    // A headless fork (`roughdraft answer-fork`) claims only a thread the
+    // session has not picked up; a fork that gave up puts it back.
+    if (delegatedTo === "fork-process") {
+      const claimed = agentRegistry.claimForFork(
+        target.absolutePath,
+        threadRootId,
+      );
+      const current = agentRegistry.status(target.absolutePath).threads[
+        threadRootId
+      ];
+      respond(claimed ? 200 : 409, current ?? "pending");
+      return;
+    }
+    if (requeue) {
+      respond(
+        200,
+        agentRegistry.requeueThread(target.absolutePath, threadRootId),
+      );
+      return;
+    }
 
     // `delegated`: the session handed the thread to a subagent, which acks
     // again (without the flag) once it starts working.
     const status = agentRegistry.setThreadStatus(
       target.absolutePath,
-      lookup.threadRootId,
+      threadRootId,
       delegated ? "delegated" : "working",
     );
-    res.json({
-      commentId,
-      threadRootId: lookup.threadRootId,
-      status,
-    });
+    respond(200, status);
   });
 
   app.post("/api/comments/reply", (req, res) => {

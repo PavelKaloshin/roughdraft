@@ -152,6 +152,16 @@ describe("agent status snapshot", () => {
         c3: {},
       },
     });
+    // A thread handed to a headless fork says so; unknown owners are dropped.
+    expect(
+      parseAgentStatusSnapshot({
+        threads: { c1: "delegated", c2: "delegated" },
+        threadDetails: {
+          c1: { status: "delegated", delegatedTo: "fork-process" },
+          c2: { status: "delegated", delegatedTo: "robot" },
+        },
+      }).threadDetails,
+    ).toEqual({ c1: { delegatedTo: "fork-process" }, c2: {} });
     // An older server sends no timing at all.
     expect(parseAgentStatusSnapshot(null)).toEqual({
       listening: false,
@@ -174,6 +184,15 @@ describe("thread lifecycle labels", () => {
     expect(label("working")).toBe("Claude is working…");
     expect(label("answered")).toBe("Answered");
     expect(label("applied")).toBe("Applied");
+  });
+
+  it("names a headless fork apart from a subagent", () => {
+    expect(
+      getThreadAgentStatusLabel("delegated", {
+        listening: true,
+        delegatedTo: "fork-process",
+      }),
+    ).toBe("Passed to a forked Claude");
   });
 
   it("passes the new server states through to the status line", () => {
@@ -208,6 +227,16 @@ describe("thread lifecycle labels", () => {
       ),
     ).toBe("1 with a subagent");
     expect(summarizeAgentThreads({ c1: "pending", c2: "applied" })).toBe(null);
+  });
+
+  it("counts threads with a headless fork apart from subagents", () => {
+    expect(
+      summarizeAgentThreads(
+        { c1: "delegated", c2: "delegated", c3: "queued" },
+        null,
+        { c2: { delegatedTo: "fork-process" } },
+      ),
+    ).toBe("1 queued · 1 with a subagent · 1 with a forked Claude");
   });
 });
 

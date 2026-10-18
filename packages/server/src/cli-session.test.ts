@@ -537,12 +537,21 @@ describe("session CLI commands", () => {
     expect(logs).toContain("  claude plugin install roughdraft@roughdraft");
   });
 
-  it("rejects listen with both a file and --session, and claim without a session", async () => {
-    const both = makeDeps();
+  it("keeps listen <file> --session a per-file listener that claims the file", async () => {
+    const perFile = makeDeps();
     expect(
-      await runCli(["listen", planPath, "--session", "session-a"], both.deps),
-    ).toBe(2);
+      await runCli(
+        ["listen", planPath, "--session", "session-a", "--max-seconds", "0.2"],
+        perFile.deps,
+      ),
+    ).toBe(0);
+    expect(perFile.logs[0]).toMatch(
+      /^\[roughdraft\] listening on .*plan\.md \(session session-a\)/,
+    );
+    await waitForOwnerOf(planPath, "session-a");
+  });
 
+  it("rejects claim without a session", async () => {
     const none = makeDeps();
     expect(await runCli(["claim", planPath], none.deps)).toBe(2);
     expect(none.errors.join("\n")).toContain("--session");

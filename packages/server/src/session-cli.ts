@@ -3,12 +3,20 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   type AgentCliIo,
+  type AgentCliTarget,
   cliCommandName,
   formatListenDoneLine,
   formatListenEventLine,
+  type ListenObserver,
   shellQuote,
 } from "./agent-cli.js";
-import type { ReviewEvent } from "./review-events.js";
+import {
+  DEFAULT_MAX_CONCURRENT_FORKS,
+  ForkScheduler,
+  fetchThreadStatus,
+  runAnswerFork,
+} from "./fork-responder.js";
+import type { CommentEvent, ReviewEvent } from "./review-events.js";
 import type { OwnershipNotice, SessionSummary } from "./session-ownership.js";
 import { roundTimeoutSignal } from "./watch-rounds.js";
 
@@ -145,6 +153,8 @@ export async function runSessionListen(
     maxSeconds: number;
     quiet: boolean;
     roundSeconds?: number;
+    /** Sees every comment event printed (`--fork-asks-after`). */
+    observer?: ListenObserver;
   },
 ): Promise<number> {
   const now = io.now ?? Date.now;
@@ -231,6 +241,7 @@ export async function runSessionListen(
       if (error instanceof FatalSessionError) {
         if (!options.quiet)
           io.log(`[roughdraft] listen stopped: ${error.message}`);
+        await options.observer?.close();
         return 1;
       }
       // The server went away or restarted (maybe on another port).
@@ -296,16 +307,84 @@ export async function runSessionListen(
     for (const event of payload.events) {
       cursor = Math.max(cursor, event.sequence);
       io.log(formatSessionEventLine(event, cli));
+      if (event.type !== "review.completed") options.observer?.observe(event);
     }
     cursor = Math.max(cursor, payload.nextSequence - 1);
   }
 
+  await options.observer?.close();
   if (!options.quiet) {
     io.log(
       `[roughdraft] listen expired; re-arm with: ${cli} listen --session ${shellQuote(options.sessionId)}`,
     );
   }
   return 0;
+}
+
+/**
+ * `listen --session --fork-asks-after`: one fork scheduler per document
+ * (thread ids are only unique within a file), talking to whichever server
+ * the listener currently uses.
+ */
+export class SessionForkObserver implements ListenObserver {
+  private readonly schedulers = new Map<string, ForkScheduler>();
+
+  constructor(
+    private readonly options: {
+      io: AgentCliIo;
+      sessionId: string;
+      cwd: string;
+      afterSeconds: number;
+      claudePath?: string;
+      serverUrl: () => string | null;
+      /** Test hook: replaces `runAnswerFork`. */
+      runFork?: ConstructorParameters<typeof ForkScheduler>[0]["runFork"];
+    },
+  ) {}
+
+  observe(event: CommentEvent): void {
+    this.scheduler(event.documentPath).observe(event);
+  }
+
+  async close(): Promise<void> {
+    await Promise.all(
+      [...this.schedulers.values()].map((scheduler) => scheduler.close()),
+    );
+  }
+
+  private scheduler(documentPath: string): ForkScheduler {
+    let scheduler = this.schedulers.get(documentPath);
+    if (scheduler) return scheduler;
+    const { io, serverUrl } = this.options;
+    const target: AgentCliTarget = {
+      get serverUrl() {
+        return serverUrl() ?? "http://127.0.0.1:0";
+      },
+      projectDir: path.dirname(documentPath),
+      documentPath,
+    };
+    const cli = cliCommandName(io.env);
+    scheduler = new ForkScheduler({
+      afterMs: this.options.afterSeconds * 1000,
+      maxConcurrent: DEFAULT_MAX_CONCURRENT_FORKS,
+      threadStatus: (threadRootId) =>
+        fetchThreadStatus(io, target, threadRootId),
+      runFork:
+        this.options.runFork ??
+        ((event, started) =>
+          runAnswerFork(io, target, {
+            commentId: event.commentId,
+            sessionId: this.options.sessionId,
+            cwd: this.options.cwd,
+            claudePath: this.options.claudePath,
+            onStarted: started,
+          })),
+      log: io.log,
+      formatEventLine: (event) => formatSessionEventLine(event, cli),
+    });
+    this.schedulers.set(documentPath, scheduler);
+    return scheduler;
+  }
 }
 
 // --- claim --------------------------------------------------------------------
@@ -668,6 +747,8 @@ interface SessionArgs {
   claimsFile?: string;
   title?: string;
   maxSeconds?: number;
+  forkAsksAfter?: number;
+  claude?: string;
   stateDir?: string;
   stateFile?: string;
 }
@@ -676,8 +757,10 @@ type SessionStringFlag =
   | "session"
   | "claimsFile"
   | "title"
+  | "claude"
   | "stateDir"
   | "stateFile";
+type SessionNumberFlag = "maxSeconds" | "forkAsksAfter";
 type SessionBooleanFlag =
   | "help"
   | "json"
@@ -686,11 +769,16 @@ type SessionBooleanFlag =
   | "noStart"
   | "install";
 
-const SESSION_VALUE_FLAGS: Record<string, SessionStringFlag | "maxSeconds"> = {
+const SESSION_VALUE_FLAGS: Record<
+  string,
+  SessionStringFlag | SessionNumberFlag
+> = {
   "--session": "session",
   "--claims-file": "claimsFile",
   "--title": "title",
   "--max-seconds": "maxSeconds",
+  "--fork-asks-after": "forkAsksAfter",
+  "--claude": "claude",
   "--state-dir": "stateDir",
   "--state-file": "stateFile",
 };
@@ -730,12 +818,12 @@ export function parseSessionArgs(args: string[]): SessionArgs {
       const value = inline ?? args[index + 1];
       if (value === undefined) throw new Error(`${flag} requires a value.`);
       if (inline === undefined) index += 1;
-      if (valueKey === "maxSeconds") {
+      if (valueKey === "maxSeconds" || valueKey === "forkAsksAfter") {
         const number = Number(value);
         if (!Number.isFinite(number) || number < 0 || value.trim() === "") {
           throw new Error(`${flag} must be a non-negative number.`);
         }
-        parsed.maxSeconds = number;
+        parsed[valueKey] = number;
       } else {
         parsed[valueKey] = value;
       }
@@ -749,10 +837,29 @@ export function parseSessionArgs(args: string[]): SessionArgs {
 
 /** `listen --session …` is the session listener; `listen <file>` is not. */
 export function isSessionListenArgs(args: string[]): boolean {
-  return args.some(
-    (arg) => arg === "--session" || arg.startsWith("--session="),
-  );
+  let hasSession = false;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index] ?? "";
+    if (arg === "--") return false;
+    if (arg.startsWith("--session")) hasSession = true;
+    if (arg.startsWith("-")) {
+      // Skip a flag's separate value (`--session id`, `--since 3`, …).
+      if (!arg.includes("=") && LISTEN_VALUE_FLAGS.has(arg)) index += 1;
+      continue;
+    }
+    // `listen <file> --session <id>`: a per-file listener for that session.
+    return false;
+  }
+  return hasSession;
 }
+
+const LISTEN_VALUE_FLAGS = new Set([
+  ...Object.keys(SESSION_VALUE_FLAGS),
+  "--since",
+  "--instance",
+  "--fork-asks-after",
+  "--claude",
+]);
 
 export type SessionCommand = "listen" | "claim" | "sessions" | "setup";
 
@@ -835,10 +942,26 @@ export async function runSessionCommand(
       deps.error(usage);
       return USAGE_ERROR;
     }
-    const locate = options.noStart
-      ? () => deps.locateServer(env)
-      : () => deps.ensureServer(env, deps.cwd);
+    let currentServer: string | null = null;
+    const locate = async () => {
+      currentServer = options.noStart
+        ? await deps.locateServer(env)
+        : await deps.ensureServer(env, deps.cwd);
+      return currentServer;
+    };
+    const observer =
+      options.forkAsksAfter !== undefined
+        ? new SessionForkObserver({
+            io: deps,
+            sessionId,
+            cwd: deps.cwd,
+            afterSeconds: options.forkAsksAfter,
+            ...(options.claude ? { claudePath: options.claude } : {}),
+            serverUrl: () => currentServer,
+          })
+        : undefined;
     return runSessionListen(deps, locate, {
+      ...(observer ? { observer } : {}),
       sessionId,
       ...(claimsFile ? { claimsFile } : {}),
       ...(options.title ? { title: options.title } : {}),

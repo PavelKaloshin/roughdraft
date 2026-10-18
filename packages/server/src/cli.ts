@@ -11,7 +11,9 @@ import {
 } from "@roughdraft/rfm";
 import {
   type AgentCliTarget,
+  cliCommandName,
   DEFAULT_LISTEN_MAX_SECONDS,
+  formatListenEventLine,
   type ParsedAgentArgs,
   parseAgentArgs,
   runAck,
@@ -19,6 +21,14 @@ import {
   runReply,
   runResolve,
 } from "./agent-cli.js";
+import {
+  DEFAULT_FORK_TIMEOUT_MS,
+  DEFAULT_MAX_CONCURRENT_FORKS,
+  ForkScheduler,
+  fetchThreadStatus,
+  runAnswerFork,
+  SUGGESTED_FORK_ASKS_AFTER_SECONDS,
+} from "./fork-responder.js";
 import {
   ROUGHDRAFT_BIND_HOST,
   ROUGHDRAFT_DEFAULT_PORT,
@@ -61,6 +71,7 @@ const KNOWN_COMMANDS = [
   "reply",
   "ack",
   "resolve",
+  "answer-fork",
   "mcp",
   "doctor",
   "help",
@@ -913,6 +924,9 @@ function printHelp(log: (message: string) => void) {
   );
   log("  resolve <file.md> <id>  Mark a comment thread resolved");
   log(
+    "  answer-fork <file.md> <id>  Answer an Ask from a headless fork of a Claude session",
+  );
+  log(
     "  listen --session <id>   Print Ask/Change lines for every file a Claude session owns",
   );
   log(
@@ -1129,6 +1143,18 @@ function printCommandHelp(
     log(
       `  --max-seconds <seconds>  Exit cleanly after this long, default ${DEFAULT_LISTEN_MAX_SECONDS}`,
     );
+    log(
+      `  --fork-asks-after <s>    Answer an Ask still queued after <s> seconds (e.g. ${SUGGESTED_FORK_ASKS_AFTER_SECONDS})`,
+    );
+    log(
+      "                           from a headless fork of the session (see answer-fork); off by default",
+    );
+    log(
+      "  --session <id>           Session to fork, default CLAUDE_CODE_SESSION_ID",
+    );
+    log(
+      "  --claude <path>          claude CLI for forks, default claude on PATH",
+    );
     log("  --state-file <path>      Server state file");
     log("  --state-dir <dir>        Directory containing server.json");
     log("");
@@ -1137,6 +1163,42 @@ function printCommandHelp(
       "  CLAUDE_CODE_SESSION_ID   Reported to the Roughdraft UI as the listening session",
     );
     printSessionCommandHelp("listen", log);
+    return;
+  }
+
+  if (command === "answer-fork") {
+    log("Usage:");
+    log(
+      "  roughdraft answer-fork <file.md> <commentId> [--session <id>] [--claude <path>] [--timeout <seconds>]",
+    );
+    log("");
+    log(
+      "Answers an Ask thread while the Claude Code session that owns it is busy:",
+    );
+    log(
+      "runs `claude -p --resume <id> --fork-session`, a fork of the session's context",
+    );
+    log(
+      "that may only read files and run `roughdraft ack` and `roughdraft reply`. It never",
+    );
+    log(
+      "edits the document, and refuses Change threads. The UI shows the thread as",
+    );
+    log(
+      "passed to a forked Claude; if the fork fails or times out, the thread goes back",
+    );
+    log("to the session's queue.");
+    log("");
+    log("Flags:");
+    log(
+      "  --session <id>          Session to fork, default CLAUDE_CODE_SESSION_ID",
+    );
+    log("  --claude <path>         claude CLI, default claude on PATH");
+    log(
+      `  --timeout <seconds>     Stop the fork after this long, default ${DEFAULT_FORK_TIMEOUT_MS / 1000}`,
+    );
+    log("  --state-file <path>     Server state file");
+    log("  --state-dir <dir>       Directory containing server.json");
     return;
   }
 
@@ -2459,6 +2521,8 @@ const AGENT_COMMAND_USAGE = {
     "Usage: roughdraft reply <file.md> <commentId> (--stdin | --body <text>) [--status answered|applied]",
   ack: "Usage: roughdraft ack <file.md> <commentId> [--delegated]",
   resolve: "Usage: roughdraft resolve <file.md> <commentId> [--summary <text>]",
+  "answer-fork":
+    "Usage: roughdraft answer-fork <file.md> <commentId> [--session <id>] [--claude <path>] [--timeout <seconds>]",
 } as const;
 
 async function runAgentCommand(
@@ -2478,14 +2542,24 @@ async function runAgentCommand(
             "--since",
             "--instance",
             "--max-seconds",
+            "--fork-asks-after",
+            "--session",
+            "--claude",
           ])
-        : command === "reply"
-          ? parseAgentArgs(rest, [...commonFlags, "--body", "--status"], {
-              allowStdin: true,
-            })
-          : command === "resolve"
-            ? parseAgentArgs(rest, [...commonFlags, "--summary"])
-            : parseAgentArgs(rest, commonFlags, { allowDelegated: true });
+        : command === "answer-fork"
+          ? parseAgentArgs(rest, [
+              ...commonFlags,
+              "--session",
+              "--claude",
+              "--timeout",
+            ])
+          : command === "reply"
+            ? parseAgentArgs(rest, [...commonFlags, "--body", "--status"], {
+                allowStdin: true,
+              })
+            : command === "resolve"
+              ? parseAgentArgs(rest, [...commonFlags, "--summary"])
+              : parseAgentArgs(rest, commonFlags, { allowDelegated: true });
   } catch (error) {
     baseDeps.error(error instanceof Error ? error.message : "Invalid usage.");
     baseDeps.error(usage);
@@ -2567,12 +2641,89 @@ async function runAgentCommand(
   };
   const json = globalJson || options.json;
 
+  const sessionId =
+    options.session?.trim() || deps.env.CLAUDE_CODE_SESSION_ID?.trim() || "";
+
   if (command === "listen") {
-    return runListen(deps, target, {
+    let observer: ForkScheduler | undefined;
+    if (options.forkAsksAfter !== undefined) {
+      if (sessionId) {
+        observer = new ForkScheduler({
+          afterMs: options.forkAsksAfter * 1000,
+          maxConcurrent: DEFAULT_MAX_CONCURRENT_FORKS,
+          threadStatus: (threadRootId) =>
+            fetchThreadStatus(deps, target, threadRootId),
+          runFork: (event, started) =>
+            runAnswerFork(deps, target, {
+              commentId: event.commentId,
+              sessionId,
+              cwd: deps.cwd,
+              claudePath: options.claude,
+              onStarted: started,
+            }),
+          log: deps.log,
+          formatEventLine: (event) =>
+            formatListenEventLine(event, {
+              cliName: cliCommandName(deps.env),
+              documentPath: target.documentPath,
+            }),
+        });
+      } else {
+        deps.log(
+          "[roughdraft] --fork-asks-after needs a session id (CLAUDE_CODE_SESSION_ID or --session); not forking Asks",
+        );
+      }
+    }
+    // `--session` also names the listening session (it claims the file).
+    const listenDeps = sessionId
+      ? { ...deps, env: { ...deps.env, CLAUDE_CODE_SESSION_ID: sessionId } }
+      : deps;
+    return runListen(listenDeps, target, {
       since: options.since,
       instanceId: options.instance,
       maxSeconds: options.maxSeconds ?? DEFAULT_LISTEN_MAX_SECONDS,
+      observer,
     });
+  }
+  if (command === "answer-fork") {
+    if (!sessionId) {
+      deps.error(
+        "answer-fork needs the session to fork: pass --session <id> or set CLAUDE_CODE_SESSION_ID.",
+      );
+      return USAGE_ERROR;
+    }
+    const outcome = await runAnswerFork(deps, target, {
+      commentId,
+      sessionId,
+      cwd: deps.cwd,
+      claudePath: options.claude,
+      timeoutMs:
+        options.timeout !== undefined ? options.timeout * 1000 : undefined,
+      onStarted: () =>
+        deps.log(
+          `[roughdraft] forking session ${sessionId} to answer ${commentId} in ${target.documentPath}`,
+        ),
+    });
+    switch (outcome.kind) {
+      case "answered":
+        deps.log(
+          `[roughdraft] a headless Claude answered ${commentId} in ${target.documentPath}${outcome.costUsd !== undefined ? ` (cost $${outcome.costUsd.toFixed(2)})` : ""}`,
+        );
+        return 0;
+      case "skipped":
+        deps.log(`[roughdraft] not forking: ${outcome.reason}`);
+        return 0;
+      case "claude-missing":
+        deps.error(
+          `claude CLI not found${options.claude ? ` at ${options.claude}` : " on PATH"}; pass --claude <path>.`,
+        );
+        return 1;
+      default:
+        deps.error(
+          `Headless fork did not answer ${commentId}: ${outcome.reason}`,
+        );
+        return 1;
+    }
   }
   if (command === "reply") {
     return runReply(deps, target, {
@@ -3018,7 +3169,8 @@ export async function runCli(
       command === "listen" ||
       command === "reply" ||
       command === "ack" ||
-      command === "resolve"
+      command === "resolve" ||
+      command === "answer-fork"
     ) {
       return runAgentCommand(command, rest, deps, parsed.global.json);
     }

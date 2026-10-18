@@ -7,6 +7,16 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { CommentEditorList } from "./CommentEditorList";
 import {
+  type CommentReaderTarget,
+  CommentThreadReaderDialog,
+} from "./CommentThreadReader";
+import {
+  CommentReaderContext,
+  type CommentReaderContextValue,
+  escapeAttributeValue,
+} from "./comment-reader-context";
+import { matchesOpenReaderShortcut } from "./comment-shortcuts";
+import {
   applyCommentIdRenames,
   buildCommentIdRenameTransaction,
   type CommentIdRename,
@@ -28,7 +38,11 @@ import {
   type CriticChangeRailItem,
   DocumentReviewRail,
 } from "./DocumentReviewRail";
-import { getPreferredCommentId, parseCommentIds } from "./document-comments";
+import {
+  getPreferredCommentId,
+  getRootThreadIdForCommentId,
+  parseCommentIds,
+} from "./document-comments";
 import { EditorContextMenu } from "./EditorContextMenu";
 import {
   commentHighlightPluginKey,
@@ -637,8 +651,10 @@ function addCommentIdsToCriticChange(
 export function shouldDismissCommentThread(target: EventTarget | null) {
   if (!(target instanceof Element)) return true;
 
+  // The thread reader dialog (and its overlay) reads the selected thread;
+  // clicking in it keeps that thread open so focus can return to it.
   return !target.closest(
-    '[data-comment-thread-container="true"], [data-suggestion-thread-container="true"], .comment-anchor[data-comment-ids], .critic-change[data-critic-change-id]',
+    '[data-comment-thread-container="true"], [data-suggestion-thread-container="true"], .comment-anchor[data-comment-ids], .critic-change[data-critic-change-id], [data-comment-reader="true"], [data-slot="dialog-overlay"]',
   );
 }
 
@@ -2177,6 +2193,109 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
     );
   }, []);
 
+  // Thread reader dialog: a centered, scrollable view of one thread.
+  const [readerTarget, setReaderTarget] = useState<CommentReaderTarget | null>(
+    null,
+  );
+  const readerClosingForReplyRef = useRef(false);
+  const getReaderRootId = useCallback((commentId: string) => {
+    const rootId = getRootThreadIdForCommentId(commentId, commentsRef.current);
+    const root = rootId ? commentsRef.current.get(rootId) : undefined;
+    // Replies to a suggestion have no comment root; the reader skips them.
+    if (!root || root.parentCommentId) return null;
+    return root.id;
+  }, []);
+  const openReader = useCallback(
+    (commentId: string) => {
+      const rootId = getReaderRootId(commentId);
+      if (!rootId) return;
+      readerClosingForReplyRef.current = false;
+      setSelectedCommentId(rootId);
+      setReaderTarget({
+        rootId,
+        focusCommentId: commentId === rootId ? null : commentId,
+      });
+    },
+    [getReaderRootId],
+  );
+  const commentReader = useMemo<CommentReaderContextValue>(
+    () => ({
+      canOpen: (commentId) => getReaderRootId(commentId) !== null,
+      open: openReader,
+    }),
+    [getReaderRootId, openReader],
+  );
+  const navigateReader = useCallback((rootId: string) => {
+    // The rail follows, so closing returns focus to the thread being read.
+    setSelectedCommentId(rootId);
+    setReaderTarget({ rootId, focusCommentId: null });
+  }, []);
+  const closeReader = useCallback(() => setReaderTarget(null), []);
+  const replyFromReader = useCallback(
+    (rootId: string) => {
+      readerClosingForReplyRef.current = true;
+      setReaderTarget(null);
+      // After the dialog lets go of focus, the rail composer takes it.
+      requestAnimationFrame(() => replyToComment(rootId));
+    },
+    [replyToComment],
+  );
+  const getReaderFinalFocus = useCallback((): HTMLElement | boolean => {
+    if (readerClosingForReplyRef.current) return false;
+    const rootId = selectedCommentIdRef.current
+      ? getRootThreadIdForCommentId(
+          selectedCommentIdRef.current,
+          commentsRef.current,
+        )
+      : null;
+    if (!rootId) return true;
+    const candidates = document.querySelectorAll<HTMLElement>(
+      `[data-comment-thread-root-id="${escapeAttributeValue(rootId)}"][tabindex]`,
+    );
+    return (
+      [...candidates].find((element) => element.offsetParent !== null) ?? true
+    );
+  }, []);
+
+  useEffect(() => {
+    if (!selected) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (!matchesOpenReaderShortcut(event, navigator.platform)) return;
+      const commentId = selectedCommentIdRef.current;
+      if (!commentId || !getReaderRootId(commentId)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      openReader(commentId);
+    };
+    document.addEventListener("keydown", handleKeyDown, true);
+    return () => document.removeEventListener("keydown", handleKeyDown, true);
+  }, [getReaderRootId, openReader, selected]);
+
+  // Document order of threads and the anchor quote, read from the editor
+  // only while the reader is open.
+  const readerThreadOrder: string[] = [];
+  let readerAnchorText: string | null = null;
+  if (readerTarget && editor) {
+    const seen = new Set<string>();
+    for (const anchor of editor.view.dom.querySelectorAll<HTMLElement>(
+      ".comment-anchor[data-comment-ids]",
+    )) {
+      for (const id of parseCommentIds(anchor.dataset.commentIds)) {
+        const rootId = getRootThreadIdForCommentId(id, comments);
+        const root = rootId ? comments.get(rootId) : undefined;
+        if (!root || root.parentCommentId || seen.has(root.id)) continue;
+        seen.add(root.id);
+        readerThreadOrder.push(root.id);
+      }
+    }
+    const range = findCommentRange(editor, readerTarget.rootId);
+    readerAnchorText = range
+      ? editor.state.doc.textBetween(range.from, range.to, " ")
+      : (findCommentAnchorElement(editor, readerTarget.rootId)?.textContent ??
+        null);
+    readerAnchorText = readerAnchorText?.replaceAll("⁠", "") ?? null;
+  }
+
   const hasReviewRail = comments.size > 0 || criticChanges.length > 0;
   const documentShellRef =
     useReviewLayoutShiftAnimation<HTMLDivElement>(hasReviewRail);
@@ -2224,130 +2343,151 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
 
   return (
     <CommentDraftRenamesContext.Provider value={commentDraftRenames}>
-      <div
-        className="cursor-text bg-transparent"
-        data-testid="page-card-rich-text"
-      >
+      <CommentReaderContext.Provider value={commentReader}>
+        <CommentThreadReaderDialog
+          target={readerTarget}
+          comments={comments}
+          threadOrder={readerThreadOrder}
+          anchorText={readerAnchorText}
+          onClose={closeReader}
+          onNavigate={navigateReader}
+          onReply={replyFromReader}
+          onUpdateComment={(commentId, nextContent, patch) => {
+            updateComment(commentId, (current) => ({
+              ...current,
+              content: nextContent,
+              ...patch,
+            }));
+          }}
+          getFinalFocus={getReaderFinalFocus}
+        />
         <div
-          ref={documentShellRef}
-          data-testid="document-page-shell"
-          className={documentShellClass}
+          className="cursor-text bg-transparent"
+          data-testid="page-card-rich-text"
         >
-          <div className={documentMainClass}>
-            {activeComments.length > 0 ? (
-              <CommentEditorList
-                comments={activeComments}
-                className={fallbackClass}
-                testId="document-comment-fallback"
-                selectedCommentId={selectedCommentId}
-                hoveredCommentId={hoveredCommentId}
-                onDeleteComment={deleteComment}
-                onUpdateComment={(commentId, nextContent, patch) => {
-                  updateComment(commentId, (current) => ({
-                    ...current,
-                    content: nextContent,
-                    ...patch,
-                  }));
-                }}
-                onReplyComment={replyToComment}
-                onSelectComment={selectComment}
-                onHoverComment={setHoveredCommentId}
-                pendingFocusCommentId={pendingFocusCommentId}
-                newCommentDraftIds={newCommentDraftIds}
-                onAutoFocusComment={(commentId) => {
-                  setPendingFocusCommentId((current) =>
-                    current === commentId ? null : current,
-                  );
-                }}
-              />
-            ) : null}
-            <div className={contentInsetClass}>
-              <div
-                data-testid="document-content-card"
-                className={cn(
-                  contentCardClass,
-                  "px-10 py-10 sm:px-14 sm:py-14",
-                )}
-              >
-                <EditorContextMenu
-                  editor={editor}
-                  backend={backend}
-                  resolveLinkUrl={resolveLinkUrl}
-                  onAddComment={
-                    interactionMode === "viewing" ? undefined : handleAddComment
-                  }
-                  onSuggestDeletion={
-                    interactionMode === "viewing"
-                      ? undefined
-                      : handleSuggestDeletion
-                  }
-                  onSuggestReplacement={
-                    interactionMode === "viewing"
-                      ? undefined
-                      : handleSuggestReplacement
-                  }
-                  onSuggestInsertion={
-                    interactionMode === "viewing"
-                      ? undefined
-                      : handleSuggestInsertion
-                  }
+          <div
+            ref={documentShellRef}
+            data-testid="document-page-shell"
+            className={documentShellClass}
+          >
+            <div className={documentMainClass}>
+              {activeComments.length > 0 ? (
+                <CommentEditorList
+                  comments={activeComments}
+                  className={fallbackClass}
+                  testId="document-comment-fallback"
+                  selectedCommentId={selectedCommentId}
+                  hoveredCommentId={hoveredCommentId}
+                  onDeleteComment={deleteComment}
+                  onUpdateComment={(commentId, nextContent, patch) => {
+                    updateComment(commentId, (current) => ({
+                      ...current,
+                      content: nextContent,
+                      ...patch,
+                    }));
+                  }}
+                  onReplyComment={replyToComment}
+                  onSelectComment={selectComment}
+                  onHoverComment={setHoveredCommentId}
+                  pendingFocusCommentId={pendingFocusCommentId}
+                  newCommentDraftIds={newCommentDraftIds}
+                  onAutoFocusComment={(commentId) => {
+                    setPendingFocusCommentId((current) =>
+                      current === commentId ? null : current,
+                    );
+                  }}
+                />
+              ) : null}
+              <div className={contentInsetClass}>
+                <div
+                  data-testid="document-content-card"
+                  className={cn(
+                    contentCardClass,
+                    "px-10 py-10 sm:px-14 sm:py-14",
+                  )}
                 >
-                  <div data-testid="rich-text-editor">
-                    <EditorContent editor={editor} />
-                  </div>
-                </EditorContextMenu>
+                  <EditorContextMenu
+                    editor={editor}
+                    backend={backend}
+                    resolveLinkUrl={resolveLinkUrl}
+                    onAddComment={
+                      interactionMode === "viewing"
+                        ? undefined
+                        : handleAddComment
+                    }
+                    onSuggestDeletion={
+                      interactionMode === "viewing"
+                        ? undefined
+                        : handleSuggestDeletion
+                    }
+                    onSuggestReplacement={
+                      interactionMode === "viewing"
+                        ? undefined
+                        : handleSuggestReplacement
+                    }
+                    onSuggestInsertion={
+                      interactionMode === "viewing"
+                        ? undefined
+                        : handleSuggestInsertion
+                    }
+                  >
+                    <div data-testid="rich-text-editor">
+                      <EditorContent editor={editor} />
+                    </div>
+                  </EditorContextMenu>
+                </div>
               </div>
             </div>
+            <DocumentReviewRail
+              className={reviewRailClass}
+              layout={layout === "embedded-demo" ? "flow" : "anchored"}
+              testId="document-review-rail"
+              commentGroups={commentGroups}
+              comments={comments}
+              suggestions={criticChanges}
+              selectedCommentId={selectedCommentId}
+              hoveredCommentId={hoveredCommentId}
+              selectedChangeId={selectedChangeId}
+              hoveredChangeId={hoveredChangeId}
+              contentHeight={contentHeight}
+              onDeleteComment={deleteComment}
+              onUpdateComment={(commentId, nextContent, patch) => {
+                updateComment(commentId, (current) => ({
+                  ...current,
+                  content: nextContent,
+                  ...patch,
+                }));
+              }}
+              onReplyComment={replyToComment}
+              onSelectComment={selectComment}
+              onFocusComment={focusComment}
+              onHoverComment={setHoveredCommentId}
+              onAcceptSuggestion={acceptSuggestion}
+              onRejectSuggestion={rejectSuggestion}
+              onReplySuggestion={replyToSuggestion}
+              onSelectSuggestion={selectSuggestion}
+              onFocusSuggestion={focusSuggestion}
+              onHoverSuggestion={setHoveredChangeId}
+              pendingFocusCommentId={pendingFocusCommentId}
+              newCommentDraftIds={newCommentDraftIds}
+              onAutoFocusComment={(commentId) => {
+                setPendingFocusCommentId((current) =>
+                  current === commentId ? null : current,
+                );
+              }}
+              draftSuggestion={draftSuggestion}
+              onDraftSuggestionTextChange={(text) => {
+                setDraftSuggestion((current) =>
+                  current ? { ...current, text } : current,
+                );
+              }}
+              onApplyDraftSuggestion={applyDraftSuggestion}
+              onCancelDraftSuggestion={() => setDraftSuggestion(null)}
+              editor={editor}
+            />
           </div>
-          <DocumentReviewRail
-            className={reviewRailClass}
-            layout={layout === "embedded-demo" ? "flow" : "anchored"}
-            testId="document-review-rail"
-            commentGroups={commentGroups}
-            comments={comments}
-            suggestions={criticChanges}
-            selectedCommentId={selectedCommentId}
-            hoveredCommentId={hoveredCommentId}
-            selectedChangeId={selectedChangeId}
-            hoveredChangeId={hoveredChangeId}
-            contentHeight={contentHeight}
-            onDeleteComment={deleteComment}
-            onUpdateComment={(commentId, nextContent, patch) => {
-              updateComment(commentId, (current) => ({
-                ...current,
-                content: nextContent,
-                ...patch,
-              }));
-            }}
-            onReplyComment={replyToComment}
-            onSelectComment={selectComment}
-            onFocusComment={focusComment}
-            onHoverComment={setHoveredCommentId}
-            onAcceptSuggestion={acceptSuggestion}
-            onRejectSuggestion={rejectSuggestion}
-            onReplySuggestion={replyToSuggestion}
-            onSelectSuggestion={selectSuggestion}
-            onFocusSuggestion={focusSuggestion}
-            onHoverSuggestion={setHoveredChangeId}
-            pendingFocusCommentId={pendingFocusCommentId}
-            newCommentDraftIds={newCommentDraftIds}
-            onAutoFocusComment={(commentId) => {
-              setPendingFocusCommentId((current) =>
-                current === commentId ? null : current,
-              );
-            }}
-            draftSuggestion={draftSuggestion}
-            onDraftSuggestionTextChange={(text) => {
-              setDraftSuggestion((current) =>
-                current ? { ...current, text } : current,
-              );
-            }}
-            onApplyDraftSuggestion={applyDraftSuggestion}
-            onCancelDraftSuggestion={() => setDraftSuggestion(null)}
-            editor={editor}
-          />
         </div>
-      </div>
+      </CommentReaderContext.Provider>
     </CommentDraftRenamesContext.Provider>
   );
 });

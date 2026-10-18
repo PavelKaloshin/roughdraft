@@ -200,7 +200,11 @@ export function useCommentAgentController({
   );
   const threadSummary =
     hasPickedUpThreads && status
-      ? summarizeAgentThreads(status.threads, openThreadIds)
+      ? summarizeAgentThreads(
+          status.threads,
+          openThreadIds,
+          status.threadDetails,
+        )
       : null;
   // A thread the agent already answered (e.g. via `roughdraft reply` without
   // a listener), or one the user resolved or deleted, no longer waits.

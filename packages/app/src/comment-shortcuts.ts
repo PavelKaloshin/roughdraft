@@ -31,6 +31,49 @@ export function matchesAddCommentShortcut(
 }
 
 /**
+ * Thread reader (the centered dialog for long threads):
+ *
+ * - Cmd+Option+O (Mac) / Ctrl+Alt+O opens it for the selected thread (the
+ *   one under the cursor or picked in the rail), matched by physical key
+ *   like Cmd+Option+M because Option changes `key` on a Mac.
+ * - O on a focused rail thread opens it (like R replies).
+ * - Inside it, ←/→ or J/K move to the previous/next thread in document
+ *   order; Escape closes.
+ */
+export function matchesOpenReaderShortcut(
+  event: AddCommentShortcutEventLike,
+  platform?: string | null,
+) {
+  if (event.shiftKey || event.code !== "KeyO" || !event.altKey) {
+    return false;
+  }
+
+  return isApplePlatform(platform)
+    ? event.metaKey && !event.ctrlKey
+    : event.ctrlKey && !event.metaKey;
+}
+
+export function getOpenReaderShortcutLabel(platform?: string | null) {
+  return isApplePlatform(platform) ? "Cmd + Option + O" : "Ctrl + Alt + O";
+}
+
+/** Reader navigation: 1 = next thread, -1 = previous, null = not ours. */
+export function matchReaderNavigationKey(event: {
+  key: string;
+  altKey: boolean;
+  ctrlKey: boolean;
+  metaKey: boolean;
+  shiftKey: boolean;
+}): 1 | -1 | null {
+  if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) {
+    return null;
+  }
+  if (event.key === "ArrowRight" || event.key === "j") return 1;
+  if (event.key === "ArrowLeft" || event.key === "k") return -1;
+  return null;
+}
+
+/**
  * Composer keyboard flow. Where the composer offers Comment / Ask / Change
  * (a new root comment, or a new user reply in a plain thread, when the
  * backend can reach an agent):
