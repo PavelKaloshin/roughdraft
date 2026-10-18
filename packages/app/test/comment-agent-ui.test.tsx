@@ -141,6 +141,11 @@ function setupDomMocks() {
     },
   });
   window.scrollBy = vi.fn();
+  // jsdom has no layout, so `offsetParent` is always null and the composer
+  // never auto-focuses (which is what ends its pending-focus state).
+  vi.spyOn(HTMLElement.prototype, "offsetParent", "get").mockReturnValue(
+    document.body,
+  );
 }
 
 let container: HTMLDivElement;
@@ -576,6 +581,50 @@ describe("Ask / Change comments", () => {
     await flush();
     expect(getThreadPart("c1-editor")).not.toBeNull();
     expect(queryThreadPart("c1-mode")).toBeNull();
+  });
+
+  it("drops the header no-listener notice once the waiting thread is resolved", async () => {
+    const server = createFakeServer({ initialContent: "Cold start target.\n" });
+    await renderWorkspace(server);
+    await addCommentOn("target");
+    await click(getThreadPart("c1-mode-change"));
+    await typeInto(getThreadPart<HTMLTextAreaElement>("c1-editor"), "Fix it");
+    await click(getThreadPart("c1-action-save"));
+    await flush(6);
+    expect(query("agent-no-listener-notice")).not.toBeNull();
+
+    await click(getThreadPart("c1-action-resolve"));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 700));
+    });
+    // The server's in-memory status still lists the thread as pending.
+    await act(async () => {
+      server.pushStatus({
+        listening: false,
+        listenerCount: 0,
+        threads: { c1: "pending" },
+      });
+    });
+    await flush();
+
+    expect(server.disk.content).toContain("status: resolved");
+    expect(query("agent-no-listener-notice")).toBeNull();
+  });
+
+  it("drops the header no-listener notice once the waiting thread is deleted", async () => {
+    const server = createFakeServer({ initialContent: "Cold start target.\n" });
+    await renderWorkspace(server);
+    await addCommentOn("target");
+    await click(getThreadPart("c1-mode-ask"));
+    await typeInto(getThreadPart<HTMLTextAreaElement>("c1-editor"), "Why?");
+    await click(getThreadPart("c1-action-save"));
+    await flush(6);
+    expect(query("agent-no-listener-notice")).not.toBeNull();
+
+    await click(getThreadPart("c1-action-delete"));
+    await flush();
+
+    expect(query("agent-no-listener-notice")).toBeNull();
   });
 
   it("resolves a thread into the file and collapses it until shown", async () => {

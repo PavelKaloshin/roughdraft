@@ -5,9 +5,11 @@ import {
   type CommentAgentContextValue,
   type CommentAgentThreadState,
   type CommentEventType,
+  getOpenAgentThreads,
   idleThreadState,
   isHandledThreadStatus,
 } from "./comment-agent";
+import { criticMarkdownComments } from "./critic-markup";
 import type { ManualSaveResult } from "./PageCard";
 import type { StorageBackend } from "./storage";
 
@@ -31,11 +33,19 @@ export function useCommentAgentController({
   backend,
   documentPath,
   absolutePath,
+  markdown,
   flushSave,
 }: {
   backend: StorageBackend | null;
   documentPath: string | null;
   absolutePath: string | null;
+  /**
+   * The document as the editor has it now (the local draft). Thread state
+   * shown outside the threads (the header notice) follows it, so a thread
+   * resolved or deleted in the UI stops counting before the server's
+   * in-memory status catches up.
+   */
+  markdown: string | null;
   /** Resolves once the current draft is on disk (or could not be saved). */
   flushSave: () => Promise<ManualSaveResult | undefined>;
 }): CommentAgentContextValue {
@@ -164,13 +174,29 @@ export function useCommentAgentController({
   );
 
   const listenCommand = absolutePath ? buildListenCommand(absolutePath) : null;
+  const undeliveredThreadIds = Object.entries(threadStates)
+    .filter(([, state]) => state.undelivered)
+    .map(([threadRootId]) => threadRootId);
+  const hasUndeliveredState = undeliveredThreadIds.length > 0;
+  // Parsed only while some event waits for delivery (not on every keystroke).
+  const openThreadIds = useMemo(
+    () =>
+      hasUndeliveredState && markdown != null
+        ? new Set(
+            getOpenAgentThreads(criticMarkdownComments(markdown).values()).map(
+              (thread) => thread.rootId,
+            ),
+          )
+        : null,
+    [hasUndeliveredState, markdown],
+  );
   // A thread the agent already answered (e.g. via `roughdraft reply` without
-  // a listener) no longer waits for delivery.
+  // a listener), or one the user resolved or deleted, no longer waits.
   const hasUndeliveredEvents =
     !status?.listening &&
-    Object.entries(threadStates).some(
-      ([threadRootId, state]) =>
-        state.undelivered &&
+    undeliveredThreadIds.some(
+      (threadRootId) =>
+        (openThreadIds?.has(threadRootId) ?? true) &&
         !isHandledThreadStatus(status?.threads[threadRootId]),
     );
 

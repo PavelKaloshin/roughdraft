@@ -1079,7 +1079,7 @@ function CommentThreadNode({
                   className="mt-2"
                 />
               ) : null}
-              {isRootThread && threadState?.error ? (
+              {isRootThread && !isResolved && threadState?.error ? (
                 <Alert
                   variant="destructive"
                   data-testid={`comment-${variant}-${comment.id}-agent-error`}

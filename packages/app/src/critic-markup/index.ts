@@ -1540,6 +1540,18 @@ export function criticMarkdownHasReviewRail(
   return comments.size > 0 || changes.size > 0;
 }
 
+/** Only the comments of a document (inline and endmatter), without a doc. */
+export function criticMarkdownComments(
+  markdown: string,
+): Map<string, CriticComment> {
+  const { body, endmatter } = splitYamlDocumentMetadata(markdown);
+  const parsedEndmatter = parseReviewEndmatter(endmatter);
+  const { parser, comments } = createCriticMarked(undefined, parsedEndmatter);
+  parser.parse(protectRichTextRoundTripMarkdown(body));
+  addEndmatterFeedback(comments, parsedEndmatter);
+  return comments;
+}
+
 export function criticMarkdownToRenderedHtml(
   markdown: string,
   options?: MarkdownOptions,
