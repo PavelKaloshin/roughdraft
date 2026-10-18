@@ -213,6 +213,7 @@ Known metadata attributes:
 | `re` | Comments | No | Parent comment or suggestion id for threaded replies. |
 | `status` | Comments and suggestions | No | Review state. Roughdraft currently writes `resolved` when an item has been addressed. |
 | `resolved` | Comments and suggestions | No | Optional short resolution summary for an item whose `status` is `resolved`. |
+| `intent` | Root comments | No | What the comment asks of an agent: `comment`, `ask`, or `change`. Missing means `comment`. See [Comment Intent](#comment-intent). |
 
 Example:
 
@@ -250,6 +251,47 @@ comments:
 ```
 
 A reply whose `re` points to a missing id SHOULD be treated as a top-level comment. A comment MUST NOT be its own parent.
+
+## Comment Intent
+
+A root comment MAY carry an `intent` key that tells a connected agent what the reviewer expects:
+
+| Value | Meaning |
+| --- | --- |
+| `comment` | A normal review note. Equivalent to omitting `intent`. |
+| `ask` | A question about the text. An agent SHOULD answer in the thread and SHOULD NOT edit the document. |
+| `change` | A requested edit. An agent SHOULD edit the document and reply in the thread with a short summary of what changed. |
+
+```markdown
+Cold start takes {==about four seconds==}{>>What is included in that time?<<}{#c3}.
+
+---
+comments:
+  c3:
+    by: pavel
+    at: "2026-10-18T12:00:00.000Z"
+    intent: ask
+  c4:
+    body: |
+      It is the time to the **first request** after a deploy:
+      - cache warm-up
+      - model load
+    by: AI
+    at: "2026-10-18T12:00:20.000Z"
+    re: c3
+```
+
+`intent` is advisory. Readers MUST NOT reject a document because of it:
+
+- An unknown `intent` value SHOULD produce a warning and MUST be treated as `comment`, so documents written by newer tools stay valid.
+- `intent` on a reply or a suggestion SHOULD produce a warning and MUST be ignored; a thread's intent is the intent of its root comment.
+- Writers MUST preserve `intent` when rewriting endmatter, for example when appending a reply or marking the thread resolved.
+
+Agent progress such as "working" or "answered" is transient application state and MUST NOT be written into the document. The resolved state of a thread is recorded with `status: resolved` as usual.
+
+### Multiline Bodies
+
+Endmatter `body` values MAY span multiple lines and MAY contain Markdown such as lists, links, and code. Writers SHOULD emit multiline bodies as YAML block scalars (`|` or `|-`) and readers MUST read them verbatim, including the trailing newline semantics of the chosen block indicator.
 
 ## Parsing And Round Trips
 

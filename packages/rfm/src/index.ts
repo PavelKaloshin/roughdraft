@@ -26,6 +26,17 @@ export interface RfmValidationResult {
 }
 
 export type RfmReviewItemKind = "comment" | "suggestion" | "reply";
+/**
+ * What a root comment asks of an agent. `comment` (or no intent) is a normal
+ * review note; `ask` requests an answer in the thread without editing the
+ * document; `change` requests an edit to the document.
+ */
+export type RfmCommentIntent = "comment" | "ask" | "change";
+export const RFM_COMMENT_INTENTS: readonly RfmCommentIntent[] = [
+  "comment",
+  "ask",
+  "change",
+];
 export type RfmSuggestionKind = "addition" | "deletion" | "substitution";
 
 export interface RfmReviewItem {
@@ -36,6 +47,8 @@ export interface RfmReviewItem {
   author: string | null;
   createdAt: string | null;
   status: string | null;
+  /** Only set on root comments whose metadata carries a known `intent`. */
+  intent?: RfmCommentIntent;
   text: string;
   originalText?: string;
   replacementText?: string;
@@ -133,6 +146,7 @@ interface YamlMetadataEntry {
   re?: string;
   status?: string;
   resolved?: string;
+  intent?: string;
   [key: string]: unknown;
 }
 
@@ -236,6 +250,14 @@ export function validateRoughdraftMarkdown(
       }
 
       validateEndmatterEntry(id, entry, metadata.offset, addDiagnostic, false);
+      validateIntent(
+        id,
+        entry.intent,
+        kind === "comment" && Boolean(entry.re),
+        kind,
+        metadata.offset,
+        addDiagnostic,
+      );
       return;
     }
 
@@ -289,6 +311,15 @@ export function validateRoughdraftMarkdown(
     if (kind === "comment" && id && parentId) {
       replies.push({ id, parentId, offset: metadata.offset });
     }
+
+    validateIntent(
+      id ?? "",
+      metadata.attrs.get("intent"),
+      kind === "comment" && Boolean(parentId),
+      kind,
+      metadata.offset,
+      addDiagnostic,
+    );
   };
 
   let offset = 0;
@@ -388,6 +419,14 @@ export function validateRoughdraftMarkdown(
       addDiagnostic,
       Boolean(entry.re),
     );
+    validateIntent(
+      id,
+      entry.intent,
+      Boolean(entry.re),
+      "comment",
+      endmatter.offset ?? 0,
+      addDiagnostic,
+    );
     if (entry.re) {
       replies.push({
         id,
@@ -459,6 +498,7 @@ export function extractRoughdraftReviewIndex(markdown: string): RfmReviewIndex {
     const attrs = hydrateMetadataAttrs(parsed.metadata, endmatter, "comment");
     const id = attrs.get("id") ?? `comment-${parsed.offset.toString()}`;
     const parentId = attrs.get("re") ?? null;
+    const intent = parentId ? undefined : knownIntent(attrs.get("intent"));
 
     items.push({
       id,
@@ -467,6 +507,7 @@ export function extractRoughdraftReviewIndex(markdown: string): RfmReviewIndex {
       author: attrs.get("by") ?? null,
       createdAt: attrs.get("at") ?? null,
       status: attrs.get("status") ?? null,
+      ...(intent ? { intent } : {}),
       text: parsed.content,
       anchorText,
       offset: parsed.offset,
@@ -568,6 +609,7 @@ export function extractRoughdraftReviewIndex(markdown: string): RfmReviewIndex {
 
   for (const [id, entry] of endmatter.comments) {
     if (!entry.body) continue;
+    const intent = entry.re ? undefined : knownIntent(entry.intent);
 
     items.push({
       id,
@@ -576,6 +618,7 @@ export function extractRoughdraftReviewIndex(markdown: string): RfmReviewIndex {
       author: typeof entry.by === "string" ? entry.by : null,
       createdAt: typeof entry.at === "string" ? entry.at : null,
       status: typeof entry.status === "string" ? entry.status : null,
+      ...(intent ? { intent } : {}),
       text: String(entry.body),
       offset: endmatter.offset ?? markdown.length,
       endOffset: endmatter.offset ?? markdown.length,
@@ -632,7 +675,9 @@ export function appendRoughdraftReply(
   }
 
   const endmatter = parseRoughdraftEndmatter(markdown);
-  if (isEndmatterBackedItem(markdown, parent)) {
+  const parentLivesInEndmatter =
+    typeof endmatter.comments.get(parent.id)?.body === "string";
+  if (parentLivesInEndmatter || isEndmatterBackedItem(markdown, parent)) {
     const replyId = options.id ?? nextCommentId(index.items);
     const comments = new Map(endmatter.comments);
     comments.set(replyId, {
@@ -1258,6 +1303,53 @@ function validateEndmatterEntry(
       "error",
       "missing-reply-target",
       `YAML endmatter reply \`${id}\` must include \`re\`.`,
+      offset,
+    );
+  }
+}
+
+function knownIntent(value: unknown): RfmCommentIntent | undefined {
+  return typeof value === "string" &&
+    (RFM_COMMENT_INTENTS as readonly string[]).includes(value)
+    ? (value as RfmCommentIntent)
+    : undefined;
+}
+
+/**
+ * `intent` is advisory: an unknown value (or one on a reply/suggestion) is a
+ * warning, not an error, so documents written by a newer Roughdraft that adds
+ * intents stay valid and simply degrade to a plain comment.
+ */
+function validateIntent(
+  id: string,
+  value: unknown,
+  isReply: boolean,
+  kind: "comment" | "suggestion",
+  offset: number,
+  addDiagnostic: (
+    severity: RfmDiagnosticSeverity,
+    code: string,
+    message: string,
+    offset: number,
+  ) => void,
+): void {
+  if (value === undefined) return;
+
+  if (kind === "suggestion" || isReply) {
+    addDiagnostic(
+      "warning",
+      "ignored-intent",
+      `\`intent\` on \`${id}\` is ignored; it only applies to root comments.`,
+      offset,
+    );
+    return;
+  }
+
+  if (!knownIntent(value)) {
+    addDiagnostic(
+      "warning",
+      "unknown-intent",
+      `Unknown \`intent\` for \`${id}\`; expected one of ${RFM_COMMENT_INTENTS.join(", ")}. It is treated as \`comment\`.`,
       offset,
     );
   }

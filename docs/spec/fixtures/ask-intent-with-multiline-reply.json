@@ -1,0 +1,27 @@
+{
+  "format": "roughdraft-flavored-markdown",
+  "version": "0.2",
+  "source": {
+    "markdown": "Cold start takes {==about four seconds==}{>>What is included in that time?<<}{#c3}.\n\n---\ncomments:\n  c3:\n    by: pavel\n    at: \"2026-10-18T12:00:00.000Z\"\n    intent: ask\n  c4:\n    body: |\n      It is the time to the **first request** after a deploy:\n      - cache warm-up\n      - model load\n    by: AI\n    at: \"2026-10-18T12:00:20.000Z\"\n    re: c3\n"
+  },
+  "comments": [
+    {
+      "id": "c3",
+      "body": "What is included in that time?",
+      "by": "pavel",
+      "at": "2026-10-18T12:00:00.000Z",
+      "intent": "ask",
+      "anchor": {
+        "text": "about four seconds"
+      }
+    },
+    {
+      "id": "c4",
+      "body": "It is the time to the **first request** after a deploy:\n- cache warm-up\n- model load\n",
+      "by": "AI",
+      "at": "2026-10-18T12:00:20.000Z",
+      "re": "c3"
+    }
+  ],
+  "suggestions": []
+}
