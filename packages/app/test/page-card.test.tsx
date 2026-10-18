@@ -629,6 +629,57 @@ describe("PageCard editor integration", () => {
     );
   });
 
+  it("autosave after typing in one paragraph rewrites only that paragraph", async () => {
+    const source = [
+      "Setext title",
+      "============",
+      "",
+      "A hard-wrapped paragraph with __bold__",
+      "and *emphasis* that nobody touches.",
+      "",
+      "Type here.",
+      "",
+      "* star bullet",
+      "* another one",
+      "",
+      "| Name  | Status |",
+      "|-------|--------|",
+      "| Alpha | Ready  |",
+      "",
+      "***",
+      "",
+    ].join("\n");
+    const rendered = await renderPageCard({
+      page: { id: "doc-block-source", title: "Doc", content: source },
+      selected: true,
+    });
+    const editor = rendered.getEditor();
+
+    vi.useFakeTimers();
+
+    const range = findTextRange(editor, "Type here.");
+    expect(range).not.toBeNull();
+    await act(async () => {
+      editor
+        .chain()
+        .focus()
+        .setTextSelection(range?.to ?? 0)
+        .insertContent(" Typed")
+        .run();
+    });
+    await flushReact();
+
+    await act(async () => {
+      vi.advanceTimersByTime(500);
+      await Promise.resolve();
+    });
+
+    expect(rendered.onSave).toHaveBeenCalledTimes(1);
+    expect(rendered.onSave.mock.calls[0]?.[1]).toBe(
+      source.replace("Type here.\n", "Type here. Typed\n"),
+    );
+  });
+
   it("rich-text edits preserve YAML endmatter-backed review metadata on autosave", async () => {
     const content = [
       "# Review",

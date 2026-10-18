@@ -10,6 +10,7 @@ import {
   readProjectFile,
   removeMarkdownProject,
   richTextEditor,
+  selectRichText,
   writeProjectFile,
 } from "./helpers";
 
@@ -165,6 +166,68 @@ test.describe("markdown round-trips", () => {
 
     logE2eEvent("markdown-roundtrip.rich-manual-save", {
       file: "rich-save.md",
+      size: fs.statSync(filePath).size,
+    });
+  });
+
+  test("autosave after typing in one paragraph keeps every other block byte-for-byte @smoke", async ({
+    page,
+  }) => {
+    // Non-canonical syntax the rich-text serializer would normalize: setext
+    // headings, `__bold__`/`*em*`, hard wraps, `*` bullets, `1)` lists, padded
+    // tables, `***` rules, a four-backtick fence.
+    const initial = [
+      "Block source",
+      "============",
+      "",
+      "A hard-wrapped paragraph with __bold__",
+      "and *emphasis* that nobody touches.",
+      "",
+      "Type here.",
+      "",
+      "* star bullet",
+      "* another one",
+      "",
+      "1) paren ordered",
+      "2) second",
+      "",
+      "| Name  | Status |",
+      "|-------|--------|",
+      "| Alpha | Ready  |",
+      "",
+      "***",
+      "",
+      "````md",
+      "```",
+      "````",
+      "",
+    ].join("\n");
+    const filePath = writeProjectFile(projectDir, "block-source.md", initial);
+
+    await openMarkdownFile(page, filePath, "rich-text");
+    await expect(richTextEditor(page)).toContainText("Type here.");
+    // Plain editing (the default mode turns typing into suggestions).
+    await page.getByTestId("document-mode-trigger").click();
+    await page.getByRole("option", { name: "Editing" }).click();
+    await selectRichText(page, "Type here.");
+    // Collapse the selection to its end, then type.
+    await page.keyboard.press("ArrowRight");
+    await page.keyboard.type(" Typed by the user.");
+
+    const expected = initial.replace(
+      "Type here.\n",
+      "Type here. Typed by the user.\n",
+    );
+    await expect
+      .poll(() => readProjectFile(projectDir, "block-source.md"))
+      .toBe(expected);
+    await expect(documentSaveStatus(page)).toHaveAttribute(
+      "aria-label",
+      "Saved",
+    );
+
+    logE2eEvent("markdown-roundtrip.block-source-preserved", {
+      file: "block-source.md",
       size: fs.statSync(filePath).size,
     });
   });

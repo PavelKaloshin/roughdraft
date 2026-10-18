@@ -706,10 +706,11 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
   // Parsed once per mount. External file changes are applied incrementally
   // (see applyExternalMarkdown) instead of remounting the editor.
   const [parsedContent] = useState(() =>
-    criticMarkdownToEditorState(readSourceMarkdown(), {
-      resolveFileUrl,
-      resolveLinkUrl,
-    }),
+    criticMarkdownToEditorState(
+      readSourceMarkdown(),
+      { resolveFileUrl, resolveLinkUrl },
+      { blockSource: true },
+    ),
   );
   const [comments, setComments] = useState<Map<string, CriticComment>>(
     () => parsedContent.comments,
@@ -717,6 +718,10 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
   const frontmatterRef = useRef<string | null>(parsedContent.frontmatter);
   const endmatterRef = useRef<string | null>(parsedContent.endmatter);
   const headingSpacingRef = useRef(parsedContent.headingSpacing);
+  // Source text of the loaded blocks: untouched blocks are saved byte-for-byte.
+  // Replaced whenever new content is loaded (external change, merge); kept
+  // across the user's own saves, so undoing an edit restores the original bytes.
+  const blockSourceRef = useRef(parsedContent.blockSource);
 
   useEffect(() => {
     commentsRef.current = comments;
@@ -746,11 +751,13 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
             frontmatter: frontmatterRef.current,
             endmatter: endmatterRef.current,
             headingSpacing: headingSpacingRef.current,
+            blockSource: blockSourceRef.current,
+            markdownOptions: { resolveFileUrl, resolveLinkUrl },
           },
         ),
       );
     },
-    [onMarkdownChange],
+    [onMarkdownChange, resolveFileUrl, resolveLinkUrl],
   );
 
   const insertFiles = useCallback(
@@ -1354,13 +1361,15 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
       }
       pendingExternalMarkdownRef.current = null;
 
-      const parsed = criticMarkdownToEditorState(markdown, {
-        resolveFileUrl,
-        resolveLinkUrl,
-      });
+      const parsed = criticMarkdownToEditorState(
+        markdown,
+        { resolveFileUrl, resolveLinkUrl },
+        { blockSource: true },
+      );
       frontmatterRef.current = parsed.frontmatter;
       endmatterRef.current = parsed.endmatter;
       headingSpacingRef.current = parsed.headingSpacing;
+      blockSourceRef.current = parsed.blockSource;
 
       // An open comment draft lives only in the editor until it is submitted;
       // keep it (and its anchor) across the external change. A draft whose id
