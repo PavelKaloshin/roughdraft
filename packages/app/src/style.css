@@ -174,6 +174,37 @@
     background-color: transparent;
   }
 
+  /* Text an external edit (another editor, an agent) just changed on disk:
+     a brief tint that fades out, like a live artifact update. */
+  .tiptap .external-change-highlight {
+    --external-change-bg: rgb(186 230 253 / 0.85);
+    border-radius: 0.2rem;
+    box-decoration-break: clone;
+    -webkit-box-decoration-break: clone;
+    animation: external-change-fade 1.5s ease-out forwards;
+  }
+
+  .dark .tiptap .external-change-highlight {
+    --external-change-bg: rgb(14 116 144 / 0.55);
+  }
+
+  @keyframes external-change-fade {
+    0%,
+    35% {
+      background-color: var(--external-change-bg);
+    }
+    100% {
+      background-color: transparent;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .tiptap .external-change-highlight {
+      animation: none;
+      background-color: var(--external-change-bg);
+    }
+  }
+
   .tiptap .critic-change {
     box-decoration-break: clone;
     -webkit-box-decoration-break: clone;
