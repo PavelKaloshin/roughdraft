@@ -15,6 +15,16 @@ import {
   ROUGHDRAFT_LOOPBACK_HOSTS,
   ROUGHDRAFT_PUBLIC_HOST,
 } from "./network.js";
+import {
+  type AgentCliTarget,
+  DEFAULT_LISTEN_MAX_SECONDS,
+  type ParsedAgentArgs,
+  parseAgentArgs,
+  runAck,
+  runListen,
+  runReply,
+  runResolve,
+} from "./agent-cli.js";
 import { findAvailablePort } from "./ports.js";
 import { resolveUpdateStatus, type UpdateStatus } from "./update-status.js";
 
@@ -35,6 +45,10 @@ const KNOWN_COMMANDS = [
   "status",
   "stop",
   "watch",
+  "listen",
+  "reply",
+  "ack",
+  "resolve",
   "mcp",
   "doctor",
   "help",
@@ -89,6 +103,7 @@ export interface CliDependencies {
   stopProcess: (pid: number) => Promise<void>;
   openUrl: (url: string) => OpenMode;
   resolveUpdateStatus: () => Promise<UpdateStatus>;
+  readStdin: () => Promise<string>;
   log: (message: string) => void;
   error: (message: string) => void;
 }
@@ -812,6 +827,14 @@ function defaultSpawnServerProcess(options: {
   return { pid: child.pid };
 }
 
+async function defaultReadStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) {
+    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
 export function createCliDependencies(
   overrides: Partial<CliDependencies> = {},
 ): CliDependencies {
@@ -831,6 +854,7 @@ export function createCliDependencies(
     resolveUpdateStatus:
       overrides.resolveUpdateStatus ??
       (() => resolveUpdateStatus({ fetchImpl })),
+    readStdin: overrides.readStdin ?? defaultReadStdin,
     log: overrides.log ?? ((message) => console.log(message)),
     error: overrides.error ?? ((message) => console.error(message)),
   };
@@ -862,6 +886,12 @@ function printHelp(log: (message: string) => void) {
   log("  status             Show server status");
   log("  stop               Stop the managed background server");
   log("  watch <path>       Wait for a Done Reviewing event");
+  log(
+    "  listen <file.md>   Print one line per Ask/Change comment (for an agent's Monitor)",
+  );
+  log("  reply <file.md> <id>    Reply to a comment thread as AI");
+  log("  ack <file.md> <id>      Mark a comment thread as being worked on");
+  log("  resolve <file.md> <id>  Mark a comment thread resolved");
   log("  mcp                Start the experimental stdio MCP server");
   log("  doctor [path]      Diagnose setup or validate Markdown");
   log("  help agent         Print the agent setup prompt");
@@ -1014,6 +1044,110 @@ function printCommandHelp(
     );
     log("  --state-file <path>       Server state file");
     log("  --state-dir <dir>         Directory containing server.json");
+    return;
+  }
+
+  if (command === "listen") {
+    log("Usage:");
+    log(
+      "  roughdraft listen <file.md> [--since <seq>] [--max-seconds <seconds>]",
+    );
+    log("");
+    log(
+      "Registers as the agent listening to one Markdown file and prints exactly one",
+    );
+    log(
+      "line per Ask, Change, or follow-up comment posted from Roughdraft. Each line",
+    );
+    log(
+      "is self-contained and ends with the command to answer it. Designed to run",
+    );
+    log(
+      "under Claude Code's Monitor tool, which wakes the session on every line.",
+    );
+    log("");
+    log("Output lines:");
+    log("  [roughdraft] listening on <file> (session <id>) since=<seq>");
+    log(
+      '  [roughdraft] ask c3 seq=12 file=<file> by=<who> anchor="..." text="..." → ...',
+    );
+    log(
+      "  [roughdraft] listen expired; re-arm with: roughdraft listen <file> --since <seq>",
+    );
+    log("");
+    log(
+      "Without --since, unanswered events retained by the server are replayed.",
+    );
+    log("Threads already answered after an event are skipped.");
+    log("");
+    log("Flags:");
+    log(
+      "  --since <seq>            Only events after this sequence (from the expired line)",
+    );
+    log(
+      `  --max-seconds <seconds>  Exit cleanly after this long, default ${DEFAULT_LISTEN_MAX_SECONDS}`,
+    );
+    log("  --state-file <path>      Server state file");
+    log("  --state-dir <dir>        Directory containing server.json");
+    log("");
+    log("Environment variables:");
+    log(
+      "  CLAUDE_CODE_SESSION_ID   Reported to the Roughdraft UI as the listening session",
+    );
+    return;
+  }
+
+  if (command === "reply") {
+    log("Usage:");
+    log(
+      "  roughdraft reply <file.md> <commentId> (--stdin | --body <text>) [--status answered|applied]",
+    );
+    log("");
+    log(
+      "Appends an AI reply (Markdown allowed, multiline OK) to the comment's thread",
+    );
+    log(
+      "through the Roughdraft server, so it never races the browser's autosave.",
+    );
+    log("");
+    log("Flags:");
+    log("  --stdin                 Read the reply body from stdin");
+    log("  --body <text>           Reply body");
+    log(
+      "  --status <status>       answered (default, for Ask) or applied (for Change)",
+    );
+    log("  --json                  Print machine-readable output");
+    log("  --state-file <path>     Server state file");
+    log("  --state-dir <dir>       Directory containing server.json");
+    return;
+  }
+
+  if (command === "ack") {
+    log("Usage:");
+    log("  roughdraft ack <file.md> <commentId>");
+    log("");
+    log(
+      "Tells the Roughdraft UI that the agent is working on this comment thread.",
+    );
+    log("");
+    log("Flags:");
+    log("  --json                  Print machine-readable output");
+    log("  --state-file <path>     Server state file");
+    log("  --state-dir <dir>       Directory containing server.json");
+    return;
+  }
+
+  if (command === "resolve") {
+    log("Usage:");
+    log("  roughdraft resolve <file.md> <commentId> [--summary <text>]");
+    log("");
+    log("Marks the comment thread resolved in the Markdown file.");
+    log("");
+    log("Flags:");
+    log("  --summary <text>        Short resolution summary");
+    log("  --json                  Print machine-readable output");
+    log("  --state-file <path>     Server state file");
+    log("  --state-dir <dir>       Directory containing server.json");
     return;
   }
 
@@ -2289,6 +2423,140 @@ function getConfidentStopCandidate(
   return payload.pid;
 }
 
+const AGENT_COMMAND_USAGE = {
+  listen:
+    "Usage: roughdraft listen <file.md> [--since <seq>] [--max-seconds <seconds>]",
+  reply:
+    "Usage: roughdraft reply <file.md> <commentId> (--stdin | --body <text>) [--status answered|applied]",
+  ack: "Usage: roughdraft ack <file.md> <commentId>",
+  resolve: "Usage: roughdraft resolve <file.md> <commentId> [--summary <text>]",
+} as const;
+
+async function runAgentCommand(
+  command: keyof typeof AGENT_COMMAND_USAGE,
+  rest: string[],
+  baseDeps: CliDependencies,
+  globalJson: boolean,
+): Promise<number> {
+  const usage = AGENT_COMMAND_USAGE[command];
+  const commonFlags = ["--state-dir", "--state-file"] as const;
+  let options: ParsedAgentArgs;
+  try {
+    options =
+      command === "listen"
+        ? parseAgentArgs(rest, [...commonFlags, "--since", "--max-seconds"])
+        : command === "reply"
+          ? parseAgentArgs(rest, [...commonFlags, "--body", "--status"], {
+              allowStdin: true,
+            })
+          : command === "resolve"
+            ? parseAgentArgs(rest, [...commonFlags, "--summary"])
+            : parseAgentArgs(rest, commonFlags);
+  } catch (error) {
+    baseDeps.error(error instanceof Error ? error.message : "Invalid usage.");
+    baseDeps.error(usage);
+    return USAGE_ERROR;
+  }
+
+  if (options.help) {
+    printCommandHelp(command, baseDeps.log);
+    return 0;
+  }
+
+  const expectedPositionals = command === "listen" ? 1 : 2;
+  if (options.positionals.length !== expectedPositionals) {
+    baseDeps.error(usage);
+    return USAGE_ERROR;
+  }
+
+  if (
+    command === "reply" &&
+    options.status !== undefined &&
+    options.status !== "answered" &&
+    options.status !== "applied"
+  ) {
+    baseDeps.error("--status must be answered or applied.");
+    return USAGE_ERROR;
+  }
+  if (command === "reply" && options.stdin === (options.body !== undefined)) {
+    baseDeps.error("Pass exactly one of --stdin or --body <text>.");
+    baseDeps.error(usage);
+    return USAGE_ERROR;
+  }
+
+  const deps: CliDependencies = {
+    ...baseDeps,
+    env: {
+      ...baseDeps.env,
+      ...(options.stateDir ? { ROUGHDRAFT_STATE_DIR: options.stateDir } : {}),
+      ...(options.stateFile
+        ? { ROUGHDRAFT_STATE_FILE: options.stateFile }
+        : {}),
+    },
+  };
+
+  const [filePath = "", commentId = ""] = options.positionals;
+  let resolved: ResolvedTargetPath;
+  try {
+    resolved = resolveTargetPath(filePath);
+  } catch (error) {
+    deps.error(error instanceof Error ? error.message : "Invalid path.");
+    return 1;
+  }
+  if (resolved.isDirectory) {
+    deps.error(`${command} works on a single .md file, not a directory.`);
+    return USAGE_ERROR;
+  }
+
+  let body = "";
+  if (command === "reply") {
+    body = (
+      options.stdin ? await deps.readStdin() : (options.body ?? "")
+    ).replace(/\s+$/, "");
+    if (body.trim().length === 0) {
+      deps.error("Reply body is empty.");
+      return USAGE_ERROR;
+    }
+  }
+
+  // Talk to the same API the browser uses: the dev API behind a live dev
+  // frontend for this checkout, otherwise the (auto-started) background server.
+  const liveDevFrontend = await resolveLiveDevFrontendBaseUrl(deps);
+  const serverUrl =
+    liveDevFrontend?.apiUrl ??
+    (await ensureServerRunning(deps, { projectDir: resolved.projectDir }))
+      .server.url;
+  const target: AgentCliTarget = {
+    serverUrl,
+    projectDir: resolved.projectDir,
+    documentPath: resolved.openPath,
+  };
+  const json = globalJson || options.json;
+
+  if (command === "listen") {
+    return runListen(deps, target, {
+      since: options.since,
+      maxSeconds: options.maxSeconds ?? DEFAULT_LISTEN_MAX_SECONDS,
+    });
+  }
+  if (command === "reply") {
+    return runReply(deps, target, {
+      commentId,
+      body,
+      status: options.status === "applied" ? "applied" : "answered",
+      json,
+    });
+  }
+  if (command === "ack") {
+    return runAck(deps, target, { commentId, json });
+  }
+  return runResolve(deps, target, {
+    commentId,
+    summary: options.summary,
+    json,
+  });
+}
+
 export async function runCli(
   args: string[],
   overrides: Partial<CliDependencies> = {},
@@ -2691,6 +2959,15 @@ export async function runCli(
       const json = parsed.global.json || options.json;
       shouldPrintUpdateNotice = !json;
       return runWatch(deps, options.positionals[0] ?? "", options, json);
+    }
+
+    if (
+      command === "listen" ||
+      command === "reply" ||
+      command === "ack" ||
+      command === "resolve"
+    ) {
+      return runAgentCommand(command, rest, deps, parsed.global.json);
     }
 
     if (command === "mcp") {

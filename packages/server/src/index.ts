@@ -854,6 +854,28 @@ export function createApp(options: CreateAppOptions = {}): CreateAppResult {
     // re-armed listener does not redo finished work.
     const skipHandled = req.body?.skipHandled === true;
 
+    // A cursor from an earlier server process (sequences restart at 1) would
+    // silently skip new events; answer at once so the client resets it.
+    const requestedAfter =
+      typeof req.body?.afterSequence === "number" ? req.body.afterSequence : 0;
+    const knownInstanceId =
+      typeof req.body?.instanceId === "string" ? req.body.instanceId : null;
+    if (
+      req.body?.fromNow === false &&
+      (requestedAfter > reviewEvents.latestSequence() ||
+        (knownInstanceId !== null && knownInstanceId !== instanceId))
+    ) {
+      res.json({
+        events: [],
+        timedOut: true,
+        nextSequence: reviewEvents.latestSequence() + 1,
+        instanceId,
+        latestSequence: reviewEvents.latestSequence(),
+        cursorReset: true,
+      });
+      return;
+    }
+
     const listener = req.body?.listener;
     const listenerId =
       typeof listener?.id === "string" && listener.id.length > 0

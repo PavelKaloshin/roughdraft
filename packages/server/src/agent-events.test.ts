@@ -186,6 +186,29 @@ describe("agent comment events", () => {
     expect(status.body.watching).toBe(false);
   });
 
+  it("answers a cursor from an earlier server process immediately so it can be reset", async () => {
+    const app = makeApp();
+    await postEvent(app, "comment.ask", "c1");
+
+    const ahead = await watchComments(app, {
+      afterSequence: 40,
+      timeoutSeconds: 30,
+    });
+    const otherInstance = await watchComments(app, {
+      instanceId: "previous-server",
+      timeoutSeconds: 30,
+    });
+
+    for (const response of [ahead, otherInstance]) {
+      expect(response.body).toMatchObject({
+        events: [],
+        cursorReset: true,
+        latestSequence: 1,
+        instanceId: expect.any(String),
+      });
+    }
+  });
+
   it("rejects unknown watch types", async () => {
     const app = makeApp();
 
