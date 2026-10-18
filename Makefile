@@ -53,8 +53,10 @@ fmt: ## Auto-format and apply safe lint fixes
 	pnpm lint:fix
 
 .PHONY: typecheck
-typecheck: ## Type-check the app package
+typecheck: ## Type-check rfm, app, and server
+	$(NODE_TEST_OPTIONS) pnpm --filter @roughdraft/rfm exec tsc --noEmit
 	$(NODE_TEST_OPTIONS) pnpm --filter @roughdraft/app exec tsc --noEmit
+	$(NODE_TEST_OPTIONS) pnpm --filter @roughdraft/server exec tsc --noEmit
 
 # --- Tests -------------------------------------------------------------------
 
