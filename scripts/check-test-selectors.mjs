@@ -6,7 +6,16 @@ import process from "node:process";
 const repoRoot = process.cwd();
 const testFilePattern =
   /(?:^|\/)(?:test|e2e)\/.*\.(?:test|spec)\.tsx?$|\.e2e\/.*\.spec\.tsx?$|\.test\.tsx?$|\.spec\.tsx?$/;
-const ignoredDirs = new Set(["node_modules", "dist", "coverage", ".git"]);
+// `.claude` holds agent worktrees (other checkouts of this repo), and
+// `.context` local notes: neither is this checkout's test code.
+const ignoredDirs = new Set([
+  "node_modules",
+  "dist",
+  "coverage",
+  ".git",
+  ".claude",
+  ".context",
+]);
 
 const forbiddenApiPatterns = [
   /\b(?:page|screen|within\([^)]*\)|rendered|container)\.get(?:All)?By(?:Text|Role|LabelText|PlaceholderText|DisplayValue|AltText|Title)\s*\(/,
