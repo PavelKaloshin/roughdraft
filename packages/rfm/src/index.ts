@@ -153,7 +153,8 @@ interface YamlMetadataEntry {
 interface RoughdraftEndmatter {
   comments: Map<string, YamlMetadataEntry>;
   suggestions: Map<string, YamlMetadataEntry>;
-  data: Record<string, unknown> | null;
+  /** Endmatter YAML text (after the `---` line) when it is review endmatter. */
+  yaml: string | null;
   raw: string | null;
   offset: number | null;
   diagnostics: Array<{ code: string; message: string; offset: number }>;
@@ -642,18 +643,12 @@ export function appendRoughdraftDocumentComment(
   assertSafeCommentBodyText(options.message);
 
   const index = extractRoughdraftReviewIndex(markdown);
-  const endmatter = parseRoughdraftEndmatter(markdown);
   const commentId = options.id ?? nextCommentId(index.items);
-  const comments = new Map(endmatter.comments);
-  comments.set(commentId, {
+
+  return addRoughdraftEndmatterEntry(markdown, "comments", commentId, {
     body: options.message,
     by: options.author ?? "user",
     at: options.at ?? new Date().toISOString(),
-  });
-
-  return writeRoughdraftEndmatter(markdown, {
-    comments,
-    suggestions: endmatter.suggestions,
   });
 }
 
@@ -674,16 +669,11 @@ export function appendRoughdraftReply(
     typeof endmatter.comments.get(parent.id)?.body === "string";
   if (parentLivesInEndmatter || isEndmatterBackedItem(markdown, parent)) {
     const replyId = options.id ?? nextCommentId(index.items);
-    const comments = new Map(endmatter.comments);
-    comments.set(replyId, {
+    return addRoughdraftEndmatterEntry(markdown, "comments", replyId, {
       body: options.message,
       by: options.author ?? "AI",
       at: options.at ?? new Date().toISOString(),
       re: options.parentId,
-    });
-    return writeRoughdraftEndmatter(markdown, {
-      comments,
-      suggestions: endmatter.suggestions,
     });
   }
 
@@ -724,16 +714,16 @@ export function markRoughdraftResolved(
       : null;
 
   if (endmatterKind) {
-    const comments = new Map(endmatter.comments);
-    const suggestions = new Map(endmatter.suggestions);
-    const map = endmatterKind === "comment" ? comments : suggestions;
-    const current = map.get(options.targetId) ?? {};
-    map.set(options.targetId, {
-      ...current,
-      status: "resolved",
-      ...(options.summary ? { resolved: options.summary } : {}),
+    const section = endmatterKind === "comment" ? "comments" : "suggestions";
+    return updateRoughdraftEndmatter(markdown, (document) => {
+      document.setIn([section, options.targetId, "status"], "resolved");
+      if (options.summary) {
+        document.setIn(
+          [section, options.targetId, "resolved"],
+          options.summary,
+        );
+      }
     });
-    return writeRoughdraftEndmatter(markdown, { comments, suggestions });
   }
 
   const metadataStart = findCanonicalMetadataStart(markdown, target.endOffset);
@@ -1229,7 +1219,7 @@ function parseRoughdraftEndmatter(markdown: string): RoughdraftEndmatter {
   const empty: RoughdraftEndmatter = {
     comments: new Map(),
     suggestions: new Map(),
-    data: null,
+    yaml: null,
     raw: null,
     offset: null,
     diagnostics: [],
@@ -1270,7 +1260,7 @@ function parseRoughdraftEndmatter(markdown: string): RoughdraftEndmatter {
   return {
     comments: readEndmatterEntries(parsed.comments),
     suggestions: readEndmatterEntries(parsed.suggestions),
-    data: parsed,
+    yaml: match.yaml,
     raw: match.raw,
     offset: match.offset,
     diagnostics: [],
@@ -1437,31 +1427,47 @@ function validateIntent(
   }
 }
 
-function writeRoughdraftEndmatter(
+/**
+ * Edits the final YAML endmatter in place through the `yaml` Document API, so
+ * entries the edit does not touch keep their exact formatting (quotes,
+ * comments, flow style, blank lines). Creates the endmatter when missing.
+ */
+function updateRoughdraftEndmatter(
   markdown: string,
-  endmatter: {
-    comments: Map<string, YamlMetadataEntry>;
-    suggestions: Map<string, YamlMetadataEntry>;
-  },
+  mutate: (document: YamlDocument) => void,
 ): string {
   const existing = parseRoughdraftEndmatter(markdown);
   const body =
     existing.offset === null
       ? markdown.replace(/\s*$/, "\n")
       : markdown.slice(0, existing.offset).replace(/\s*$/, "\n");
-  const data: Record<string, unknown> = { ...(existing.data ?? {}) };
-  if (endmatter.comments.size > 0) {
-    data.comments = Object.fromEntries(endmatter.comments);
-  } else {
-    delete data.comments;
-  }
-  if (endmatter.suggestions.size > 0) {
-    data.suggestions = Object.fromEntries(endmatter.suggestions);
-  } else {
-    delete data.suggestions;
-  }
 
-  return `${body}\n---\n${stringifyYaml(data, ENDMATTER_YAML_OPTIONS)}`;
+  const parsed = existing.yaml === null ? null : parseDocument(existing.yaml);
+  // Unparseable endmatter was never usable review state; start over, as the
+  // previous whole-object writer did.
+  const document: YamlDocument =
+    parsed && parsed.errors.length === 0 && isMap(parsed.contents)
+      ? (parsed as unknown as YamlDocument)
+      : new YamlDocument({});
+  mutate(document);
+
+  return `${body}\n---\n${document.toString(ENDMATTER_YAML_OPTIONS)}`;
+}
+
+function addRoughdraftEndmatterEntry(
+  markdown: string,
+  section: "comments" | "suggestions",
+  id: string,
+  entry: { body: string; by: string; at: string; re?: string },
+): string {
+  return updateRoughdraftEndmatter(markdown, (document) => {
+    const node = document.createNode(entry);
+    // Match the spec's examples (and keep timestamps from looking like YAML
+    // timestamps to other tools): quote `at`.
+    const at = node.get("at", true);
+    if (isScalar(at)) at.type = "QUOTE_DOUBLE";
+    document.setIn([section, id], node);
+  });
 }
 
 function isEndmatterBackedItem(markdown: string, item: RfmReviewItem): boolean {
@@ -1534,7 +1540,13 @@ function findCanonicalMetadataStart(
 function isValidDateTime(value: string): boolean {
   return dateTimePattern.test(value) && !Number.isNaN(Date.parse(value));
 }
-import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import {
+  isMap,
+  isScalar,
+  parseDocument,
+  parse as parseYaml,
+  Document as YamlDocument,
+} from "yaml";
 
 // Endmatter is read by people too: write multiline bodies as literal `|`
 // blocks and never re-wrap long lines (the default folds them with `>`).

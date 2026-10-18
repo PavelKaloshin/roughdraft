@@ -598,7 +598,7 @@ describe("RFM mutation helpers", () => {
     expect(output).toContain("  c2:");
     expect(output).toContain("    body: Please address the risk section.");
     expect(output).toContain("    by: user");
-    expect(output).toContain("    at: 2026-05-24T12:00:00.000Z");
+    expect(output).toContain('    at: "2026-05-24T12:00:00.000Z"');
   });
 
   it("rejects reply text that would close CriticMarkup early", () => {
@@ -802,6 +802,104 @@ describe("comment intent", () => {
       { id: "c1", kind: "comment" },
       { id: "c2", kind: "reply", parentId: "c1", text: "Will do." },
     ]);
+  });
+});
+
+// Endmatter is edited by people, agents, and the app; a write must only touch
+// the entry it changes, so diffs and 3-way merges stay small.
+describe("endmatter writes keep untouched entries byte-identical", () => {
+  const endmatter = [
+    "---",
+    "# review state",
+    "comments:",
+    "  c1:",
+    "    by: pavel",
+    '    at: "2026-10-18T12:00:00.000Z"',
+    "    intent: ask",
+    "",
+    "  c2:",
+    "    body: 'Single-quoted: kept'",
+    "    by: AI",
+    "    at: 2026-10-18T12:01:00.000Z",
+    "    re: c1",
+    "suggestions:",
+    '  s1: { by: AI, at: "2026-10-18T12:02:00.000Z" }',
+    "workflow:",
+    "  owner: editorial # who triages",
+    "",
+  ];
+  const markdown = [
+    "Keep {==this claim==}{>>Why?<<}{#c1} and {++this++}{#s1}.",
+    "",
+    ...endmatter,
+  ].join("\n");
+
+  it("appends a reply as new lines and leaves every other line as it was", () => {
+    const updated = appendRoughdraftReply(markdown, {
+      parentId: "c1",
+      id: "c3",
+      message: "Because.",
+      at: "2026-10-18T12:03:00.000Z",
+    });
+
+    const replyLines = [
+      "  c3:",
+      "    body: Because.",
+      "    by: AI",
+      '    at: "2026-10-18T12:03:00.000Z"',
+      "    re: c1",
+    ];
+    expect(updated).toBe(
+      [
+        "Keep {==this claim==}{>>Why?<<}{#c1} and {++this++}{#s1}.",
+        "",
+        ...endmatter.slice(0, 13),
+        ...replyLines,
+        ...endmatter.slice(13),
+      ].join("\n"),
+    );
+  });
+
+  it("resolves an entry by adding lines to that entry only", () => {
+    const updated = markRoughdraftResolved(markdown, {
+      targetId: "c1",
+      summary: "Answered.",
+    });
+
+    expect(updated).toBe(
+      [
+        "Keep {==this claim==}{>>Why?<<}{#c1} and {++this++}{#s1}.",
+        "",
+        ...endmatter.slice(0, 7),
+        "    status: resolved",
+        "    resolved: Answered.",
+        ...endmatter.slice(7),
+      ].join("\n"),
+    );
+  });
+
+  it("creates endmatter for a document-level comment on a plain document", () => {
+    const updated = appendRoughdraftDocumentComment("# Draft\n", {
+      message: "Line one\nline two",
+      author: "user",
+      at: "2026-10-18T12:00:00.000Z",
+    });
+
+    expect(updated).toBe(
+      [
+        "# Draft",
+        "",
+        "---",
+        "comments:",
+        "  c1:",
+        "    body: |-",
+        "      Line one",
+        "      line two",
+        "    by: user",
+        '    at: "2026-10-18T12:00:00.000Z"',
+        "",
+      ].join("\n"),
+    );
   });
 });
 
