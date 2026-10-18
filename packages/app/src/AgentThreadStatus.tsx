@@ -1,6 +1,7 @@
 import { Check, CircleDashed, Clock, GitFork, Loader2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import {
+  type AgentThreadTiming,
   formatAgentElapsed,
   getThreadAgentStatusLabel,
   isActiveThreadStatus,
@@ -55,6 +56,7 @@ export function AgentThreadStatusLine({
   listening,
   since,
   requestedAt,
+  delegatedTo,
   testId,
 }: {
   status: ThreadAgentDisplayStatus;
@@ -63,6 +65,8 @@ export function AgentThreadStatusLine({
   since?: string;
   /** When the user's latest request reached the server (ISO 8601). */
   requestedAt?: string;
+  /** A `delegated` thread handed to a headless fork, not a subagent. */
+  delegatedTo?: AgentThreadTiming["delegatedTo"];
   testId: string;
 }) {
   const active = isActiveThreadStatus(status);
@@ -80,7 +84,7 @@ export function AgentThreadStatusLine({
         <span className="inline-flex items-center gap-1 whitespace-nowrap">
           <StatusIcon status={status} />
           <span data-testid={`${testId}-label`}>
-            {getThreadAgentStatusLabel(status, { listening })}
+            {getThreadAgentStatusLabel(status, { listening, delegatedTo })}
           </span>
         </span>
         {requestedTime !== null ? (

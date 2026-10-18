@@ -24,3 +24,7 @@ When no agent is listening, the app says so and shows the command to start one. 
 ## What This Explicitly Does Not Mean
 
 This refines ADR 0002 rather than overriding it: Roughdraft does not store a separate transcript, chat history, or session log. Threads remain anchored review feedback that can be resolved and removed. Roughdraft does not become a chat client, an agent runtime, or a model API consumer, and the state file still holds only the managed server process (ADR 0004).
+
+## Addendum: headless forks for a busy session
+
+A listening session only reads `listen` lines between its steps, so an Ask can sit `queued` for minutes. `roughdraft listen --fork-asks-after <seconds>` (opt-in, agent side) answers such an Ask from a headless fork of that same session (`roughdraft answer-fork`: `claude -p --resume <session> --fork-session`, allowed to read files and run only `roughdraft ack`/`reply`, never to edit). This does not change the decision above: the server and the app still never start an agent or call a model, and never fall back to a different session. The fork is the listening session's own context, started by the agent's own listener; Changes stay with the session (one writer). Who holds a delegated thread (`delegatedTo: "fork-process"`) is more transient server state.

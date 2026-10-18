@@ -155,6 +155,12 @@ function isRetryableError(error: unknown): boolean {
   return error instanceof Error;
 }
 
+export interface ListenObserver {
+  observe(event: CommentEvent): void;
+  /** Called when listening ends; listen exits once it settles. */
+  close(): Promise<void>;
+}
+
 export async function runListen(
   io: AgentCliIo,
   target: AgentCliTarget,
@@ -164,6 +170,8 @@ export async function runListen(
     instanceId?: string;
     maxSeconds: number;
     roundSeconds?: number;
+    /** Sees every comment event line printed (`--fork-asks-after`). */
+    observer?: ListenObserver;
   },
 ): Promise<number> {
   const now = io.now ?? Date.now;
@@ -230,6 +238,7 @@ export async function runListen(
         io.log(
           `[roughdraft] listen stopped on ${file}: ${error instanceof Error ? error.message : String(error)}`,
         );
+        await options.observer?.close();
         return 1;
       }
       if (now() >= deadline) break;
@@ -280,6 +289,7 @@ export async function runListen(
           documentPath: target.documentPath,
         }),
       );
+      options.observer?.observe(event);
     }
     cursor = Math.max(cursor, payload.nextSequence - 1);
   }
@@ -287,6 +297,7 @@ export async function runListen(
   io.log(
     `[roughdraft] listen expired; re-arm with: ${cli} listen ${file} --since ${cursor}${instanceId ? ` --instance ${instanceId}` : ""}`,
   );
+  await options.observer?.close();
   return 0;
 }
 
@@ -375,8 +386,12 @@ export async function runAck(
     io.log(JSON.stringify(result.payload, null, 2));
     return 0;
   }
+  const owner =
+    result.payload.delegatedTo === "fork-process"
+      ? " (to a headless fork; leave it)"
+      : "";
   io.log(
-    `[roughdraft] ${String(result.payload.threadRootId)} is now ${String(result.payload.status)} in ${target.documentPath}`,
+    `[roughdraft] ${String(result.payload.threadRootId)} is now ${String(result.payload.status)}${owner} in ${target.documentPath}`,
   );
   return 0;
 }
@@ -420,6 +435,10 @@ export interface ParsedAgentArgs {
   maxSeconds?: number;
   stateDir?: string;
   stateFile?: string;
+  session?: string;
+  claude?: string;
+  timeout?: number;
+  forkAsksAfter?: number;
 }
 
 const VALUE_FLAGS = {
@@ -431,6 +450,10 @@ const VALUE_FLAGS = {
   "--max-seconds": "maxSeconds",
   "--state-dir": "stateDir",
   "--state-file": "stateFile",
+  "--session": "session",
+  "--claude": "claude",
+  "--timeout": "timeout",
+  "--fork-asks-after": "forkAsksAfter",
 } as const;
 
 type ValueFlag = keyof typeof VALUE_FLAGS;
@@ -454,7 +477,12 @@ export function parseAgentArgs(
 
   const assign = (flag: ValueFlag, value: string) => {
     const key = VALUE_FLAGS[flag];
-    if (key === "since" || key === "maxSeconds") {
+    if (
+      key === "since" ||
+      key === "maxSeconds" ||
+      key === "timeout" ||
+      key === "forkAsksAfter"
+    ) {
       const number = Number(value);
       if (!Number.isFinite(number) || number < 0 || value.trim() === "") {
         throw new Error(`${flag} must be a non-negative number.`);

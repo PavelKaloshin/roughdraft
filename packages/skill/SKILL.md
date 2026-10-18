@@ -31,6 +31,8 @@ The user reviews your Markdown file in Roughdraft and can leave three kinds of c
 
    `listen` prints `[roughdraft] listening on … since=N` once, then exactly one line per event. Each line is everything you get: the command to run comes right after `→`, then the comment context after `|`.
 
+   Add `--fork-asks-after 15` to the listen command when you will be busy in long steps: an Ask you have not acked 15 seconds after its line reached you is then answered by a headless fork of this session (`claude -p --resume <session> --fork-session`, limited to reading files and `roughdraft ack`/`reply`; it never edits files). It needs `CLAUDE_CODE_SESSION_ID` (set by Claude Code) or `--session <id>`.
+
 ## On each event line
 
 The user watches each thread move through `Queued in Claude's session` (the line reached you) → `Passed to a subagent` (`ack --delegated`) → `Claude is working…` (`ack`) → `Answered`, with a timer. Run each `ack` as soon as it applies, so the status is never stale.
@@ -51,6 +53,10 @@ The user watches each thread move through `Queued in Claude's session` (the line
 - `[roughdraft] change cN seq=… → … | … text="…"` — do this yourself, never in a subagent (only one writer may edit the file): finish your current step, run `ack`, make the smallest edit to the file with your Edit tool (never rewrite the whole file; the user may be typing in it and sees your edit live), then reply with `--status applied` and one or two sentences on what changed.
 
 - `[roughdraft] followup cN reply=cM intent=…` — the user replied in an existing thread. Handle it like its thread's intent (`ask` → forked subagent, `change` → you edit and reply).
+
+- `[roughdraft] forked cN to a headless Claude (main session busy)` — you were busy, so the listener answered that Ask from a headless fork; the user sees `Passed to a forked Claude`. Skip cN. Likewise skip an Ask when your `ack` prints `(to a headless fork; leave it)` or a status of `working`/`answered` you did not set: someone else has it.
+
+- `[roughdraft] headless fork for cN failed (…); answer it yourself:` — followed by cN's event line again. The thread is back in your queue; handle that line as usual.
 
 - `[roughdraft] done … comments=N unresolved=M` — the user clicked Done Reviewing. Read the file and handle remaining plain comments and suggestions as usual. Keep listening only if the user is still reviewing.
 

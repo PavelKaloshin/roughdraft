@@ -308,10 +308,14 @@ export function parseAgentStatusSnapshot(value: unknown): AgentStatusSnapshot {
       record.threadDetails as Record<string, unknown>,
     )) {
       if (!threads[id] || !detail || typeof detail !== "object") continue;
-      const { since, requestedAt } = detail as Record<string, unknown>;
+      const { since, requestedAt, delegatedTo } = detail as Record<
+        string,
+        unknown
+      >;
       threadDetails[id] = {
         ...(typeof since === "string" ? { since } : {}),
         ...(typeof requestedAt === "string" ? { requestedAt } : {}),
+        ...(delegatedTo === "fork-process" ? { delegatedTo } : {}),
       };
     }
   }

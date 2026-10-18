@@ -46,6 +46,12 @@ export interface AgentThreadTiming {
   since?: string;
   /** When the user's latest Ask/Change/follow-up reached the server. */
   requestedAt?: string;
+  /**
+   * Who a `delegated` thread went to: absent for a subagent of the session,
+   * `fork-process` for a headless fork the listener started while the
+   * session was busy.
+   */
+  delegatedTo?: "fork-process";
 }
 
 export interface AgentStatusSnapshot {
@@ -173,10 +179,16 @@ export const THREAD_AGENT_STATUS_LABELS: Record<
  */
 export function getThreadAgentStatusLabel(
   status: ThreadAgentDisplayStatus,
-  { listening }: { listening: boolean },
+  {
+    listening,
+    delegatedTo,
+  }: { listening: boolean; delegatedTo?: AgentThreadTiming["delegatedTo"] },
 ) {
   if (status === "pending" && listening) {
     return "Waiting for Claude to pick it up";
+  }
+  if (status === "delegated" && delegatedTo === "fork-process") {
+    return "Passed to a forked Claude";
   }
   return THREAD_AGENT_STATUS_LABELS[status];
 }
@@ -206,9 +218,12 @@ export function formatAgentElapsed(ms: number) {
   return `${Math.floor(totalMinutes / 60)}h ${totalMinutes % 60}m`;
 }
 
-const SUMMARY_PARTS: ReadonlyArray<[AgentThreadStatus, string]> = [
+type SummaryBucket = AgentThreadStatus | "forked";
+
+const SUMMARY_PARTS: ReadonlyArray<[SummaryBucket, string]> = [
   ["queued", "queued"],
   ["delegated", "with a subagent"],
+  ["forked", "with a forked Claude"],
   ["working", "working"],
 ];
 
@@ -220,11 +235,17 @@ const SUMMARY_PARTS: ReadonlyArray<[AgentThreadStatus, string]> = [
 export function summarizeAgentThreads(
   threads: Record<string, AgentThreadStatus>,
   openThreadIds?: ReadonlySet<string> | null,
+  threadDetails?: Record<string, AgentThreadTiming>,
 ): string | null {
-  const counts = new Map<AgentThreadStatus, number>();
+  const counts = new Map<SummaryBucket, number>();
   for (const [id, status] of Object.entries(threads)) {
     if (openThreadIds && !openThreadIds.has(id)) continue;
-    counts.set(status, (counts.get(status) ?? 0) + 1);
+    const bucket: SummaryBucket =
+      status === "delegated" &&
+      threadDetails?.[id]?.delegatedTo === "fork-process"
+        ? "forked"
+        : status;
+    counts.set(bucket, (counts.get(bucket) ?? 0) + 1);
   }
   const parts = SUMMARY_PARTS.flatMap(([status, label]) => {
     const count = counts.get(status) ?? 0;
