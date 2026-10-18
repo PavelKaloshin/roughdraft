@@ -32,7 +32,10 @@ import { addExternalChangeHighlight } from "./external-change-highlight";
 import { buildExternalContentTransaction } from "./external-content-sync";
 import { cn } from "./lib/utils";
 import { mergeMarkdown } from "./markdown-merge";
-import { MarkdownCodeEditor } from "./MarkdownCodeEditor";
+import {
+  type ApplyCodeValueOptions,
+  MarkdownCodeEditor,
+} from "./MarkdownCodeEditor";
 import {
   buildLocationForLinkedMarkdownDocument,
   joinPath,
@@ -141,7 +144,9 @@ interface CodeEditorSurfaceProps {
   layout: "default" | "embedded-demo";
   onMarkdownChange: (markdown: string) => void;
   outlineJumpRequest: OutlineJumpRequest | null;
-  applyValueRef: { current: ((value: string) => void) | null };
+  applyValueRef: {
+    current: ((value: string, options?: ApplyCodeValueOptions) => void) | null;
+  };
 }
 
 export interface DraftSuggestionState {
@@ -2374,7 +2379,9 @@ const PageCardEditorSurface = memo(function PageCardEditorSurface({
   const editorViewModeRef = useRef<EditorViewMode>(editorViewMode);
   editorViewModeRef.current = editorViewMode;
   const richTextSyncRef = useRef<ExternalMarkdownSync | null>(null);
-  const codeApplyValueRef = useRef<((value: string) => void) | null>(null);
+  const codeApplyValueRef = useRef<
+    ((value: string, options?: ApplyCodeValueOptions) => void) | null
+  >(null);
   const performSaveRef = useRef<
     ((nextMarkdown: string) => Promise<ManualSaveResult>) | null
   >(null);
@@ -2395,7 +2402,7 @@ const PageCardEditorSurface = memo(function PageCardEditorSurface({
   const applyMarkdownToSurface = useCallback(
     (nextMarkdown: string, highlight: boolean) => {
       if (editorViewModeRef.current === "code") {
-        codeApplyValueRef.current?.(nextMarkdown);
+        codeApplyValueRef.current?.(nextMarkdown, { highlight });
       } else {
         richTextSyncRef.current?.(nextMarkdown, { highlight });
       }

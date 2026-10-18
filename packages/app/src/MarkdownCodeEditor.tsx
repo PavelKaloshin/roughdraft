@@ -4,7 +4,16 @@ import { yamlFrontmatter } from "@codemirror/lang-yaml";
 import { EditorState, type Extension } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { useEffect, useRef } from "react";
+import {
+  codeExternalChangeHighlight,
+  externalChangeHighlightEffect,
+} from "./code-external-change-highlight";
 import { cn } from "./lib/utils";
+
+export interface ApplyCodeValueOptions {
+  /** Briefly tint the changed range (an external change from disk). */
+  highlight?: boolean;
+}
 
 interface MarkdownCodeEditorProps {
   value: string;
@@ -20,9 +29,12 @@ interface MarkdownCodeEditorProps {
   scrollToLine?: { line: number; requestId: number } | null;
   /**
    * Receives a function that applies an external value immediately, as a
-   * minimal change, without reporting it back through `onChange`.
+   * minimal change, without reporting it back through `onChange`. With
+   * `highlight`, the changed range flashes like in the rich-text editor.
    */
-  applyValueRef?: { current: ((value: string) => void) | null };
+  applyValueRef?: {
+    current: ((value: string, options?: ApplyCodeValueOptions) => void) | null;
+  };
 }
 
 /**
@@ -58,11 +70,20 @@ function applyMinimalValue(
   view: EditorView,
   value: string,
   lastValueRef: { current: string },
+  options: ApplyCodeValueOptions = {},
 ) {
   lastValueRef.current = value;
   const change = computeMinimalTextChange(view.state.doc.toString(), value);
   if (!change) return;
-  view.dispatch({ changes: change });
+  view.dispatch({
+    changes: change,
+    effects: options.highlight
+      ? externalChangeHighlightEffect(
+          change.from,
+          change.from + change.insert.length,
+        )
+      : [],
+  });
 }
 
 export function createMarkdownCodeEditorExtensions(
@@ -74,6 +95,7 @@ export function createMarkdownCodeEditorExtensions(
     basicSetup,
     yamlFrontmatter({ content: markdown() }),
     EditorView.lineWrapping,
+    codeExternalChangeHighlight(),
     EditorState.readOnly.of(readOnly),
     EditorView.editable.of(!readOnly),
     EditorView.updateListener.of((update) => {
@@ -192,9 +214,9 @@ export function MarkdownCodeEditor({
 
   useEffect(() => {
     if (!applyValueRef) return;
-    applyValueRef.current = (nextValue) => {
+    applyValueRef.current = (nextValue, options) => {
       const view = editorViewRef.current;
-      if (view) applyMinimalValue(view, nextValue, lastValueRef);
+      if (view) applyMinimalValue(view, nextValue, lastValueRef, options);
     };
     return () => {
       applyValueRef.current = null;

@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import { expect, type Page, test } from "@playwright/test";
 import {
+  codeEditor,
   createMarkdownProject,
   logE2eEvent,
   openMarkdownFile,
@@ -181,6 +182,33 @@ test.describe("live reload of external file changes", () => {
     expect(readProjectFile(projectDir, "live.md")).toBe(agentEdit);
 
     logE2eEvent("live-reload.clean-in-place", { file: "live.md" });
+  });
+
+  test("flashes an external change in the raw editor too @smoke", async ({
+    page,
+  }) => {
+    const writes = trackMarkdownWrites(page);
+    const filePath = writeProjectFile(projectDir, "raw.md", buildDocument());
+    await openMarkdownFile(page, filePath, "code");
+    const editor = codeEditor(page);
+    await expect(editor).toContainText("Paragraph 3 is ordinary");
+
+    const agentEdit = buildDocument({
+      3: "Paragraph 3 was rewritten on disk by the agent just now.",
+    });
+    fs.writeFileSync(filePath, agentEdit);
+
+    await expect(editor).toContainText("rewritten on disk by the agent");
+    const highlight = editor.getByTestId("external-change-highlight");
+    await expect(highlight).toHaveCount(1);
+    await expect(highlight).toContainText("rewritten on disk by the agent");
+    await expect(highlight).toHaveCount(0, { timeout: 4_000 });
+
+    await page.waitForTimeout(1_000);
+    expect(writes).toEqual([]);
+    expect(readProjectFile(projectDir, "raw.md")).toBe(agentEdit);
+
+    logE2eEvent("live-reload.raw-highlight", { file: "raw.md" });
   });
 
   test("merges local typing with a concurrent agent edit and saves once @smoke", async ({
