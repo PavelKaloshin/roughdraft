@@ -1,0 +1,8 @@
+[
+  {
+    "name": "roughdraft-comments",
+    "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/session-listen \"${CLAUDE_PLUGIN_DATA}\"",
+    "description": "Roughdraft comments on Markdown files this session owns",
+    "when": "always"
+  }
+]

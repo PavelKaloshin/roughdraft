@@ -1,0 +1,11 @@
+{
+  "name": "roughdraft",
+  "version": "0.1.0",
+  "description": "Roughdraft live review: every interactive session that writes or opens a Markdown file receives that file's Ask/Change comments from Roughdraft automatically.",
+  "author": {
+    "name": "Roughdraft"
+  },
+  "homepage": "https://roughdraft.md",
+  "license": "MIT",
+  "keywords": ["markdown", "review", "comments", "roughdraft"]
+}

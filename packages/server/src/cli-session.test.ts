@@ -526,6 +526,17 @@ describe("session CLI commands", () => {
     expect(body.owner?.sessionId).toBe(sessionId);
   }
 
+  it("prints the plugin install commands for setup claude", async () => {
+    const { deps, logs } = makeDeps();
+    expect(await runCli(["setup", "claude"], deps)).toBe(0);
+    const pluginDir = path.resolve(
+      path.dirname(new URL(import.meta.url).pathname),
+      "../../claude-plugin",
+    );
+    expect(logs).toContain(`  claude plugin marketplace add ${pluginDir}`);
+    expect(logs).toContain("  claude plugin install roughdraft@roughdraft");
+  });
+
   it("rejects listen with both a file and --session, and claim without a session", async () => {
     const both = makeDeps();
     expect(
