@@ -1116,6 +1116,9 @@ function CommentThreadNode({
                   status={agentDisplayStatus}
                   listening={agent.status?.listening === true}
                   since={agent.status?.threadDetails?.[comment.id]?.since}
+                  delegatedTo={
+                    agent.status?.threadDetails?.[comment.id]?.delegatedTo
+                  }
                   requestedAt={
                     agentDisplayStatus === "sending"
                       ? undefined

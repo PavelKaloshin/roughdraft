@@ -46,6 +46,12 @@ export interface AgentThreadTiming {
   since?: string;
   /** When the user's latest Ask/Change/follow-up reached the server. */
   requestedAt?: string;
+  /**
+   * Who a `delegated` thread went to: absent for a subagent of the session,
+   * `fork-process` for a headless fork the listener started while the
+   * session was busy.
+   */
+  delegatedTo?: "fork-process";
 }
 
 export interface AgentStatusSnapshot {
@@ -173,10 +179,16 @@ export const THREAD_AGENT_STATUS_LABELS: Record<
  */
 export function getThreadAgentStatusLabel(
   status: ThreadAgentDisplayStatus,
-  { listening }: { listening: boolean },
+  {
+    listening,
+    delegatedTo,
+  }: { listening: boolean; delegatedTo?: AgentThreadTiming["delegatedTo"] },
 ) {
   if (status === "pending" && listening) {
     return "Waiting for Claude to pick it up";
+  }
+  if (status === "delegated" && delegatedTo === "fork-process") {
+    return "Passed to a forked Claude";
   }
   return THREAD_AGENT_STATUS_LABELS[status];
 }

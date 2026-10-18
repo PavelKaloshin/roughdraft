@@ -44,7 +44,12 @@ function part(suffix = "") {
 
 async function render(
   status: ThreadAgentDisplayStatus,
-  options: { since?: string; requestedAt?: string; listening?: boolean } = {},
+  options: {
+    since?: string;
+    requestedAt?: string;
+    listening?: boolean;
+    delegatedTo?: "fork-process";
+  } = {},
 ) {
   await act(async () => {
     root.render(
@@ -53,6 +58,7 @@ async function render(
         listening={options.listening ?? true}
         since={options.since}
         requestedAt={options.requestedAt}
+        delegatedTo={options.delegatedTo}
         testId={testId}
       />,
     );
@@ -126,6 +132,12 @@ describe("agent thread status line", () => {
     await render("working");
     expect(part("-label")?.textContent).toBe("Claude is working…");
     expect(part("-elapsed")).toBeNull();
+  });
+
+  it("says when a headless fork answers because the session is busy", async () => {
+    await render("delegated", { delegatedTo: "fork-process" });
+
+    expect(part("-label")?.textContent).toBe("Passed to a forked Claude");
   });
 
   it("tells a missing session apart from one that has not picked it up yet", async () => {
