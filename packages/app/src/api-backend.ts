@@ -118,9 +118,13 @@ export class ApiBackend implements StorageBackend {
   watchMarkdownFile(
     relativePath: string,
     onChange: (event: MarkdownFileChangeEvent) => void,
+    knownVersion?: string,
   ): () => void {
     const source = new EventSource(
-      this.buildUrl("/api/markdown-file/events", { path: relativePath }),
+      this.buildUrl("/api/markdown-file/events", {
+        path: relativePath,
+        ...(knownVersion ? { version: knownVersion } : {}),
+      }),
     );
 
     source.addEventListener("change", (event) => {

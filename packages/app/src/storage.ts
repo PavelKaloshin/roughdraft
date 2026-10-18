@@ -78,6 +78,8 @@ export interface StorageBackend {
   watchMarkdownFile?(
     relativePath: string,
     onChange: (event: MarkdownFileChangeEvent) => void,
+    /** Version the tab already has; a newer one on disk is reported at once. */
+    knownVersion?: string,
   ): () => void;
   completeReview?(
     relativePath: string,

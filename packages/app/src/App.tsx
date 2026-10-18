@@ -1946,6 +1946,7 @@ export function App() {
     if (!backend?.watchMarkdownFile || !activeDocumentPath) return;
 
     let disposed = false;
+    const loadedPage = documentPageRef.current;
     const stopWatching = backend.watchMarkdownFile(
       activeDocumentPath,
       (event) => {
@@ -2006,6 +2007,10 @@ export function App() {
           }
         })();
       },
+      // A write between loading the page and this subscription is reported
+      // at once instead of being missed. (After a file switch this may be the
+      // previous page's version; the extra event then just re-reads the file.)
+      loadedPage?.version,
     );
 
     return () => {

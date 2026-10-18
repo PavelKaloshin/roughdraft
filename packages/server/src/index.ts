@@ -818,7 +818,15 @@ export function createApp(options: CreateAppOptions = {}): CreateAppResult {
 
     // One event per distinct on-disk state: the watcher may report a single
     // write several times, and the tab recognizes its own saves by version.
-    let lastVersion: string | null = fileVersionOrNull(absolutePath);
+    // Start from the version the tab loaded (`?version=`), not from "now":
+    // a write between the tab's load and this subscription (or during a
+    // reconnect) is then reported right away instead of being lost.
+    const knownVersion =
+      typeof req.query.version === "string" && req.query.version.length > 0
+        ? req.query.version
+        : null;
+    let lastVersion: string | null =
+      knownVersion ?? fileVersionOrNull(absolutePath);
     const sendIfChanged = () => {
       const version = fileVersionOrNull(absolutePath);
       if (version === lastVersion) return;
@@ -833,6 +841,7 @@ export function createApp(options: CreateAppOptions = {}): CreateAppResult {
     };
 
     const stopWatching = watchFileForChanges(absolutePath, sendIfChanged);
+    if (knownVersion) sendIfChanged();
     req.on("close", stopWatching);
   });
 

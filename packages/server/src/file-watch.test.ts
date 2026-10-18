@@ -40,9 +40,14 @@ describe("markdown file change events", () => {
     version: string | null;
   }
 
-  async function subscribe(): Promise<ChangeEvent[]> {
+  async function subscribe(
+    options: { knownVersion?: string } = {},
+  ): Promise<ChangeEvent[]> {
+    const known = options.knownVersion
+      ? `&version=${encodeURIComponent(options.knownVersion)}`
+      : "";
     const response = await fetch(
-      `${baseUrl}/api/markdown-file/events?projectPath=${encodeURIComponent(projectDir)}&path=plan.md`,
+      `${baseUrl}/api/markdown-file/events?projectPath=${encodeURIComponent(projectDir)}&path=plan.md${known}`,
     );
     expect(response.status).toBe(200);
     const reader = response.body?.getReader();
@@ -113,6 +118,28 @@ describe("markdown file change events", () => {
         200,
       );
     }
+  });
+
+  it("reports a write that landed between loading the file and subscribing", async () => {
+    // The tab loads the file, an agent writes it, and only then does the
+    // tab's event stream connect: that write must not be lost.
+    const loadedVersion = await versionOnDisk();
+    fs.writeFileSync(
+      documentPath,
+      "# Plan\n\nWritten before the tab subscribed.\n",
+    );
+
+    const events = await subscribe({ knownVersion: loadedVersion });
+    await settle(events, 1);
+
+    expect(events).toHaveLength(1);
+    expect(events[0]?.version).toBe(await versionOnDisk());
+  });
+
+  it("stays quiet on subscribe when the tab already has the current version", async () => {
+    const events = await subscribe({ knownVersion: await versionOnDisk() });
+    await settle(events, 0);
+    expect(events).toEqual([]);
   });
 
   it("reports an in-place write once, quickly", async () => {
