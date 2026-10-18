@@ -26,7 +26,28 @@ Roughdraft uses these CriticMarkup-compatible markers:
 
 An implementation MUST treat the opening and closing marker pairs as review delimiters outside inline code and fenced code blocks.
 
-Implementations MUST treat review markers inside inline code spans and fenced code blocks as literal example text. They MUST NOT create comments, suggestions, or highlights from those code contexts.
+Implementations MUST treat review markers inside inline code spans as literal example text. They MUST NOT create comments, suggestions, or highlights from inline code.
+
+Inside fenced code blocks, review markers are literal example text with one exception: an [anchored comment](#anchored-comments) (a highlight immediately followed by one or more comments, with their metadata) is a live comment on the highlighted code. This is how a reviewer comments on code. Inside a fence:
+
+- Implementations MUST recognize anchored comments and their reply chains as review items, exactly as outside code.
+- Implementations MUST treat standalone comments, suggestions, standalone highlights, and unclosed markers as literal text, and MUST NOT report diagnostics for them.
+- Markers MUST NOT pair across the fence boundary, and backticks inside the fence do not start inline code spans.
+
+````markdown
+```sh
+roughdraft {==open==}{>>Why not `watch`?<<}{#c1} plan.md
+{>>this standalone comment is literal<<} {++so is this suggestion++}
+```
+
+---
+comments:
+  c1:
+    by: user
+    at: "2026-04-28T12:00:00.000Z"
+````
+
+A fence that shows CriticMarkup as an example therefore needs care: an anchored comment in an example fence becomes a live comment. Writers that need a literal anchored-comment example SHOULD break the sequence, for example by separating the highlight and the comment with a space.
 
 ## Comments
 
@@ -303,7 +324,7 @@ Round trips SHOULD preserve:
 - Local links and image paths.
 - Tables and task lists.
 - Inline code and fenced code blocks.
-- Raw review marker text inside code contexts.
+- Raw review marker text inside code contexts, including anchored comments inside fenced code blocks.
 - Metadata values, including escaped quotes and backslashes.
 
 When importing a valid comment or suggestion without metadata, an implementation MAY synthesize missing `id`, `by`, and `at` values on write.

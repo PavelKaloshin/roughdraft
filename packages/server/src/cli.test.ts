@@ -1088,6 +1088,25 @@ describe("cli", () => {
     });
   });
 
+  it("times out watch --timeout cleanly when the remaining wait is a fraction of a millisecond", async () => {
+    // The last round waits for whatever time is left, which is rarely a whole
+    // number of milliseconds; AbortSignal.timeout() rejects non-integers.
+    const test = createTestDependencies();
+    const documentPath = path.join(projectDir, "draft.md");
+    fs.writeFileSync(documentPath, "# Draft\n");
+
+    const exitCode = await runCli(
+      ["watch", documentPath, "--json", "--timeout", "0.2003"],
+      test.deps,
+    );
+
+    expect(test.errors).toEqual([]);
+    expect(exitCode).toBe(1);
+    expect(
+      parseOnlyJsonLog<{ timedOut: boolean; events: unknown[] }>(test.logs),
+    ).toMatchObject({ timedOut: true, events: [] });
+  });
+
   it("keeps waiting for review when the watch response outlives the client's headers timeout", async () => {
     // Node's built-in fetch (undici) rejects with
     // `TypeError: fetch failed { cause: HeadersTimeoutError }` when a response
@@ -1546,7 +1565,10 @@ describe("cli", () => {
       "  Comment ids are document-local and usually look like `c1`, `c2`, `c3`.",
     );
     expect(test.logs).toContain(
-      "  Treat CriticMarkup inside fenced code blocks as literal example text.",
+      "  To comment on code in a fence, anchor it: {==code==}{>>note<<}{#c1}.",
+    );
+    expect(test.logs).toContain(
+      "  Any other CriticMarkup inside fenced code blocks is literal example text.",
     );
     expect(test.logs).toContain(
       "  https://roughdraft.md/spec/roughdraft-flavored-markdown.md",
@@ -2159,6 +2181,76 @@ describe("runCli open in remote mode", () => {
       expect(
         logs.some((m) => m.includes("Opened remote Roughdraft session")),
       ).toBe(true);
+    } finally {
+      await remote.close();
+    }
+  });
+
+  it("keeps the CLI save-back stream open past its connect timeout", {
+    timeout: 15_000,
+  }, async () => {
+    // The connect timeout used to be an AbortSignal on the whole fetch, which
+    // also aborts the streamed body: `open` on a remote host silently stopped
+    // saving 10s after it connected. Scale the timeout down to keep it fast.
+    const CONNECT_TIMEOUT_MS = 200;
+    const remote = await startRemoteHost();
+    try {
+      const filePath = path.join(projectDir, "slow-review.md");
+      fs.writeFileSync(filePath, "before\n");
+      const logs: string[] = [];
+      const errors: string[] = [];
+      let openedUrl: string | null = null;
+      let cliSettled = false;
+
+      const cliPromise = runCli(["open", "--open", filePath], {
+        env: { ROUGHDRAFT_HOST: remote.url },
+        cwd: projectDir,
+        remoteConnectTimeoutMs: CONNECT_TIMEOUT_MS,
+        log: (m) => logs.push(m),
+        error: (m) => errors.push(m),
+        openUrl: (url) => {
+          openedUrl = url;
+          return "disabled";
+        },
+      }).finally(() => {
+        cliSettled = true;
+      });
+
+      const openDeadline = Date.now() + 4000;
+      while (openedUrl === null && Date.now() < openDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      const sessionId = new URL(
+        openedUrl as unknown as string,
+      ).searchParams.get("session");
+
+      // The reviewer saves well after the connect timeout has elapsed.
+      await new Promise((resolve) =>
+        setTimeout(resolve, CONNECT_TIMEOUT_MS * 3),
+      );
+      expect(cliSettled).toBe(false);
+      const loaded = await fetch(
+        `${remote.url}/api/remote-document/${sessionId}`,
+      );
+      const { version } = (await loaded.json()) as { version: string };
+      await fetch(`${remote.url}/api/remote-document/${sessionId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: "after\n", expectedVersion: version }),
+      });
+
+      const writeDeadline = Date.now() + 4000;
+      while (
+        fs.readFileSync(filePath, "utf-8") !== "after\n" &&
+        Date.now() < writeDeadline
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      expect(fs.readFileSync(filePath, "utf-8")).toBe("after\n");
+
+      await remote.close();
+      expect(await cliPromise).toBe(0);
+      expect(errors).toEqual([]);
     } finally {
       await remote.close();
     }

@@ -18,7 +18,11 @@ import {
   resolveBindHosts,
 } from "./network.js";
 import { AgentRegistry, type AgentThreadStatus } from "./agent-registry.js";
-import { buildCommentEventInput, lookupComment } from "./comment-events.js";
+import {
+  buildCommentEventInput,
+  findUnansweredAgentThreads,
+  lookupComment,
+} from "./comment-events.js";
 import {
   isCommentEvent,
   isCommentEventType,
@@ -185,6 +189,83 @@ function fileVersionFromFile(filePath: string): string {
   const content = fs.readFileSync(filePath);
   const stats = fs.statSync(filePath);
   return fileVersionFromContent(stats, content);
+}
+
+function fileVersionOrNull(filePath: string): string | null {
+  try {
+    return fileVersionFromFile(filePath);
+  } catch {
+    return null;
+  }
+}
+
+/** Coalesces the burst of notifications one save produces. */
+const FILE_WATCH_DEBOUNCE_MS = 50;
+/** Stat-polling fallback when native watching is unavailable. */
+const FILE_WATCH_POLL_INTERVAL_MS = 500;
+
+/**
+ * Calls `onChange` (debounced) when `filePath` may have changed. Watches the
+ * containing directory rather than the file: editors and agents often save
+ * atomically (write a temp file, rename it over the target), which replaces
+ * the inode a file watcher would be attached to. Falls back to stat polling
+ * if native watching fails (unsupported filesystem, watcher limits, the
+ * directory going away). Callers dedupe by content version.
+ */
+function watchFileForChanges(
+  filePath: string,
+  onChange: () => void,
+): () => void {
+  const directory = path.dirname(filePath);
+  const fileName = path.basename(filePath);
+  let timer: NodeJS.Timeout | null = null;
+  let watcher: fs.FSWatcher | null = null;
+  let polling = false;
+  let stopped = false;
+
+  const schedule = () => {
+    if (stopped) return;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      if (!stopped) onChange();
+    }, FILE_WATCH_DEBOUNCE_MS);
+  };
+  const poll = (current: fs.Stats, previous: fs.Stats) => {
+    if (
+      current.mtimeMs !== previous.mtimeMs ||
+      current.size !== previous.size ||
+      current.nlink !== previous.nlink
+    ) {
+      schedule();
+    }
+  };
+  const fallBackToPolling = () => {
+    watcher?.close();
+    watcher = null;
+    if (stopped || polling) return;
+    polling = true;
+    fs.watchFile(filePath, { interval: FILE_WATCH_POLL_INTERVAL_MS }, poll);
+    // Do not miss a change that happened while switching.
+    schedule();
+  };
+
+  try {
+    watcher = fs.watch(directory, { persistent: false }, (_event, name) => {
+      // Some platforms omit the name; then any entry may be ours.
+      if (name === null || name.toString() === fileName) schedule();
+    });
+    watcher.on("error", fallBackToPolling);
+  } catch {
+    fallBackToPolling();
+  }
+
+  return () => {
+    stopped = true;
+    if (timer) clearTimeout(timer);
+    watcher?.close();
+    if (polling) fs.unwatchFile(filePath, poll);
+  };
 }
 
 function normalizeOverallComment(input: unknown): string | undefined {
@@ -507,6 +588,38 @@ export function createApp(options: CreateAppOptions = {}): CreateAppResult {
       isCommentEvent(event) && agentRegistry.isAwaitingAgent(event),
   });
   const remoteSessions = new Map<string, RemoteSession>();
+  const requeuedDocuments = new Set<string>();
+
+  /**
+   * Comment events live in memory, so asks posted before this process
+   * started (a restart, or no server at the time) are gone. The first time a
+   * listener attaches to a document, queue the ask/change threads that are
+   * still waiting for the agent according to the file itself. Events the tab
+   * posts later dedupe against these.
+   */
+  function requeueUnansweredThreads(target: {
+    absolutePath: string;
+    projectDir: string;
+    relativePath: string;
+  }): void {
+    if (requeuedDocuments.has(target.absolutePath)) return;
+    requeuedDocuments.add(target.absolutePath);
+
+    const markdown = fs.readFileSync(target.absolutePath, "utf-8");
+    const version = fileVersionFromFile(target.absolutePath);
+    for (const thread of findUnansweredAgentThreads(markdown)) {
+      const built = buildCommentEventInput(markdown, {
+        ...thread,
+        documentPath: target.absolutePath,
+        projectPath: target.projectDir,
+        relativePath: target.relativePath,
+        version,
+      });
+      if (!built.ok) continue;
+      const result = reviewEvents.emitComment(built.input);
+      if (!result.duplicate) agentRegistry.recordEvent(result.event);
+    }
+  }
 
   function isAuthorizedRemoteDocumentRequest(req: Request): boolean {
     if (!remoteDocumentToken) return true;
@@ -702,34 +815,24 @@ export function createApp(options: CreateAppOptions = {}): CreateAppResult {
     res.flushHeaders?.();
     res.write("retry: 1000\n\n");
 
-    const sendChange = (stats: fs.Stats) => {
-      const exists = stats.nlink > 0;
+    // One event per distinct on-disk state: the watcher may report a single
+    // write several times, and the tab recognizes its own saves by version.
+    let lastVersion: string | null = fileVersionOrNull(absolutePath);
+    const sendIfChanged = () => {
+      const version = fileVersionOrNull(absolutePath);
+      if (version === lastVersion) return;
+      lastVersion = version;
       res.write(
         `event: change\ndata: ${JSON.stringify({
           path: relativePath,
-          exists,
-          version: exists ? fileVersionFromFile(absolutePath) : null,
+          exists: version !== null,
+          version,
         })}\n\n`,
       );
     };
 
-    const listener = (current: fs.Stats, previous: fs.Stats) => {
-      if (
-        current.mtimeMs === previous.mtimeMs &&
-        current.size === previous.size &&
-        current.nlink === previous.nlink
-      ) {
-        return;
-      }
-
-      sendChange(current);
-    };
-
-    fs.watchFile(absolutePath, { interval: 500 }, listener);
-
-    req.on("close", () => {
-      fs.unwatchFile(absolutePath, listener);
-    });
+    const stopWatching = watchFileForChanges(absolutePath, sendIfChanged);
+    req.on("close", stopWatching);
   });
 
   app.get("/api/review-index", (req, res) => {
@@ -854,6 +957,10 @@ export function createApp(options: CreateAppOptions = {}): CreateAppResult {
     // re-armed listener does not redo finished work.
     const skipHandled = req.body?.skipHandled === true;
 
+    if (types.some(isCommentEventType)) {
+      requeueUnansweredThreads(target);
+    }
+
     // A cursor from an earlier server process (sequences restart at 1) would
     // silently skip new events; answer at once so the client resets it.
     const requestedAfter =
@@ -977,8 +1084,12 @@ export function createApp(options: CreateAppOptions = {}): CreateAppResult {
     res.flushHeaders?.();
     res.write("retry: 1000\n\n");
 
-    const send = (status: unknown) => {
-      res.write(`event: status\ndata: ${JSON.stringify(status)}\n\n`);
+    // instanceId lets the tab tell a server restart (thread status and queued
+    // events gone) from a reconnect to the same process.
+    const send = (status: object) => {
+      res.write(
+        `event: status\ndata: ${JSON.stringify({ ...status, instanceId })}\n\n`,
+      );
     };
     send(agentRegistry.status(target.absolutePath));
     const unsubscribe = agentRegistry.subscribe(target.absolutePath, send);
