@@ -6,7 +6,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   appendRoughdraftDocumentComment,
+  appendRoughdraftReply,
   extractRoughdraftReviewIndex,
+  markRoughdraftResolved,
 } from "@roughdraft/rfm";
 import express, { type Express, type Request, type Response } from "express";
 import {
@@ -15,7 +17,16 @@ import {
   ROUGHDRAFT_PUBLIC_HOST,
   resolveBindHosts,
 } from "./network.js";
-import { ReviewEventQueue } from "./review-events.js";
+import { AgentRegistry, type AgentThreadStatus } from "./agent-registry.js";
+import { buildCommentEventInput, lookupComment } from "./comment-events.js";
+import {
+  isCommentEvent,
+  isCommentEventType,
+  isReviewEventType,
+  type ReviewEvent,
+  ReviewEventQueue,
+  type ReviewEventType,
+} from "./review-events.js";
 import { resolveUpdateStatus } from "./update-status.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -67,6 +78,8 @@ interface CreateAppOptions {
   fetchImpl?: typeof fetch;
   packageName?: string;
   remoteDocumentToken?: string;
+  /** How long an agent listener stays "present" between long-poll rounds. */
+  agentListenerGraceMs?: number;
 }
 
 interface CreateAppResult {
@@ -110,6 +123,10 @@ const REMOTE_SESSION_TTL_MS = 5 * 60 * 1000;
 const REMOTE_SESSION_SWEEP_INTERVAL_MS = 60 * 1000;
 const REMOTE_SESSION_KEEPALIVE_MS = 15 * 1000;
 const MAX_OVERALL_COMMENT_LENGTH = 4_000;
+const MAX_AGENT_REPLY_LENGTH = 100_000;
+const AGENT_EVENTS_KEEPALIVE_MS = 15 * 1000;
+const WRITE_CONFLICT_RETRIES = 3;
+const AGENT_REPLY_STATUSES = ["answered", "applied"] as const;
 
 let nextOpenRequestClientId = 1;
 
@@ -399,6 +416,73 @@ function listProjectTree(projectDir: string): ProjectTreeListing {
   return { paths };
 }
 
+type MarkdownRewrite =
+  | { ok: true; markdown: string }
+  | { ok: false; status: 400 | 404; error: string };
+
+type RewriteOutcome =
+  | { ok: true; version: string }
+  | { ok: false; status: number; payload: Record<string, unknown> };
+
+/**
+ * Read-modify-write of a Markdown file with an optimistic version check.
+ * `expectedVersion` (when given) must match the file as first read; after
+ * that, an external write landing between our read and write is retried
+ * against the fresh content instead of being clobbered.
+ */
+function rewriteMarkdownFile(
+  absolutePath: string,
+  expectedVersion: unknown,
+  rewrite: (markdown: string) => MarkdownRewrite,
+): RewriteOutcome {
+  for (let attempt = 0; attempt < WRITE_CONFLICT_RETRIES; attempt += 1) {
+    const markdown = fs.readFileSync(absolutePath, "utf-8");
+    const version = fileVersionFromContent(fs.statSync(absolutePath), markdown);
+    if (
+      attempt === 0 &&
+      typeof expectedVersion === "string" &&
+      expectedVersion.length > 0 &&
+      expectedVersion !== version
+    ) {
+      return {
+        ok: false,
+        status: 409,
+        payload: { error: "Markdown file changed on disk", version },
+      };
+    }
+
+    let result: MarkdownRewrite;
+    try {
+      result = rewrite(markdown);
+    } catch (error) {
+      return {
+        ok: false,
+        status: 400,
+        payload: {
+          error: error instanceof Error ? error.message : String(error),
+        },
+      };
+    }
+    if (!result.ok) {
+      return {
+        ok: false,
+        status: result.status,
+        payload: { error: result.error },
+      };
+    }
+
+    if (fileVersionFromFile(absolutePath) !== version) continue;
+    fs.writeFileSync(absolutePath, result.markdown);
+    return { ok: true, version: fileVersionFromFile(absolutePath) };
+  }
+
+  return {
+    ok: false,
+    status: 409,
+    payload: { error: "Markdown file kept changing on disk; try again" },
+  };
+}
+
 export function createApp(options: CreateAppOptions = {}): CreateAppResult {
   const port = options.port ?? ROUGHDRAFT_DEFAULT_PORT;
   const homeDir = options.homeDir ?? os.homedir();
@@ -412,7 +496,16 @@ export function createApp(options: CreateAppOptions = {}): CreateAppResult {
       : null;
   const app = express();
   const openRequestClients = new Set<OpenRequestClient>();
-  const reviewEvents = new ReviewEventQueue();
+  // Identifies this server process so listeners notice a restart (event
+  // sequences start over) and reset their cursor instead of missing events.
+  const instanceId = crypto.randomUUID();
+  const agentRegistry = new AgentRegistry({
+    graceMs: options.agentListenerGraceMs,
+  });
+  const reviewEvents = new ReviewEventQueue({
+    isPinned: (event) =>
+      isCommentEvent(event) && agentRegistry.isAwaitingAgent(event),
+  });
   const remoteSessions = new Map<string, RemoteSession>();
 
   function isAuthorizedRemoteDocumentRequest(req: Request): boolean {
@@ -521,6 +614,16 @@ export function createApp(options: CreateAppOptions = {}): CreateAppResult {
     }
 
     return { relativePath, absolutePath, projectDir };
+  }
+
+  function requestedCommentId(req: Request, res: Response): string | null {
+    const commentId =
+      typeof req.body?.commentId === "string" ? req.body.commentId.trim() : "";
+    if (!commentId) {
+      res.status(400).json({ error: "commentId is required" });
+      return null;
+    }
+    return commentId;
   }
 
   // --- API routes ---
@@ -647,6 +750,49 @@ export function createApp(options: CreateAppOptions = {}): CreateAppResult {
     const target = markdownPathFromRequest(req, res);
     if (!target) return;
 
+    const requestedType = req.body?.type;
+    if (requestedType !== undefined && !isReviewEventType(requestedType)) {
+      res.status(400).json({
+        error: `Unknown review event type: ${String(requestedType)}`,
+      });
+      return;
+    }
+
+    if (isCommentEventType(requestedType)) {
+      const commentId = requestedCommentId(req, res);
+      if (!commentId) return;
+
+      // The UI saves the file first and then posts the event, so the event is
+      // built from what is on disk, never from client-supplied text.
+      const markdown = fs.readFileSync(target.absolutePath, "utf-8");
+      const built = buildCommentEventInput(markdown, {
+        type: requestedType,
+        commentId,
+        documentPath: target.absolutePath,
+        projectPath: target.projectDir,
+        relativePath: target.relativePath,
+        version: fileVersionFromFile(target.absolutePath),
+      });
+      if (!built.ok) {
+        res.status(built.status).json({ error: built.error });
+        return;
+      }
+
+      const result = reviewEvents.emitComment(built.input);
+      if (!result.duplicate) {
+        agentRegistry.recordEvent(result.event);
+      }
+      const agent = agentRegistry.status(target.absolutePath);
+      res.status(result.duplicate ? 200 : 201).json({
+        ...result,
+        agent: {
+          listening: agent.listening,
+          ...(agent.sessionId ? { sessionId: agent.sessionId } : {}),
+        },
+      });
+      return;
+    }
+
     const overallComment = normalizeOverallComment(req.body?.overallComment);
     if (
       overallComment !== undefined &&
@@ -686,6 +832,49 @@ export function createApp(options: CreateAppOptions = {}): CreateAppResult {
     const target = markdownPathFromRequest(req, res);
     if (!target) return;
 
+    // Default stays Done Reviewing only, so `roughdraft open`/`watch` and the
+    // MCP watch tool keep their behavior; agents opt into comment events.
+    let types: ReviewEventType[] = ["review.completed"];
+    if (req.body?.types !== undefined) {
+      const requested: unknown = req.body.types;
+      if (
+        !Array.isArray(requested) ||
+        requested.length === 0 ||
+        !requested.every(isReviewEventType)
+      ) {
+        res.status(400).json({
+          error:
+            "types must be a non-empty array of review.completed, comment.ask, comment.change, comment.followup",
+        });
+        return;
+      }
+      types = requested;
+    }
+    // Skip ask/change events whose thread the agent already answered, so a
+    // re-armed listener does not redo finished work.
+    const skipHandled = req.body?.skipHandled === true;
+
+    const listener = req.body?.listener;
+    const listenerId =
+      typeof listener?.id === "string" && listener.id.length > 0
+        ? listener.id
+        : null;
+    const endListen = listenerId
+      ? agentRegistry.beginListen(target.absolutePath, {
+          listenerId,
+          sessionId:
+            typeof listener?.sessionId === "string" ? listener.sessionId : null,
+        })
+      : null;
+
+    // Free the waiter (and the listener's presence) as soon as the client
+    // goes away instead of holding it until the round times out.
+    const abort = new AbortController();
+    res.on("close", () => {
+      abort.abort();
+      endListen?.();
+    });
+
     const fromNow = req.body?.fromNow !== false;
     const timeoutSeconds =
       typeof req.body?.timeoutSeconds === "number"
@@ -704,9 +893,27 @@ export function createApp(options: CreateAppOptions = {}): CreateAppResult {
       timeoutMs:
         timeoutSeconds !== undefined ? timeoutSeconds * 1000 : undefined,
       batchWindowMs: batchWindowSeconds * 1000,
+      types,
+      filter: skipHandled
+        ? (event: ReviewEvent) =>
+            !isCommentEvent(event) || !agentRegistry.isHandled(event)
+        : undefined,
+      signal: abort.signal,
     });
 
-    res.json(result);
+    if (abort.signal.aborted) return;
+
+    if (listenerId) {
+      for (const event of result.events) {
+        if (isCommentEvent(event)) agentRegistry.recordDelivered(event);
+      }
+    }
+
+    res.json({
+      ...result,
+      instanceId,
+      latestSequence: reviewEvents.latestSequence(),
+    });
   });
 
   app.get("/api/review-events/status", (req, res) => {
@@ -722,6 +929,185 @@ export function createApp(options: CreateAppOptions = {}): CreateAppResult {
       relativePath: target.relativePath,
       watching: watcherCount > 0,
       watcherCount,
+    });
+  });
+
+  app.get("/api/agent/status", (req, res) => {
+    const target = markdownPathFromRequest(req, res);
+    if (!target) return;
+
+    res.json({
+      ...agentRegistry.status(target.absolutePath),
+      projectPath: target.projectDir,
+      relativePath: target.relativePath,
+      latestSequence: reviewEvents.latestSequence(),
+      instanceId,
+    });
+  });
+
+  app.get("/api/agent/events", (req, res) => {
+    const target = markdownPathFromRequest(req, res);
+    if (!target) return;
+
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders?.();
+    res.write("retry: 1000\n\n");
+
+    const send = (status: unknown) => {
+      res.write(`event: status\ndata: ${JSON.stringify(status)}\n\n`);
+    };
+    send(agentRegistry.status(target.absolutePath));
+    const unsubscribe = agentRegistry.subscribe(target.absolutePath, send);
+    const keepalive = setInterval(() => {
+      res.write(": keepalive\n\n");
+    }, AGENT_EVENTS_KEEPALIVE_MS);
+    keepalive.unref?.();
+
+    res.on("close", () => {
+      clearInterval(keepalive);
+      unsubscribe();
+    });
+  });
+
+  app.post("/api/agent/ack", (req, res) => {
+    const target = markdownPathFromRequest(req, res);
+    if (!target) return;
+
+    const commentId = requestedCommentId(req, res);
+    if (!commentId) return;
+
+    const lookup = lookupComment(
+      fs.readFileSync(target.absolutePath, "utf-8"),
+      commentId,
+    );
+    if (!lookup.ok) {
+      res.status(lookup.status).json({ error: lookup.error });
+      return;
+    }
+
+    agentRegistry.setThreadStatus(
+      target.absolutePath,
+      lookup.threadRootId,
+      "working",
+    );
+    res.json({
+      commentId,
+      threadRootId: lookup.threadRootId,
+      status: "working",
+    });
+  });
+
+  app.post("/api/comments/reply", (req, res) => {
+    const target = markdownPathFromRequest(req, res);
+    if (!target) return;
+
+    const commentId = requestedCommentId(req, res);
+    if (!commentId) return;
+
+    const body = typeof req.body?.body === "string" ? req.body.body : "";
+    if (body.trim().length === 0) {
+      res.status(400).json({ error: "body is required" });
+      return;
+    }
+    if (body.length > MAX_AGENT_REPLY_LENGTH) {
+      res.status(400).json({
+        error: `body must be ${MAX_AGENT_REPLY_LENGTH} characters or fewer`,
+      });
+      return;
+    }
+
+    const requestedStatus: unknown = req.body?.status ?? "answered";
+    if (
+      typeof requestedStatus !== "string" ||
+      !(AGENT_REPLY_STATUSES as readonly string[]).includes(requestedStatus)
+    ) {
+      res.status(400).json({ error: "status must be answered or applied" });
+      return;
+    }
+    const status = requestedStatus as AgentThreadStatus;
+    const author =
+      typeof req.body?.author === "string" && req.body.author.trim()
+        ? req.body.author.trim()
+        : "AI";
+
+    let threadRootId = "";
+    let replyId = "";
+    const outcome = rewriteMarkdownFile(
+      target.absolutePath,
+      req.body?.expectedVersion,
+      (markdown) => {
+        const lookup = lookupComment(markdown, commentId);
+        if (!lookup.ok) return lookup;
+        threadRootId = lookup.threadRootId;
+        const before = new Set(lookup.items.map((item) => item.id));
+        const next = appendRoughdraftReply(markdown, {
+          parentId: lookup.threadRootId,
+          message: body,
+          author,
+        });
+        replyId =
+          extractRoughdraftReviewIndex(next).items.find(
+            (item) => !before.has(item.id),
+          )?.id ?? "";
+        return { ok: true, markdown: next };
+      },
+    );
+    if (!outcome.ok) {
+      res.status(outcome.status).json(outcome.payload);
+      return;
+    }
+
+    agentRegistry.setThreadStatus(target.absolutePath, threadRootId, status);
+    res.status(201).json({
+      commentId,
+      threadRootId,
+      replyId,
+      status,
+      version: outcome.version,
+    });
+  });
+
+  app.post("/api/comments/resolve", (req, res) => {
+    const target = markdownPathFromRequest(req, res);
+    if (!target) return;
+
+    const commentId = requestedCommentId(req, res);
+    if (!commentId) return;
+    const summary =
+      typeof req.body?.summary === "string" && req.body.summary.trim()
+        ? req.body.summary.trim()
+        : undefined;
+
+    let threadRootId = "";
+    const outcome = rewriteMarkdownFile(
+      target.absolutePath,
+      req.body?.expectedVersion,
+      (markdown) => {
+        const lookup = lookupComment(markdown, commentId);
+        if (!lookup.ok) return lookup;
+        threadRootId = lookup.threadRootId;
+        return {
+          ok: true,
+          markdown: markRoughdraftResolved(markdown, {
+            targetId: lookup.threadRootId,
+            summary,
+          }),
+        };
+      },
+    );
+    if (!outcome.ok) {
+      res.status(outcome.status).json(outcome.payload);
+      return;
+    }
+
+    agentRegistry.clearThread(target.absolutePath, threadRootId);
+    res.json({
+      commentId,
+      threadRootId,
+      status: "resolved",
+      version: outcome.version,
     });
   });
 
