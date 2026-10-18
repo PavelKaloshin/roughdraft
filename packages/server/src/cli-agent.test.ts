@@ -182,7 +182,7 @@ describe("agent CLI commands", () => {
     const seq = posted.event.sequence;
     expect(logs).toEqual([
       `[roughdraft] listening on ${documentPath} (session session-abc) since=0`,
-      `[roughdraft] ask c1 seq=${seq} file=${documentPath} by=pavel anchor="about \\"four\\" seconds" text="What is included?\\nAnd why \\"four\\"?" → roughdraft ack ${documentPath} c1, then answer without editing the file: roughdraft reply ${documentPath} c1 --stdin`,
+      `[roughdraft] ask c1 seq=${seq} → roughdraft ack ${documentPath} c1, answer without editing the file: roughdraft reply ${documentPath} c1 --stdin | by=pavel anchor="about \\"four\\" seconds" text="What is included?\\nAnd why \\"four\\"?"`,
       `[roughdraft] listen expired; re-arm with: roughdraft listen ${documentPath} --since ${seq}`,
     ]);
   });
@@ -224,7 +224,7 @@ describe("agent CLI commands", () => {
     );
     expect(eventLines).toHaveLength(1);
     expect(eventLines[0]).toMatch(
-      /^\[roughdraft\] change c2 seq=\d+ .* → roughdraft ack .* c2, then edit the file and summarize the change: roughdraft reply .* c2 --status applied --stdin$/,
+      /^\[roughdraft\] change c2 seq=\d+ → roughdraft ack .* c2, edit the file, then: roughdraft reply .* c2 --status applied --stdin \| /,
     );
   });
 
@@ -446,8 +446,7 @@ describe("formatListenEventLine", () => {
     );
 
     expect(line).not.toContain("\n");
-    expect(line).toContain("file='/docs/my plan.md'");
-    expect(line).toContain(`text="${"x".repeat(400)}…"`);
+    expect(line).toContain(`text="${"x".repeat(300)}…"`);
     expect(line).toContain("(truncated; read comment c1 in the file)");
     expect(line).toContain("roughdraft reply '/docs/my plan.md' c1 --stdin");
   });
@@ -466,7 +465,7 @@ describe("formatListenEventLine", () => {
     );
 
     expect(line).toBe(
-      '[roughdraft] followup c2 reply=c4 intent=change seq=7 file=/docs/plan.md by=pavel text="Also keep the numbers." → roughdraft-dev-x ack /docs/plan.md c2, then edit the file and summarize the change: roughdraft-dev-x reply /docs/plan.md c2 --status applied --stdin',
+      '[roughdraft] followup c2 reply=c4 intent=change seq=7 → roughdraft-dev-x ack /docs/plan.md c2, edit the file, then: roughdraft-dev-x reply /docs/plan.md c2 --status applied --stdin | by=pavel text="Also keep the numbers."',
     );
   });
 });

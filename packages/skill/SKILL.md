@@ -29,11 +29,11 @@ The user reviews your Markdown file in Roughdraft and can leave three kinds of c
            timeout_ms: 1800000)
    ```
 
-   `listen` prints `[roughdraft] listening on … since=N` once, then exactly one line per event. Each line is everything you get, and ends with the command to run next.
+   `listen` prints `[roughdraft] listening on … since=N` once, then exactly one line per event. Each line is everything you get: the command to run comes right after `→`, then the comment context after `|`.
 
 ## On each event line
 
-- `[roughdraft] ask cN … text="…"` — run the `ack` it names, read the anchor and the surrounding text in the file, then answer with Markdown on stdin:
+- `[roughdraft] ask cN seq=… → … | … text="…"` — run the `ack` it names, read the anchor and the surrounding text in the file, then answer with Markdown on stdin:
 
   ```bash
   roughdraft reply "/abs/file.md" cN --stdin <<'EOF'
@@ -44,7 +44,7 @@ The user reviews your Markdown file in Roughdraft and can leave three kinds of c
 
   Do not edit the document for an Ask. If the answer shows the text should change, say so in the reply and let the user turn it into a Change.
 
-- `[roughdraft] change cN … text="…"` — run `ack`, make the smallest edit to the file with your Edit tool (never rewrite the whole file; the user may be typing in it and sees your edit live), then reply with `--status applied` and one or two sentences on what changed.
+- `[roughdraft] change cN seq=… → … | … text="…"` — run `ack`, make the smallest edit to the file with your Edit tool (never rewrite the whole file; the user may be typing in it and sees your edit live), then reply with `--status applied` and one or two sentences on what changed.
 
 - `[roughdraft] followup cN reply=cM intent=…` — the user replied in an existing thread. Handle it like its thread's intent (`ask` → answer, `change` → edit and reply).
 

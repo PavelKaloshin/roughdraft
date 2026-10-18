@@ -1061,7 +1061,7 @@ function printCommandHelp(
     );
     log("when the user clicks Done Reviewing. Each line");
     log(
-      "is self-contained and ends with the command to answer it. Designed to run",
+      "is self-contained and starts with the command to answer it. Designed to run",
     );
     log(
       "under Claude Code's Monitor tool, which wakes the session on every line.",
@@ -1070,7 +1070,7 @@ function printCommandHelp(
     log("Output lines:");
     log("  [roughdraft] listening on <file> (session <id>) since=<seq>");
     log(
-      '  [roughdraft] ask c3 seq=12 file=<file> by=<who> anchor="..." text="..." → ...',
+      '  [roughdraft] ask c3 seq=12 → <command to run> | by=<who> anchor="..." text="..."',
     );
     log(
       "  [roughdraft] done seq=13 file=<file> comments=<n> unresolved=<n> → ...",

@@ -9,6 +9,10 @@ import {
 } from "marked";
 import type TurndownService from "turndown";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+
+// Endmatter is read by people too: write multiline bodies as literal `|`
+// blocks and never re-wrap long lines (the default folds them with `>`).
+const ENDMATTER_YAML_OPTIONS = { blockQuote: "literal", lineWidth: 0 } as const;
 import {
   createEditorExtensions,
   type CriticChangeAttrs,
@@ -412,7 +416,7 @@ function serializeReviewEndmatter(
 
   if (Object.keys(data).length === 0) return null;
 
-  return `---\n${stringifyYaml(data)}`;
+  return `---\n${stringifyYaml(data, ENDMATTER_YAML_OPTIONS)}`;
 }
 
 export function createNextCommentId(

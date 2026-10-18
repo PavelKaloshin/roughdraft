@@ -27,7 +27,7 @@ const LISTEN_ROUND_SECONDS = 50;
 const LISTEN_BATCH_WINDOW_SECONDS = 0.1;
 const RETRY_MIN_DELAY_MS = 500;
 const RETRY_MAX_DELAY_MS = 5_000;
-const MAX_TEXT_CHARS = 400;
+const MAX_TEXT_CHARS = 300;
 const MAX_ANCHOR_CHARS = 120;
 const REPLY_CONFLICT_RETRIES = 3;
 
@@ -98,11 +98,18 @@ export function formatListenEventLine(
     event.type === "comment.change" ||
     (event.type === "comment.followup" && event.intent === "change");
 
+  // Monitor truncates long notification lines, so the command to run comes
+  // first and the (clipped) comment context last.
+  const ack = `${cli} ack ${file} ${threadId}`;
+  const action = wantsChange
+    ? `${ack}, edit the file, then: ${cli} reply ${file} ${threadId} --status applied --stdin`
+    : `${ack}, answer without editing the file: ${cli} reply ${file} ${threadId} --stdin`;
+
   const parts = [`[roughdraft] ${kind} ${threadId}`];
   if (event.type === "comment.followup") {
     parts.push(`reply=${event.commentId}`, `intent=${event.intent}`);
   }
-  parts.push(`seq=${event.sequence}`, `file=${file}`);
+  parts.push(`seq=${event.sequence}`, `→ ${action} |`);
   if (event.author) parts.push(`by=${escapeInline(event.author)}`);
   if (event.anchorText) {
     const anchor = clip(event.anchorText, MAX_ANCHOR_CHARS);
@@ -113,12 +120,6 @@ export function formatListenEventLine(
   if (text.clipped) {
     parts.push(`(truncated; read comment ${event.commentId} in the file)`);
   }
-
-  const ack = `${cli} ack ${file} ${threadId}`;
-  const action = wantsChange
-    ? `${ack}, then edit the file and summarize the change: ${cli} reply ${file} ${threadId} --status applied --stdin`
-    : `${ack}, then answer without editing the file: ${cli} reply ${file} ${threadId} --stdin`;
-  parts.push(`→ ${action}`);
   return parts.join(" ");
 }
 

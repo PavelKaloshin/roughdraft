@@ -494,6 +494,45 @@ describe("RFM mutation helpers", () => {
     );
   });
 
+  it("writes a long multiline reply as a readable literal block", () => {
+    const markdown = [
+      "Keep {==this claim==}{>>Needs proof<<}{#c1} as written.",
+      "",
+      "---",
+      "comments:",
+      "  c1:",
+      "    by: user",
+      '    at: "2026-04-28T12:00:00.000Z"',
+      "",
+    ].join("\n");
+    const message =
+      "Two reasons:\n\n- the cache is empty after a deploy, so the first request always goes to the origin server;\n- later requests are served from the cache.";
+
+    const updated = appendRoughdraftReply(markdown, {
+      parentId: "c1",
+      id: "c2",
+      author: "AI",
+      at: "2026-04-28T12:10:00.000Z",
+      message,
+    });
+
+    // People read endmatter too: no folded `>` style, no re-wrapped lines.
+    expect(updated).toContain(
+      [
+        "    body: |-",
+        "      Two reasons:",
+        "",
+        "      - the cache is empty after a deploy, so the first request always goes to the origin server;",
+        "      - later requests are served from the cache.",
+      ].join("\n"),
+    );
+    expect(
+      extractRoughdraftReviewIndex(updated).items.find(
+        (item) => item.id === "c2",
+      )?.text,
+    ).toBe(message);
+  });
+
   it("appends a reply to YAML endmatter without adding inline reply markup", () => {
     const markdown = [
       "# Plan",

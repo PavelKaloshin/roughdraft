@@ -1379,7 +1379,7 @@ function writeRoughdraftEndmatter(
     delete data.suggestions;
   }
 
-  return `${body}\n---\n${stringifyYaml(data)}`;
+  return `${body}\n---\n${stringifyYaml(data, ENDMATTER_YAML_OPTIONS)}`;
 }
 
 function isEndmatterBackedItem(markdown: string, item: RfmReviewItem): boolean {
@@ -1453,3 +1453,7 @@ function isValidDateTime(value: string): boolean {
   return dateTimePattern.test(value) && !Number.isNaN(Date.parse(value));
 }
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+
+// Endmatter is read by people too: write multiline bodies as literal `|`
+// blocks and never re-wrap long lines (the default folds them with `>`).
+const ENDMATTER_YAML_OPTIONS = { blockQuote: "literal", lineWidth: 0 } as const;
