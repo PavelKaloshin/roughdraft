@@ -107,6 +107,9 @@ export function watchFileForChanges(
   };
 }
 
+/** Extra version checks after a subscription starts (see below). */
+const STARTUP_RECHECK_MS = [250, 1_000, 3_000];
+
 export interface MarkdownFileChange {
   path: string;
   exists: boolean;
@@ -137,5 +140,17 @@ export function subscribeMarkdownFileChanges(
 
   const stopWatching = watchFileForChanges(absolutePath, sendIfChanged);
   if (knownVersion) sendIfChanged();
-  return stopWatching;
+  // A native watcher starts asynchronously (FSEvents on macOS): a write in
+  // the first moments after subscribing can go unreported. Under load this
+  // was seen to drop a write ~300 ms after the subscription entirely, so look
+  // again a few times while the watcher settles.
+  const startupChecks = STARTUP_RECHECK_MS.map((delay) => {
+    const timer = setTimeout(sendIfChanged, delay);
+    timer.unref?.();
+    return timer;
+  });
+  return () => {
+    for (const timer of startupChecks) clearTimeout(timer);
+    stopWatching();
+  };
 }
