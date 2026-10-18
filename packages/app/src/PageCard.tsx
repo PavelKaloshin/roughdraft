@@ -2409,6 +2409,16 @@ const CodeEditorSurface = memo(function CodeEditorSurface({
   );
 });
 
+/** What the rich-text editor writes for markdown it loaded and did not edit. */
+function normalizeRichTextMarkdown(markdown: string): string {
+  const parsed = criticMarkdownToEditorState(markdown);
+  return editorStateToCriticMarkdown(parsed.doc, parsed.comments, {
+    frontmatter: parsed.frontmatter,
+    endmatter: parsed.endmatter,
+    headingSpacing: parsed.headingSpacing,
+  });
+}
+
 const PageCardEditorSurface = memo(function PageCardEditorSurface({
   page,
   activeDocumentPath,
@@ -2640,6 +2650,12 @@ const PageCardEditorSurface = memo(function PageCardEditorSurface({
         base: lastAcceptedMarkdownRef.current,
         mine,
         theirs,
+        // The raw editor's draft is the user's own text; only the rich-text
+        // draft is a re-serialization.
+        normalize:
+          editorViewModeRef.current === "code"
+            ? undefined
+            : normalizeRichTextMarkdown,
       });
       if (result.status === "conflict") return { status: "conflict" };
 

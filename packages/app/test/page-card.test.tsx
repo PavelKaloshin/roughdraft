@@ -1913,6 +1913,65 @@ describe("PageCard editor integration", () => {
       expect(saved).toContain("Fifth paragraph, rewritten by the agent.");
     });
 
+    it("merges only real user edits when untouched parts serialize differently", async () => {
+      // Source the serializer would normalize: `*` bullets, `__bold__`,
+      // `*em*`, a setext heading, `1)` lists, `***` rules, heading spacing.
+      const source = [
+        "Paragraph one.",
+        "",
+        "* star bullet",
+        "* second",
+        "",
+        "Some __bold__ and *em* text.",
+        "",
+        "Heading",
+        "=======",
+        "",
+        "1) paren list",
+        "",
+        "***",
+        "",
+        "Paragraph five.",
+        "",
+      ].join("\n");
+      const rendered = await renderPageCard({
+        page: { id: "normalized-doc", title: "Normalized", content: source },
+      });
+      const editor = rendered.getEditor();
+      vi.useFakeTimers();
+      const firstEnd = (findTextRange(editor, "Paragraph one")?.to ??
+        0) as number;
+      await act(async () => {
+        editor
+          .chain()
+          .focus()
+          .setTextSelection(firstEnd)
+          .insertContent(", edited by the user")
+          .run();
+      });
+      await flushReact();
+
+      const theirs = source.replace(
+        "Paragraph five.",
+        "Paragraph *five*, by the agent.",
+      );
+      let result: unknown;
+      await act(async () => {
+        result = rendered.getSaveController().mergeExternalContent(theirs);
+      });
+
+      expect(result).toEqual({ status: "merged" });
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+        await Promise.resolve();
+      });
+      expect(rendered.onSave).toHaveBeenCalledTimes(1);
+      // The user's edit plus the agent's bytes; untouched parts byte-for-byte.
+      expect(rendered.onSave.mock.calls[0]?.[1]).toBe(
+        theirs.replace("Paragraph one.", "Paragraph one, edited by the user."),
+      );
+    });
+
     it("reports a conflict for overlapping edits and leaves the draft alone", async () => {
       const rendered = await renderPageCard({ page: livePage(liveDoc()) });
       const editor = rendered.getEditor();
