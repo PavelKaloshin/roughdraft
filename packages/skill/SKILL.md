@@ -33,7 +33,9 @@ The user reviews your Markdown file in Roughdraft and can leave three kinds of c
 
    `listen` prints `[roughdraft] listening on … since=N` once, then exactly one line per event. Each line is everything you get: the command to run comes right after `→`, then the comment context after `|`.
 
-   Add `--fork-asks-after 15` to the listen command when you will be busy in long steps: an Ask you have not acked 15 seconds after its line reached you is then answered by a headless fork of this session (`claude -p --resume <session> --fork-session`, limited to reading files and `roughdraft ack`/`reply`; it never edits files). It needs `CLAUDE_CODE_SESSION_ID` (set by Claude Code) or `--session <id>`.
+   Add `--fork-asks-after 15` to the listen command when you will be busy in long steps: an Ask you have not acked 15 seconds after its line reached you is then answered by a headless fork of this session (`claude -p --resume <session> --fork-session`, limited to reading files and `roughdraft ack`/`reply`; it never edits files). It needs `CLAUDE_CODE_SESSION_ID` (set by Claude Code) or `--session <id>`. The fork runs the model the user picked for the Ask (`model=` on the line; Fast/Haiku by default) and retries once on this session's model if that fails.
+
+With the Roughdraft Claude Code plugin installed you do not arm anything: its listener sends Asks straight to such a fork, so **in plugin mode Ask lines normally do not arrive at all**. If one does (the fork failed, or the `claude` CLI is missing), answer it as below.
 
 ## On each event line
 
@@ -50,6 +52,8 @@ The user watches each thread move through `Queued in Claude's session` (the line
 
   Then continue what you were doing. If you cannot fork a subagent, answer the Ask yourself right after your current step.
 
+  When that background subagent finishes, its answer is already in the thread where the user reads it: **do not retell it in chat**. At most one short line (`Answered c3 in plan.md.`), or nothing if you are mid-task.
+
   Nobody edits the document for an Ask. If the answer shows the text should change, say so in the reply and let the user turn it into a Change.
 
 - `[roughdraft] change cN seq=… → … | … text="…"` — do this yourself, never in a subagent (only one writer may edit the file): finish your current step, run `ack`, make the smallest edit to the file with your Edit tool (never rewrite the whole file; the user may be typing in it and sees your edit live), then reply with `--status applied` and one or two sentences on what changed.
@@ -59,6 +63,8 @@ The user watches each thread move through `Queued in Claude's session` (the line
 - `[roughdraft] forked cN to a headless Claude (main session busy)` — you were busy, so the listener answered that Ask from a headless fork; the user sees `Passed to a forked Claude`. Skip cN. Likewise skip an Ask when your `ack` prints `(to a headless fork; leave it)` or a status of `working`/`answered` you did not set: someone else has it.
 
 - `[roughdraft] headless fork for cN failed (…); answer it yourself:` — followed by cN's event line again. The thread is back in your queue; handle that line as usual.
+
+- `[roughdraft] claude CLI not found; not forking Asks to a headless Claude` — no more forks; every Ask line is yours from now on.
 
 - `[roughdraft] done … comments=N unresolved=M` — the user clicked Done Reviewing. Read the file and handle remaining plain comments and suggestions as usual. Keep listening only if the user is still reviewing.
 

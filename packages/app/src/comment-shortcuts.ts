@@ -86,6 +86,12 @@ export function matchReaderNavigationKey(event: {
  *    Mod+Enter or Enter sends with the selected mode; Escape goes back to
  *    editing the text (a second Escape then cancels).
  *
+ * With Ask selected on a new root comment, a model picker (Fast · Balanced ·
+ * Session, Fast preselected) appears under the modes. In the step, M cycles
+ * the model wherever focus is; Tab moves into the picker, where ←/→ and ↑/↓
+ * cycle models and the step's other keys (digits, Enter, Escape) still work;
+ * Shift+Tab goes back to the modes.
+ *
  * In both steps Mod+Shift+A picks Ask and Mod+Shift+E picks Change ("edit");
  * pressing the shortcut of the mode that is already selected goes back to
  * Comment. Where no mode picker is shown (editing an existing comment, a
@@ -133,7 +139,9 @@ export type ModeStepKeyAction =
   | { type: "select"; index: number }
   | { type: "cycle"; delta: 1 | -1 }
   | { type: "submit" }
-  | { type: "edit" };
+  | { type: "edit" }
+  /** M: next Ask model (only acted on while Ask is selected). */
+  | { type: "model" };
 
 /**
  * Keys of the mode-selection step (see above). Mod+Shift+A/E are matched
@@ -158,11 +166,35 @@ export function matchModeStepKey(
   if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
     return { type: "cycle", delta: -1 };
   }
+  if (event.key === "m" || event.key === "M") return { type: "model" };
+  return null;
+}
+
+/**
+ * Arrow keys inside the Ask model picker: they move the model, not the mode.
+ * Everything else falls through to `matchModeStepKey`.
+ */
+export function matchModelPickerKey(
+  event: ComposerKeyEventLike,
+): { delta: 1 | -1 } | null {
+  if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) {
+    return null;
+  }
+  if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+    return { delta: 1 };
+  }
+  if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+    return { delta: -1 };
+  }
   return null;
 }
 
 /** The compact help line shown during the mode-selection step. */
-export function getModeStepHint(platform?: string | null) {
+export function getModeStepHint(
+  platform?: string | null,
+  options: { withModel?: boolean } = {},
+) {
   const send = isApplePlatform(platform) ? "⌘↵" : "Ctrl+↵";
-  return `1 Comment · 2 Ask · 3 Change · ←/→ · ${send} send · Esc edit`;
+  const model = options.withModel ? " · M model" : "";
+  return `1 Comment · 2 Ask · 3 Change · ←/→${model} · ${send} send · Esc edit`;
 }

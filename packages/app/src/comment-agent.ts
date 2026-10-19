@@ -1,6 +1,7 @@
 import { createContext, useContext } from "react";
 import {
   buildCommentThreads,
+  type CriticAskModel,
   type CriticComment,
   type CriticCommentIntent,
   flattenCommentThreads,
@@ -158,6 +159,25 @@ export const COMMENT_COMPOSER_MODE_LABELS: Record<CommentComposerMode, string> =
     ask: "Ask",
     change: "Change",
   };
+
+/** Who answers an Ask (RFM `model`), in picker order; `fast` is the default. */
+export const ASK_MODELS: readonly CriticAskModel[] = [
+  "fast",
+  "balanced",
+  "session",
+];
+
+export const ASK_MODEL_LABELS: Record<CriticAskModel, string> = {
+  fast: "Fast",
+  balanced: "Balanced",
+  session: "Session",
+};
+
+export const ASK_MODEL_HINTS: Record<CriticAskModel, string> = {
+  fast: "A fast small model (Haiku) answers in a few seconds.",
+  balanced: "A mid-size model (Sonnet) answers; a little slower.",
+  session: "Your session's own model answers; slowest, most capable.",
+};
 
 const COMPOSER_MODE_STORAGE_KEY = "roughdraft.commentComposerMode";
 

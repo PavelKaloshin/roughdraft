@@ -955,6 +955,8 @@ describe("keyboard comment flow", () => {
     // A reply starts at Comment, not at the remembered mode.
     expect(checkedMode("c2")).toBe("c2-mode-comment");
     await press("2");
+    // Escalating a reply to Ask uses the root's (default) model: no picker.
+    expect(queryThreadPart("c2-model")).toBeNull();
     await modEnter();
     await flush(6);
 
@@ -963,5 +965,103 @@ describe("keyboard comment flow", () => {
       type: "comment.followup",
       commentId: "c2",
     });
+  });
+
+  /** The one checked model radio, e.g. "c1-model-fast". */
+  function checkedModel(id: string) {
+    const checked = ["fast", "balanced", "session"]
+      .map((model) => `${id}-model-${model}`)
+      .filter(
+        (suffix) =>
+          getThreadPart(suffix).getAttribute("aria-checked") === "true",
+      );
+    expect(checked).toHaveLength(1);
+    return checked[0];
+  }
+
+  it("picks the Ask model with M and, inside the picker, with arrows; sends with Enter", async () => {
+    const server = createFakeServer({ initialContent: "Cold start target.\n" });
+    await renderWorkspace(server);
+    await startRootComment("Why?");
+
+    await modEnter();
+    expect(queryThreadPart("c1-model")).toBeNull();
+    await press("2");
+    expect(getThreadPart("c1-model").getAttribute("role")).toBe("radiogroup");
+    expect(checkedModel("c1")).toBe("c1-model-fast");
+    expect(getThreadPart("c1-mode-step-hint").textContent).toBe(
+      `1 Comment · 2 Ask · 3 Change · ←/→ · M model · ${isApple ? "⌘↵" : "Ctrl+↵"} send · Esc edit`,
+    );
+
+    // M cycles the model and leaves focus (and the mode) where they are.
+    await press("m");
+    expect(checkedModel("c1")).toBe("c1-model-balanced");
+    expect(document.activeElement).toBe(getThreadPart("c1-mode-ask"));
+    await press("m");
+    expect(checkedModel("c1")).toBe("c1-model-session");
+
+    // Tab lands in the picker (simulated: jsdom has no Tab navigation; the
+    // e2e test presses the real key). There, arrows move the model only.
+    await act(async () => {
+      getThreadPart("c1-model-session").focus();
+    });
+    await press("ArrowRight");
+    expect(checkedModel("c1")).toBe("c1-model-fast");
+    expect(document.activeElement).toBe(getThreadPart("c1-model-fast"));
+    await press("ArrowLeft");
+    expect(checkedModel("c1")).toBe("c1-model-session");
+    expect(checkedMode("c1")).toBe("c1-mode-ask");
+
+    await press("Enter");
+    await flush(6);
+
+    expect(server.postCommentEvent).toHaveBeenCalledWith("plan.md", {
+      type: "comment.ask",
+      commentId: "c1",
+    });
+    expect(server.diskAtEachEvent[0]).toContain(
+      "    intent: ask\n    model: session\n",
+    );
+  });
+
+  it("writes no model for an Ask left on Fast, and hides the picker for other modes", async () => {
+    const server = createFakeServer({ initialContent: "Cold start target.\n" });
+    await renderWorkspace(server);
+    await startRootComment("Why?");
+
+    await modEnter();
+    await press("2");
+    await press("m");
+    await press("3");
+    // Change has no model; M does nothing there.
+    expect(queryThreadPart("c1-model")).toBeNull();
+    await press("m");
+    await press("2");
+    // Back on Ask the pick is kept for this draft.
+    expect(checkedModel("c1")).toBe("c1-model-balanced");
+    await press("m");
+    await press("m");
+    expect(checkedModel("c1")).toBe("c1-model-fast");
+    await modEnter();
+    await flush(6);
+
+    expect(server.diskAtEachEvent[0]).toContain("intent: ask");
+    expect(server.diskAtEachEvent[0]).not.toContain("model:");
+  });
+
+  it("lets the mouse pick the model, with a hint for each", async () => {
+    const server = createFakeServer({ initialContent: "Cold start target.\n" });
+    await renderWorkspace(server);
+
+    await addCommentOn("target");
+    await click(getThreadPart("c1-mode-ask"));
+    expect(getThreadPart("c1-model-hint").textContent).toContain("Haiku");
+    await click(getThreadPart("c1-model-balanced"));
+    expect(getThreadPart("c1-model-hint").textContent).toContain("Sonnet");
+    await typeInto(getThreadPart<HTMLTextAreaElement>("c1-editor"), "Why?");
+    await click(getThreadPart("c1-action-save"));
+    await flush(6);
+
+    expect(server.diskAtEachEvent[0]).toContain("model: balanced");
   });
 });

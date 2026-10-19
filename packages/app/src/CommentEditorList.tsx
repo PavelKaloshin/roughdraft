@@ -32,6 +32,9 @@ import {
 import { CommentMarkdown } from "./CommentMarkdown";
 import { isLongCommentBody, useCommentReader } from "./comment-reader-context";
 import {
+  ASK_MODEL_HINTS,
+  ASK_MODEL_LABELS,
+  ASK_MODELS,
   COMMENT_COMPOSER_MODE_LABELS,
   COMMENT_COMPOSER_MODES,
   type CommentComposerMode,
@@ -48,6 +51,7 @@ import {
   getModeStepHint,
   isComposerSubmitShortcut,
   matchComposerModeShortcut,
+  matchModelPickerKey,
   matchModeStepKey,
 } from "./comment-shortcuts";
 import { Alert, AlertDescription, AlertTitle } from "./components/ui/alert";
@@ -62,9 +66,11 @@ import {
 } from "./components/ui/tooltip";
 import {
   buildCommentThreads,
+  type CriticAskModel,
   type CriticComment,
   type CriticCommentIntent,
   type CriticCommentThread,
+  DEFAULT_CRITIC_ASK_MODEL,
   flattenCommentThreads,
   isCriticCommentResolved,
 } from "./critic-markup";
@@ -73,6 +79,8 @@ import { cn } from "./lib/utils";
 /** Metadata changes that travel with a content update. */
 export interface CommentUpdatePatch {
   intent?: CriticCommentIntent;
+  /** A new Ask's model, only when it is not the default (`fast`). */
+  model?: CriticAskModel;
   status?: string | null;
 }
 
@@ -208,6 +216,10 @@ export function CommentEditorList({
   const [draftModes, setDraftModes] = useState<
     Record<string, CommentComposerMode>
   >({});
+  // A new Ask's model; Fast unless picked, and not remembered across drafts.
+  const [draftModels, setDraftModels] = useState<
+    Record<string, CriticAskModel>
+  >({});
   // An external change can claim an open draft's id; the editor then re-keys
   // the draft and this list moves its local state along, before paint.
   const draftRenames = useContext(CommentDraftRenamesContext);
@@ -218,6 +230,7 @@ export function CommentEditorList({
     if (pending.length === 0) return;
     setDrafts((current) => rekeyRecord(current, pending));
     setDraftModes((current) => rekeyRecord(current, pending));
+    setDraftModels((current) => rekeyRecord(current, pending));
     setEditingCommentIds((current) =>
       current.map((id) => applyCommentIdRenames(id, pending)),
     );
@@ -328,6 +341,14 @@ export function CommentEditorList({
     return draftModes[commentId] ?? (isReply ? "comment" : preferredMode);
   }
 
+  function getDraftModel(commentId: string): CriticAskModel {
+    return draftModels[commentId] ?? DEFAULT_CRITIC_ASK_MODEL;
+  }
+
+  const changeDraftModel = (commentId: string, model: CriticAskModel) => {
+    setDraftModels((current) => ({ ...current, [commentId]: model }));
+  };
+
   const changeDraftMode = (commentId: string, mode: CommentComposerMode) => {
     setDraftModes((current) => ({ ...current, [commentId]: mode }));
     if (commentMap.get(commentId)?.parentCommentId) return;
@@ -383,9 +404,14 @@ export function CommentEditorList({
       isNewComment && (isRoot || canEscalateThread)
         ? getDraftMode(commentId)
         : "comment";
+    // Only a non-default model is written, so files stay clean.
+    const model = mode === "ask" ? getDraftModel(commentId) : undefined;
     const patch: CommentUpdatePatch | undefined =
       isRoot && isNewComment && mode !== "comment"
-        ? { intent: mode }
+        ? {
+            intent: mode,
+            ...(model && model !== DEFAULT_CRITIC_ASK_MODEL ? { model } : {}),
+          }
         : undefined;
     const escalatedRootIntent =
       canEscalateThread && mode !== "comment" ? mode : undefined;
@@ -413,6 +439,12 @@ export function CommentEditorList({
       }
     }
     setDraftModes((current) => {
+      if (!(commentId in current)) return current;
+      const next = { ...current };
+      delete next[commentId];
+      return next;
+    });
+    setDraftModels((current) => {
       if (!(commentId in current)) return current;
       const next = { ...current };
       delete next[commentId];
@@ -507,6 +539,8 @@ export function CommentEditorList({
             }}
             getDraftMode={getDraftMode}
             onChangeDraftMode={changeDraftMode}
+            getDraftModel={getDraftModel}
+            onChangeDraftModel={changeDraftModel}
             showResolved={showResolved}
             onHideResolved={() => setShowResolved(false)}
           />
@@ -598,6 +632,8 @@ interface CommentThreadNodeProps {
   onChangeDraft: (commentId: string, nextContent: string) => void;
   getDraftMode: (commentId: string) => CommentComposerMode;
   onChangeDraftMode: (commentId: string, mode: CommentComposerMode) => void;
+  getDraftModel: (commentId: string) => CriticAskModel;
+  onChangeDraftModel: (commentId: string, model: CriticAskModel) => void;
   showResolved: boolean;
   onHideResolved: () => void;
   /** The thread root's intent, for replies. */
@@ -696,6 +732,8 @@ function CommentThreadNode({
   onChangeDraft,
   getDraftMode,
   onChangeDraftMode,
+  getDraftModel,
+  onChangeDraftModel,
   showResolved,
   onHideResolved,
   threadRootIntent,
@@ -773,6 +811,31 @@ function CommentThreadNode({
     setChoosingMode(false);
     onSubmitEditingComment(comment.id);
   };
+  // A new root Ask picks who answers it; replies use their root's model.
+  const showModelPicker =
+    showComposerModes && isRootThread && draftMode === "ask";
+  const draftModel = showModelPicker
+    ? getDraftModel(comment.id)
+    : DEFAULT_CRITIC_ASK_MODEL;
+  const modelRadioRefs = useRef(new Map<CriticAskModel, HTMLElement>());
+  const cycleDraftModel = (delta: 1 | -1, { focus }: { focus: boolean }) => {
+    const count = ASK_MODELS.length;
+    const next =
+      ASK_MODELS[(ASK_MODELS.indexOf(draftModel) + delta + count) % count];
+    if (!next) return;
+    onChangeDraftModel(comment.id, next);
+    if (focus) modelRadioRefs.current.get(next)?.focus();
+  };
+  /** Keys inside the model picker; returns whether the key was handled. */
+  const handleModelPickerKey = (event: KeyboardEvent) => {
+    const move = matchModelPickerKey(event);
+    if (move) {
+      setChoosingMode(true);
+      cycleDraftModel(move.delta, { focus: true });
+      return true;
+    }
+    return handleModeStepKey(event);
+  };
   /** Keys of the mode-selection step; returns whether the key was handled. */
   const handleModeStepKey = (event: KeyboardEvent) => {
     const shortcut = matchComposerModeShortcut(event, getPlatform());
@@ -787,6 +850,10 @@ function CommentThreadNode({
       submitDraft();
     } else if (action.type === "edit") {
       returnToEditing();
+    } else if (action.type === "model") {
+      if (!showModelPicker) return false;
+      setChoosingMode(true);
+      cycleDraftModel(1, { focus: false });
     } else {
       const currentIndex = COMMENT_COMPOSER_MODES.indexOf(draftMode);
       const count = COMMENT_COMPOSER_MODES.length;
@@ -1342,6 +1409,12 @@ function CommentThreadNode({
                   radioRefs={modeRadioRefs}
                   onChange={(mode) => onChangeDraftMode(comment.id, mode)}
                   onKeyDown={handleModeStepKey}
+                  model={showModelPicker ? draftModel : null}
+                  modelRadioRefs={modelRadioRefs}
+                  onChangeModel={(model) =>
+                    onChangeDraftModel(comment.id, model)
+                  }
+                  onModelKeyDown={handleModelPickerKey}
                 />
               ) : null}
               <div className="mt-2 flex flex-wrap items-center gap-1">
@@ -1395,6 +1468,8 @@ function CommentThreadNode({
               onChangeDraft={onChangeDraft}
               getDraftMode={getDraftMode}
               onChangeDraftMode={onChangeDraftMode}
+              getDraftModel={getDraftModel}
+              onChangeDraftModel={onChangeDraftModel}
               showResolved={showResolved}
               onHideResolved={onHideResolved}
               threadRootIntent={
@@ -1422,6 +1497,10 @@ function ComposerModeToggle({
   radioRefs,
   onChange,
   onKeyDown,
+  model,
+  modelRadioRefs,
+  onChangeModel,
+  onModelKeyDown,
 }: {
   commentId: string;
   variant: "banner" | "rail";
@@ -1432,69 +1511,135 @@ function ComposerModeToggle({
   onChange: (mode: CommentComposerMode) => void;
   /** Mode-selection step keys; returns whether the key was handled. */
   onKeyDown: (event: KeyboardEvent) => boolean;
+  /** The new Ask's model; null hides the model picker. */
+  model: CriticAskModel | null;
+  modelRadioRefs: MutableRefObject<Map<CriticAskModel, HTMLElement>>;
+  onChangeModel: (model: CriticAskModel) => void;
+  /** Keys inside the model picker; returns whether the key was handled. */
+  onModelKeyDown: (event: KeyboardEvent) => boolean;
 }) {
   const platform = getPlatform();
   const testIdPrefix = `comment-${variant}-${commentId}-mode`;
+  const modelTestIdPrefix = `comment-${variant}-${commentId}-model`;
   const stepHintId = `${testIdPrefix}-step-hint`;
+  const segmentClass =
+    "h-6 px-2 text-[11px] data-checked:bg-stone-800 data-checked:text-white dark:data-checked:bg-slate-200 dark:data-checked:text-slate-900";
+  const stepRing =
+    "ring-2 ring-amber-300 ring-offset-1 ring-offset-white dark:ring-amber-600 dark:ring-offset-slate-900";
+  // Capture phase: the step's keys (digits, arrows, Enter, Escape, M) are
+  // handled before each radio group's own arrow-key navigation, so the
+  // selection and focus move together and Enter sends. Each group has its
+  // own handler: arrows move the mode in one and the model in the other.
+  const captureWith =
+    (handler: (event: KeyboardEvent) => boolean) => (event: KeyboardEvent) => {
+      if (handler(event)) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    };
 
   return (
-    // Capture phase: the step's keys (digits, arrows, Enter, Escape) are
-    // handled here before the radio group's own arrow-key navigation, so the
-    // selection and focus move together and Enter sends.
-    <div
-      className="mt-2 space-y-1"
-      onKeyDownCapture={(event) => {
-        if (onKeyDown(event)) {
-          event.preventDefault();
-          event.stopPropagation();
-        }
-      }}
-    >
-      <RadioGroup
-        aria-label="Comment type"
-        aria-describedby={stepHintId}
-        data-testid={testIdPrefix}
-        data-choosing={choosing ? "true" : undefined}
-        className={cn(
-          "flex w-fit flex-row gap-0 rounded-md",
-          choosing &&
-            "ring-2 ring-amber-300 ring-offset-1 ring-offset-white dark:ring-amber-600 dark:ring-offset-slate-900",
-        )}
-        value={mode}
-        onValueChange={(value) => {
-          if (value === "comment" || value === "ask" || value === "change") {
-            onChange(value);
-          }
-        }}
-        onPointerDown={(event) => event.stopPropagation()}
-        onClick={(event) => event.stopPropagation()}
-      >
-        {COMMENT_COMPOSER_MODES.map((option, index) => (
-          <RadioGroupSegment
-            key={option}
-            value={option}
-            ref={(node: HTMLElement | null) => {
-              if (node) radioRefs.current.set(option, node);
-              else radioRefs.current.delete(option);
-            }}
-            data-testid={`${testIdPrefix}-${option}`}
-            title={
-              option === "comment"
-                ? `${COMMENT_COMPOSER_MODE_LABELS[option]} (${index + 1})`
-                : `${COMMENT_COMPOSER_MODE_LABELS[option]} (${index + 1} · ${getComposerModeShortcutLabel(option, platform)})`
+    <div className="mt-2 space-y-1">
+      <div onKeyDownCapture={captureWith(onKeyDown)}>
+        <RadioGroup
+          aria-label="Comment type"
+          aria-describedby={stepHintId}
+          data-testid={testIdPrefix}
+          data-choosing={choosing ? "true" : undefined}
+          className={cn(
+            "flex w-fit flex-row gap-0 rounded-md",
+            choosing && stepRing,
+          )}
+          value={mode}
+          onValueChange={(value) => {
+            if (value === "comment" || value === "ask" || value === "change") {
+              onChange(value);
             }
-            className="h-6 px-2 text-[11px] data-checked:bg-stone-800 data-checked:text-white dark:data-checked:bg-slate-200 dark:data-checked:text-slate-900"
-          >
-            {COMMENT_COMPOSER_MODE_LABELS[option]}
-          </RadioGroupSegment>
-        ))}
-      </RadioGroup>
+          }}
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => event.stopPropagation()}
+        >
+          {COMMENT_COMPOSER_MODES.map((option, index) => (
+            <RadioGroupSegment
+              key={option}
+              value={option}
+              ref={(node: HTMLElement | null) => {
+                if (node) radioRefs.current.set(option, node);
+                else radioRefs.current.delete(option);
+              }}
+              data-testid={`${testIdPrefix}-${option}`}
+              title={
+                option === "comment"
+                  ? `${COMMENT_COMPOSER_MODE_LABELS[option]} (${index + 1})`
+                  : `${COMMENT_COMPOSER_MODE_LABELS[option]} (${index + 1} · ${getComposerModeShortcutLabel(option, platform)})`
+              }
+              className={segmentClass}
+            >
+              {COMMENT_COMPOSER_MODE_LABELS[option]}
+            </RadioGroupSegment>
+          ))}
+        </RadioGroup>
+      </div>
       <p
         data-testid={`${testIdPrefix}-hint`}
         className="text-[11px] leading-4 text-stone-400 dark:text-slate-500"
       >
         {composerModeHints[mode]}
       </p>
+      {model ? (
+        <div
+          className="flex flex-wrap items-center gap-1.5"
+          onKeyDownCapture={captureWith(onModelKeyDown)}
+        >
+          <span
+            id={`${modelTestIdPrefix}-label`}
+            className="text-[11px] leading-4 text-stone-500 dark:text-slate-400"
+          >
+            Answered by
+          </span>
+          <RadioGroup
+            aria-labelledby={`${modelTestIdPrefix}-label`}
+            aria-describedby={stepHintId}
+            data-testid={modelTestIdPrefix}
+            data-choosing={choosing ? "true" : undefined}
+            className="flex w-fit flex-row gap-0 rounded-md"
+            value={model}
+            onValueChange={(value) => {
+              if (
+                value === "fast" ||
+                value === "balanced" ||
+                value === "session"
+              ) {
+                onChangeModel(value);
+              }
+            }}
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => event.stopPropagation()}
+          >
+            {ASK_MODELS.map((option) => (
+              <RadioGroupSegment
+                key={option}
+                value={option}
+                ref={(node: HTMLElement | null) => {
+                  if (node) modelRadioRefs.current.set(option, node);
+                  else modelRadioRefs.current.delete(option);
+                }}
+                data-testid={`${modelTestIdPrefix}-${option}`}
+                title={`${ASK_MODEL_LABELS[option]} (M)`}
+                className={segmentClass}
+              >
+                {ASK_MODEL_LABELS[option]}
+              </RadioGroupSegment>
+            ))}
+          </RadioGroup>
+          <p
+            data-testid={`${modelTestIdPrefix}-hint`}
+            className="basis-full text-[11px] leading-4 text-stone-400 dark:text-slate-500"
+          >
+            {ASK_MODEL_HINTS[model]}
+          </p>
+        </div>
+      ) : null}
       <p
         id={stepHintId}
         data-testid={stepHintId}
@@ -1506,7 +1651,7 @@ function ComposerModeToggle({
       >
         {/* Wrap only between items, never inside "⌘↵ send". */}
         {choosing
-          ? getModeStepHint(platform)
+          ? getModeStepHint(platform, { withModel: model !== null })
               .split(" · ")
               .map((item, index) => (
                 <span key={item}>

@@ -15,6 +15,7 @@ import {
 import {
   getModeStepHint,
   matchComposerModeShortcut,
+  matchModelPickerKey,
   matchModeStepKey,
 } from "../src/comment-shortcuts";
 import { criticMarkdownToEditorState } from "../src/critic-markup";
@@ -353,6 +354,18 @@ describe("composer mode-selection step keys", () => {
     expect(matchModeStepKey(key("Tab"))).toBeNull();
     expect(matchModeStepKey(key("2", { metaKey: true }))).toBeNull();
     expect(matchModeStepKey(key("ArrowLeft", { shiftKey: true }))).toBeNull();
+  });
+
+  it("maps M to the next Ask model and arrows in the picker to the model", () => {
+    expect(matchModeStepKey(key("m"))).toEqual({ type: "model" });
+    expect(matchModeStepKey(key("M"))).toEqual({ type: "model" });
+    expect(matchModeStepKey(key("m", { metaKey: true }))).toBeNull();
+    expect(matchModelPickerKey(key("ArrowRight"))).toEqual({ delta: 1 });
+    expect(matchModelPickerKey(key("ArrowUp"))).toEqual({ delta: -1 });
+    expect(matchModelPickerKey(key("2"))).toBeNull();
+    expect(getModeStepHint("MacIntel", { withModel: true })).toBe(
+      "1 Comment · 2 Ask · 3 Change · ←/→ · M model · ⌘↵ send · Esc edit",
+    );
   });
 
   it("labels the hint with the platform's modifier", () => {

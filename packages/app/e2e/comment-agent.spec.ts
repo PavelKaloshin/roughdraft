@@ -473,5 +473,74 @@ test.describe("Ask / Change comments", () => {
     );
     await expect(page.getByTestId("comment-rail-c1-editor")).toHaveCount(0);
     await expect(page.getByTestId("comment-rail-c1-intent")).toHaveText("Ask");
+    // Fast, the default model, is not written.
+    expect(readProjectFile(projectDir, relativePath)).not.toContain("model:");
+  });
+
+  test("picks a Balanced model for an Ask with Tab and arrows, and writes it to the file", async ({
+    page,
+    request,
+  }) => {
+    const relativePath = "model.md";
+    const filePath = writeProjectFile(
+      projectDir,
+      relativePath,
+      ["# Model", "", "Cold start takes about four seconds.", ""].join("\n"),
+    );
+    const watch = request.post("/api/review-events/watch", {
+      data: {
+        projectPath: projectDir,
+        path: relativePath,
+        types: ["comment.ask"],
+        timeoutSeconds: 20,
+      },
+    });
+    pendingWatch = watch;
+
+    await openMarkdownFile(page, filePath);
+    await selectRichText(page, "about four seconds");
+    await expect(page.getByTestId("selection-menu")).toBeVisible();
+    const mod = (await page.evaluate(() =>
+      /mac|iphone|ipad|ipod/i.test(navigator.platform),
+    ))
+      ? "Meta"
+      : "Control";
+    await page.keyboard.press(`${mod}+Alt+KeyM`);
+    await expect(page.getByTestId("comment-rail-c1-editor")).toBeFocused();
+    await page.keyboard.type("Why four?");
+    await page.keyboard.press(`${mod}+Enter`);
+    await page.keyboard.press("2");
+
+    const fast = page.getByTestId("comment-rail-c1-model-fast");
+    const balanced = page.getByTestId("comment-rail-c1-model-balanced");
+    await expect(fast).toHaveAttribute("aria-checked", "true");
+    await expect(page.getByTestId("comment-rail-c1-mode-step-hint")).toHaveText(
+      /^1 Comment · 2 Ask · 3 Change · ←\/→ · M model · (⌘↵|Ctrl\+↵) send · Esc edit$/,
+    );
+    await snap(page, "33-agent-composer-ask-model-picker");
+
+    // A real Tab moves from the modes into the model picker.
+    await page.keyboard.press("Tab");
+    await expect(fast).toBeFocused();
+    await page.keyboard.press("ArrowRight");
+    await expect(balanced).toHaveAttribute("aria-checked", "true");
+    await expect(balanced).toBeFocused();
+    await expect(page.getByTestId("comment-rail-c1-mode-ask")).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    await page.keyboard.press("Enter");
+
+    const payload = (await (
+      (await watch) as { json: () => Promise<unknown> }
+    ).json()) as { events: Array<Record<string, unknown>> };
+    expect(payload.events[0]).toMatchObject({
+      type: "comment.ask",
+      commentId: "c1",
+      model: "balanced",
+    });
+    expect(readProjectFile(projectDir, relativePath)).toMatch(
+      /\n {2}c1:\n(?: {4}.*\n)*? {4}intent: ask\n {4}model: balanced\n/,
+    );
   });
 });

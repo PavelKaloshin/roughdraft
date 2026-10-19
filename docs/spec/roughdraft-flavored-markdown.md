@@ -235,6 +235,7 @@ Known metadata attributes:
 | `status` | Comments and suggestions | No | Review state. Roughdraft currently writes `resolved` when an item has been addressed. |
 | `resolved` | Comments and suggestions | No | Optional short resolution summary for an item whose `status` is `resolved`. |
 | `intent` | Root comments | No | What the comment asks of an agent: `comment`, `ask`, or `change`. Missing means `comment`. See [Comment Intent](#comment-intent). |
+| `model` | Root `ask` comments | No | Which model answers the Ask in a headless fork: `fast`, `balanced`, or `session`. Missing means `fast`. See [Ask Model](#ask-model). |
 
 Example:
 
@@ -309,6 +310,33 @@ comments:
 - Writers MUST preserve `intent` when rewriting endmatter, for example when appending a reply or marking the thread resolved.
 
 Agent progress such as "working" or "answered" is transient application state and MUST NOT be written into the document. The resolved state of a thread is recorded with `status: resolved` as usual.
+
+### Ask Model
+
+A root comment with `intent: ask` MAY carry a `model` key that says which model should answer it when a headless fork of the agent session answers (Roughdraft's `listen --fork-asks-after`, ADR 0006):
+
+| Value | Meaning |
+| --- | --- |
+| `fast` | A small, fast model (Claude Code alias `haiku`). The default; equivalent to omitting `model`. |
+| `balanced` | A mid-size model (alias `sonnet`). |
+| `session` | The agent session's own model. |
+
+```markdown
+---
+comments:
+  c3:
+    by: pavel
+    at: "2026-10-18T12:00:00.000Z"
+    intent: ask
+    model: balanced
+```
+
+Like `intent`, `model` is advisory:
+
+- Writers SHOULD omit `model` for the default (`fast`) to keep documents clean.
+- An unknown `model` value SHOULD produce a warning (`unknown-model`) and MUST be treated as `fast`.
+- `model` on a reply, a suggestion, or a root comment whose intent is not `ask` SHOULD produce a warning (`ignored-model`) and MUST be ignored. Follow-ups in an Ask thread are answered with their root's model.
+- Writers MUST preserve `model` (including unknown values) when rewriting endmatter.
 
 ### Multiline Bodies
 
