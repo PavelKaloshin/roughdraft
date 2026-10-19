@@ -561,6 +561,12 @@ export interface ForkSchedulerOptions {
   takeOverAsks?: boolean;
   /** Prints `forked cN to a headless Claude` when a fork starts (default). */
   announceForks?: boolean;
+  /**
+   * Called when `claude` turns out to be missing; the notice is printed
+   * only when it returns true. Lets one listener (several documents, and
+   * the wrapper's restarts) say it once. Default: always print.
+   */
+  claudeMissingNotice?: () => boolean;
 }
 
 /**
@@ -578,6 +584,7 @@ export class ForkScheduler {
   private readonly waiting: CommentEvent[] = [];
   private readonly running = new Set<Promise<void>>();
   private disabled = false;
+  private draining = false;
   private closed = false;
 
   constructor(private readonly options: ForkSchedulerOptions) {}
@@ -589,6 +596,10 @@ export class ForkScheduler {
   observe(event: CommentEvent): boolean {
     if (this.disabled || this.closed || !isAskEvent(event)) return false;
     const takeOver = this.options.takeOverAsks === true;
+    // Expired, finishing its forks: a new Ask is not forked here. Taken
+    // over, it stays `queued` on the server, which shows it to the next
+    // round (whose cursor starts over); otherwise the session gets its line.
+    if (this.draining) return takeOver;
     const key = `${event.threadRootId}/${event.commentId}`;
     // Shown again (a new round): the first delivery is already handled.
     if (this.seen.has(key)) return takeOver;
@@ -607,6 +618,20 @@ export class ForkScheduler {
     timer.unref?.();
     this.timers.add(timer);
     return false;
+  }
+
+  /**
+   * The listen round expired: start no more forks (Asks still waiting for a
+   * slot are dropped, see `close`) but let running ones finish. Returns true
+   * while forks run, so the listener keeps printing other events (a Change
+   * must not wait for a fork) until `close()` settles.
+   */
+  drain(): boolean {
+    this.draining = true;
+    for (const timer of this.timers) clearTimeout(timer);
+    this.timers.clear();
+    this.waiting.length = 0;
+    return this.running.size > 0;
   }
 
   /**
@@ -640,6 +665,7 @@ export class ForkScheduler {
   private async pump(): Promise<void> {
     while (
       !this.disabled &&
+      !this.draining &&
       !this.closed &&
       this.running.size < this.options.maxConcurrent &&
       this.waiting.length > 0
@@ -699,9 +725,11 @@ export class ForkScheduler {
       this.waiting.length = 0;
       for (const timer of this.timers) clearTimeout(timer);
       this.timers.clear();
-      this.options.log(
-        "[roughdraft] claude CLI not found; not forking Asks to a headless Claude",
-      );
+      if (this.options.claudeMissingNotice?.() ?? true) {
+        this.options.log(
+          "[roughdraft] claude CLI not found; not forking Asks to a headless Claude",
+        );
+      }
       // Asks the session has not seen yet: show them now, once each.
       for (const ask of untaken) {
         this.options.log(this.options.formatEventLine(ask));

@@ -455,6 +455,66 @@ describe("session CLI commands", () => {
     server = await startServer(projectA);
   });
 
+  it("without a claude CLI, says so once per session (not per file or per round) and still prints every Ask", async () => {
+    const { deps } = makeDeps();
+    for (const file of [planPath, notesPath]) {
+      await runCli(
+        [
+          "claim",
+          file,
+          "--session",
+          "session-a",
+          "--claims-file",
+          claimsFile(),
+          "--quiet",
+        ],
+        deps,
+      );
+    }
+    // The plugin's listener, with no claude to fork to.
+    const pluginRound = async () => {
+      const round = makeDeps();
+      const code = await runCli(
+        [
+          "listen",
+          "--session",
+          "session-a",
+          "--claims-file",
+          claimsFile(),
+          "--quiet",
+          "--no-start",
+          "--max-seconds",
+          "0.8",
+          "--fork-asks-after",
+          "0",
+          "--claude",
+          path.join(tempDir, "no-such-claude"),
+        ],
+        round.deps,
+      );
+      expect(code).toBe(0);
+      expect(round.errors).toEqual([]);
+      return round.logs;
+    };
+    const notice = (line: string) =>
+      line.startsWith("[roughdraft] claude CLI not found");
+    const askIds = (logs: string[]) =>
+      logs
+        .filter((line) => line.startsWith("[roughdraft] ask "))
+        .map((line) => line.split(" ")[2])
+        .sort();
+
+    const first = await pluginRound();
+    expect(first.filter(notice)).toHaveLength(1);
+    expect(askIds(first)).toEqual(["c1", "n1"]);
+
+    // The wrapper restarts listen: the Asks come again, the notice does not.
+    const second = await pluginRound();
+    expect(second.filter(notice)).toEqual([]);
+    expect(askIds(second)).toEqual(["c1", "n1"]);
+    expect(readClaims().sort()).toEqual([notesPath, planPath].sort());
+  });
+
   it("lists live sessions", async () => {
     const listener = makeDeps();
     const listening = runCli(

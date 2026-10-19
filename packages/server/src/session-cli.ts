@@ -47,6 +47,11 @@ export interface SessionFile {
   title?: string;
   cwd?: string;
   claims: string[];
+  /**
+   * When `listen` told this session that `claude` is missing, so later
+   * rounds of the plugin's wrapper do not wake the session again for it.
+   */
+  claudeMissingNoticeAt?: string;
 }
 
 export function readSessionFile(file: string): SessionFile {
@@ -69,6 +74,9 @@ export function readSessionFile(file: string): SessionFile {
         ...(typeof record.title === "string" ? { title: record.title } : {}),
         ...(typeof record.cwd === "string" ? { cwd: record.cwd } : {}),
         claims,
+        ...(typeof record.claudeMissingNoticeAt === "string"
+          ? { claudeMissingNoticeAt: record.claudeMissingNoticeAt }
+          : {}),
       };
     }
   } catch {
@@ -77,26 +85,45 @@ export function readSessionFile(file: string): SessionFile {
   return { claims: [] };
 }
 
-/** Read-modify-write of the claims list, keeping every other key. */
-export function updateSessionClaims(
+/** Read-modify-write of the session file, keeping every other key. */
+function updateSessionRecord(
   file: string,
-  update: (claims: string[]) => string[],
-): string[] {
+  update: (record: Record<string, unknown>) => void,
+): void {
   let record: Record<string, unknown> = {};
   try {
     const parsed: unknown = JSON.parse(fs.readFileSync(file, "utf8"));
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
       record = parsed as Record<string, unknown>;
+    } else if (Array.isArray(parsed)) {
+      record = { claims: readSessionFile(file).claims };
     }
   } catch {}
-  const current = readSessionFile(file).claims;
-  const next = [...new Set(update(current))];
-  record.claims = next;
+  update(record);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const temp = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
   fs.writeFileSync(temp, `${JSON.stringify(record, null, 2)}\n`);
   fs.renameSync(temp, file);
+}
+
+/** Read-modify-write of the claims list, keeping every other key. */
+export function updateSessionClaims(
+  file: string,
+  update: (claims: string[]) => string[],
+): string[] {
+  const next = [...new Set(update(readSessionFile(file).claims))];
+  updateSessionRecord(file, (record) => {
+    record.claims = next;
+  });
   return next;
+}
+
+/** Remembers that this session was told `claude` is missing. */
+export function markClaudeMissingNoticed(file: string, at: Date): void {
+  updateSessionRecord(file, (record) => {
+    record.claudeMissingNoticeAt = at.toISOString();
+    if (!Array.isArray(record.claims)) record.claims = [];
+  });
 }
 
 // --- lines --------------------------------------------------------------------
@@ -177,6 +204,30 @@ export async function runSessionListen(
   let announced = false;
   let retryDelay = RETRY_MIN_DELAY_MS;
 
+  // After the deadline, forks still running keep this process alive (the
+  // wrapper restarts `listen` only when it exits). Until they finish it
+  // keeps polling and printing, so a Change is never held up by a fork;
+  // the observer starts no new forks meanwhile.
+  let draining = false;
+  let forksDone = false;
+  const idle = new AbortController();
+  let whenIdle: Promise<void> = new Promise(() => {});
+  const expired = (): boolean => {
+    if (now() < deadline) return false;
+    if (!draining) {
+      draining = true;
+      if (options.observer?.drain?.()) {
+        whenIdle = options.observer.close().then(() => {
+          forksDone = true;
+          idle.abort();
+        });
+      } else {
+        forksDone = true;
+      }
+    }
+    return forksDone;
+  };
+
   const poll = async (
     url: string,
     timeoutSeconds: number,
@@ -200,7 +251,9 @@ export async function runSessionListen(
         timeoutSeconds,
         batchWindowSeconds: SESSION_BATCH_WINDOW_SECONDS,
       }),
-      signal: roundTimeoutSignal(timeoutSeconds, 10),
+      signal: draining
+        ? AbortSignal.any([roundTimeoutSignal(timeoutSeconds, 10), idle.signal])
+        : roundTimeoutSignal(timeoutSeconds, 10),
     });
     if (response.status === 404) {
       // An older server without session routes: nothing to listen to.
@@ -215,15 +268,19 @@ export async function runSessionListen(
   };
 
   const sleepUntilRetry = async () => {
-    await io.sleepImpl(Math.min(retryDelay, Math.max(0, deadline - now())));
+    if (draining) {
+      await Promise.race([io.sleepImpl(retryDelay), whenIdle]);
+    } else {
+      await io.sleepImpl(Math.min(retryDelay, Math.max(0, deadline - now())));
+    }
     retryDelay = Math.min(retryDelay * 2, RETRY_MAX_DELAY_MS);
   };
 
-  while (now() < deadline || !announced) {
+  while (!announced || !expired()) {
     if (!serverUrl) {
       serverUrl = await locateServer().catch(() => null);
       if (!serverUrl) {
-        if (now() >= deadline) break;
+        if (expired()) break;
         await sleepUntilRetry();
         continue;
       }
@@ -231,7 +288,12 @@ export async function runSessionListen(
     }
 
     const remainingSeconds = Math.max(0, (deadline - now()) / 1000);
-    const roundSeconds = announced ? Math.min(remainingSeconds, roundLimit) : 0;
+    // Draining: full rounds; the round is cut short when the forks finish.
+    const roundSeconds = !announced
+      ? 0
+      : draining
+        ? roundLimit
+        : Math.min(remainingSeconds, roundLimit);
 
     let payload: SessionListenPayload;
     try {
@@ -244,9 +306,12 @@ export async function runSessionListen(
         await options.observer?.close();
         return 1;
       }
-      // The server went away or restarted (maybe on another port).
+      // The server went away or restarted (maybe on another port), or the
+      // forks finished during a draining round. Events of an unread
+      // response are not lost: the next round's cursor starts over and the
+      // server shows every unanswered event again.
       serverUrl = null;
-      if (now() >= deadline) break;
+      if (expired()) break;
       await sleepUntilRetry();
       continue;
     }
@@ -352,11 +417,36 @@ export class SessionForkObserver implements ListenObserver {
       serverUrl: () => string | null;
       /** Test hook: replaces `runAnswerFork`. */
       runFork?: ConstructorParameters<typeof ForkScheduler>[0]["runFork"];
+      /**
+       * The "claude CLI not found" notice was already printed to this
+       * session (by an earlier round of the plugin's wrapper).
+       */
+      claudeMissingNoticed?: boolean;
+      /** Called once, when this listener prints that notice. */
+      onClaudeMissingNotice?: () => void;
     },
-  ) {}
+  ) {
+    this.noticeShown = options.claudeMissingNoticed === true;
+  }
+
+  private draining = false;
+  /** Found out once for all documents: `claude` is not runnable. */
+  private claudeMissing = false;
+  private noticeShown: boolean;
 
   observe(event: CommentEvent): boolean {
+    // Without claude every Ask line goes to the session, as without forks.
+    if (this.claudeMissing) return false;
     return this.scheduler(event.documentPath).observe(event);
+  }
+
+  drain(): boolean {
+    this.draining = true;
+    let running = false;
+    for (const scheduler of this.schedulers.values()) {
+      if (scheduler.drain()) running = true;
+    }
+    return running;
   }
 
   async close(): Promise<void> {
@@ -405,7 +495,17 @@ export class SessionForkObserver implements ListenObserver {
           })),
       log: io.log,
       formatEventLine: (event) => formatSessionEventLine(event, cli),
+      // Each line wakes the session: say it once per session, not once per
+      // document or per listen round.
+      claudeMissingNotice: () => {
+        this.claudeMissing = true;
+        if (this.noticeShown) return false;
+        this.noticeShown = true;
+        this.options.onClaudeMissingNotice?.();
+        return true;
+      },
     });
+    if (this.draining) scheduler.drain();
     this.schedulers.set(documentPath, scheduler);
     return scheduler;
   }
@@ -992,6 +1092,20 @@ export async function runSessionCommand(
             quiet: options.quiet,
             ...(options.claude ? { claudePath: options.claude } : {}),
             serverUrl: () => currentServer,
+            // The plugin restarts `listen` every round: remember the notice
+            // in the session's file so it is printed once per session.
+            ...(claimsFile
+              ? {
+                  claudeMissingNoticed:
+                    readSessionFile(claimsFile).claudeMissingNoticeAt !==
+                    undefined,
+                  onClaudeMissingNotice: () =>
+                    markClaudeMissingNoticed(
+                      claimsFile,
+                      new Date((deps.now ?? Date.now)()),
+                    ),
+                }
+              : {}),
           })
         : undefined;
     return runSessionListen(deps, locate, {
