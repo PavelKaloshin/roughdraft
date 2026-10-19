@@ -69,7 +69,12 @@ process.stdin.on("end", async () => {
   const status = await fetch(server.url + "/api/agent/status?" + query).then((r) => r.json());
   record.statusAtStart = status.threadDetails;
   fs.writeFileSync(process.env.FAKE_RECORD, JSON.stringify(record));
+  fs.appendFileSync(process.env.FAKE_RECORD + ".runs", JSON.stringify(record.argv) + "\\n");
   if (process.env.FAKE_MODE === "hang") { setTimeout(() => {}, 60000); return; }
+  if (process.env.FAKE_MODE === "fail" || (process.env.FAKE_MODE === "fail-with-model" && record.argv.includes("--model"))) {
+    process.stderr.write("Prompt is too long\\n");
+    process.exit(1);
+  }
   const ack = prompt.match(/^\\d\\. Run: (.+)$/m)[1];
   const run = (command, input) => {
     try {
@@ -249,6 +254,22 @@ describe("headless fork answers", () => {
     return fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
   }
 
+  /** The argv of every fake claude run, in order. */
+  function runArgs(): string[][] {
+    const file = `${recordPath}.runs`;
+    if (!fs.existsSync(file)) return [];
+    return fs
+      .readFileSync(file, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as string[]);
+  }
+
+  function modelArg(argv: string[]): string | null {
+    const at = argv.indexOf("--model");
+    return at < 0 ? null : (argv[at + 1] ?? null);
+  }
+
   function readRecord() {
     return JSON.parse(fs.readFileSync(recordPath, "utf8")) as {
       argv: string[];
@@ -301,7 +322,7 @@ describe("headless fork answers", () => {
     const after = fs.readFileSync(documentPath, "utf8");
     expect(after.split("\n---\n")[0]).toBe(PLAN.split("\n---\n")[0]);
     expect(logs.at(-1)).toBe(
-      `[roughdraft] a headless Claude answered c1 in ${documentPath} (cost $0.25)`,
+      `[roughdraft] a headless Claude answered c1 in ${documentPath} (model haiku, cost $0.25)`,
     );
   }, 30_000);
 
@@ -436,11 +457,11 @@ describe("headless fork answers", () => {
     expect(errors).toEqual([]);
     expect(exitCode).toBe(0);
     const lines = logs.map((line) => line.split(" ").slice(0, 3).join(" "));
+    // --quiet: the session hears about the Ask, but not about the fork.
     expect(lines).toEqual([
       "[roughdraft] claimed " + documentPath,
       "[roughdraft] ask c1",
       "[roughdraft] change c2",
-      "[roughdraft] forked c1",
     ]);
     expect(readRecord().argv.slice(0, 3)).toEqual([
       "-p",
@@ -449,5 +470,131 @@ describe("headless fork answers", () => {
     ]);
     expect(await threadStatus("c1")).toBe("answered");
     expect(await threadStatus("c2")).toBe("queued");
+  }, 30_000);
+
+  /** The plugin's listener: `listen --session --quiet --fork-asks-after 0`. */
+  async function pluginListen(
+    deps: ReturnType<typeof makeDeps>["deps"],
+    extra: string[] = [],
+  ) {
+    await runCli(["claim", documentPath, "--quiet"], deps);
+    return runCli(
+      [
+        "listen",
+        "--session",
+        "parent-session",
+        "--quiet",
+        "--max-seconds",
+        "1",
+        "--fork-asks-after",
+        "0",
+        ...extra,
+      ],
+      deps,
+    );
+  }
+
+  it("plugin mode: an Ask goes straight to a fork and never reaches the session; a Change does", async () => {
+    const { deps, logs, errors } = makeDeps();
+
+    const exitCode = await pluginListen(deps);
+
+    expect(fakeError()).toBe("");
+    expect(errors).toEqual([]);
+    expect(exitCode).toBe(0);
+    const lines = logs.map((line) => line.split(" ").slice(0, 3).join(" "));
+    expect(lines).toEqual([
+      `[roughdraft] claimed ${documentPath}`,
+      "[roughdraft] change c2",
+    ]);
+    expect(await threadStatus("c1")).toBe("answered");
+    expect(aiReplies().map((reply) => reply.text)).toEqual([
+      "The **code word** is PLUM.",
+    ]);
+    // No `model` in the file: the fast default.
+    expect(runArgs().map(modelArg)).toEqual(["haiku"]);
+  }, 30_000);
+
+  it("plugin mode: an Ask the fork could not answer reaches the session with its line", async () => {
+    const { deps, logs, errors } = makeDeps({ FAKE_MODE: "fail" });
+
+    const exitCode = await pluginListen(deps);
+
+    expect(errors).toEqual([]);
+    expect(exitCode).toBe(0);
+    expect(logs).toHaveLength(4);
+    expect(logs[1]).toMatch(/^\[roughdraft\] change c2 /);
+    // Retried once with the session model, then handed back.
+    expect(logs[2]).toMatch(
+      /^\[roughdraft\] headless fork for c1 failed \(claude exited with code 1: Prompt is too long\); answer it yourself:$/,
+    );
+    expect(logs[3]).toMatch(
+      new RegExp(`^\\[roughdraft\\] ask c1 file=${documentPath} seq=\\d+ → `),
+    );
+    expect(runArgs().map(modelArg)).toEqual(["haiku", null]);
+    expect(await threadStatus("c1")).toBe("queued");
+    expect(aiReplies()).toEqual([]);
+  }, 30_000);
+
+  it("plugin mode: without a claude CLI, the Ask line is printed after one notice", async () => {
+    const { deps, logs, errors } = makeDeps();
+
+    const exitCode = await pluginListen(deps, [
+      "--claude",
+      path.join(tempDir, "no-such-claude"),
+    ]);
+
+    expect(errors).toEqual([]);
+    expect(exitCode).toBe(0);
+    expect(
+      logs.slice(1).map((line) => line.split(" ").slice(0, 3).join(" ")),
+    ).toEqual([
+      "[roughdraft] change c2",
+      "[roughdraft] claude CLI",
+      "[roughdraft] ask c1",
+    ]);
+    expect(await threadStatus("c1")).toBe("queued");
+  }, 30_000);
+
+  it("answer-fork retries a failed --model fork once with the session model", async () => {
+    const { deps, logs, errors } = makeDeps({ FAKE_MODE: "fail-with-model" });
+
+    const exitCode = await runCli(
+      ["answer-fork", documentPath, "c1", "--session", "sess-1"],
+      deps,
+    );
+
+    expect(fakeError()).toBe("");
+    expect(errors).toEqual([]);
+    expect(exitCode).toBe(0);
+    expect(runArgs().map(modelArg)).toEqual(["haiku", null]);
+    expect(logs).toContain(
+      "[roughdraft] the fork failed (claude exited with code 1: Prompt is too long); retrying with the session model",
+    );
+    expect(logs.at(-1)).toBe(
+      `[roughdraft] a headless Claude answered c1 in ${documentPath} (the session model, cost $0.25)`,
+    );
+    expect(await threadStatus("c1")).toBe("answered");
+  }, 30_000);
+
+  it("answer-fork runs the model the Ask's endmatter names", async () => {
+    const withModel = (model: string) =>
+      PLAN.replace(
+        "    intent: ask\n",
+        `    intent: ask\n    model: ${model}\n`,
+      );
+    const { deps } = makeDeps();
+
+    fs.writeFileSync(documentPath, withModel("balanced"));
+    expect(
+      await runCli(["answer-fork", documentPath, "c1", "--session", "s"], deps),
+    ).toBe(0);
+    // A thread is answered once; the second model needs its own thread.
+    fs.writeFileSync(documentPath, withModel("session").replaceAll("c1", "c5"));
+    expect(
+      await runCli(["answer-fork", documentPath, "c5", "--session", "s"], deps),
+    ).toBe(0);
+
+    expect(runArgs().map(modelArg)).toEqual(["sonnet", null]);
   }, 30_000);
 });

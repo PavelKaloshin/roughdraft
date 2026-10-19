@@ -557,6 +557,26 @@ describe("formatListenEventLine", () => {
     );
   });
 
+  it("names an Ask's non-default model, and leaves the fast default out", () => {
+    const options = { cliName: "roughdraft", documentPath: "/docs/plan.md" };
+
+    expect(
+      formatListenEventLine({ ...baseEvent, model: "balanced" }, options),
+    ).toMatch(/^\[roughdraft\] ask c1 seq=7 model=balanced → /);
+    expect(
+      formatListenEventLine(
+        {
+          ...baseEvent,
+          type: "comment.followup",
+          commentId: "c3",
+          model: "session",
+        },
+        options,
+      ),
+    ).toMatch(/ intent=ask seq=7 model=session → /);
+    expect(formatListenEventLine(baseEvent, options)).not.toContain("model=");
+  });
+
   it("keeps the instructions of an ask well inside Monitor's line budget", () => {
     // Monitor truncates around 480 characters; the part before "|" (what to
     // do) must survive even with a long path.

@@ -193,6 +193,15 @@ describe("thread lifecycle labels", () => {
         delegatedTo: "fork-process",
       }),
     ).toBe("Passed to a forked Claude");
+    expect(
+      getThreadAgentStatusLabel("working", {
+        listening: true,
+        delegatedTo: "fork-process",
+      }),
+    ).toBe("A forked Claude is working…");
+    expect(getThreadAgentStatusLabel("working", { listening: true })).toBe(
+      "Claude is working…",
+    );
   });
 
   it("passes the new server states through to the status line", () => {

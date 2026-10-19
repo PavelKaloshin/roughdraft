@@ -783,6 +783,84 @@ describe("comment intent", () => {
     });
   });
 
+  it("exposes a known Ask model and keeps it through a reply and a resolve", () => {
+    const markdown = withIntent("ask", ["    model: balanced"]);
+    expect(validateRoughdraftMarkdown(markdown).diagnostics).toEqual([]);
+    expect(extractRoughdraftReviewIndex(markdown).items[0]).toMatchObject({
+      id: "c1",
+      intent: "ask",
+      model: "balanced",
+    });
+
+    const replied = appendRoughdraftReply(markdown, {
+      parentId: "c1",
+      message: "Because of the cache.",
+      author: "AI",
+      at: "2026-10-18T12:01:00.000Z",
+    });
+    const resolved = markRoughdraftResolved(replied, { targetId: "c1" });
+
+    expect(resolved).toContain("    model: balanced\n");
+    expect(validateRoughdraftMarkdown(resolved).diagnostics).toEqual([]);
+    expect(
+      extractRoughdraftReviewIndex(resolved).items.find(
+        (item) => item.id === "c1",
+      ),
+    ).toMatchObject({ model: "balanced", status: "resolved" });
+  });
+
+  it("treats an Ask without a model as the fast default (no model on the item)", () => {
+    const item = extractRoughdraftReviewIndex(withIntent("ask")).items[0];
+
+    expect(item).toMatchObject({ intent: "ask" });
+    expect(item).not.toHaveProperty("model");
+  });
+
+  it("reads the model from older inline attribute metadata", () => {
+    const index = extractRoughdraftReviewIndex(
+      'Why {==this==}{>>Explain<<}{id="c1" by="user" at="2026-10-18T12:00:00.000Z" intent="ask" model="session"}.\n',
+    );
+
+    expect(index.diagnostics).toEqual([]);
+    expect(index.items[0]).toMatchObject({ intent: "ask", model: "session" });
+  });
+
+  it("warns about an unknown model value and degrades it to the default", () => {
+    const markdown = withIntent("ask", ["    model: genius"]);
+    const result = validateRoughdraftMarkdown(markdown);
+
+    expect(result.ok).toBe(true);
+    expect(result.warnings.map((warning) => warning.code)).toEqual([
+      "unknown-model",
+    ]);
+    expect(extractRoughdraftReviewIndex(markdown).items[0]).not.toHaveProperty(
+      "model",
+    );
+  });
+
+  it("warns about and ignores a model outside a root Ask comment", () => {
+    const onChange = withIntent("change", ["    model: balanced"]);
+    expect(codes(onChange)).toEqual(["ignored-model"]);
+    expect(extractRoughdraftReviewIndex(onChange).items[0]).not.toHaveProperty(
+      "model",
+    );
+
+    const onReply = withIntent("ask", [
+      "  c2:",
+      "    body: Because of the cache.",
+      "    by: AI",
+      '    at: "2026-10-18T12:00:20.000Z"',
+      "    re: c1",
+      "    model: session",
+    ]);
+    expect(codes(onReply)).toEqual(["ignored-model"]);
+    expect(
+      extractRoughdraftReviewIndex(onReply).items.find(
+        (item) => item.id === "c2",
+      ),
+    ).not.toHaveProperty("model");
+  });
+
   it("appends a reply to an endmatter-only document comment inside the endmatter", () => {
     const markdown = appendRoughdraftDocumentComment("# Draft\n", {
       message: "Overall: shorter please.",

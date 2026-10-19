@@ -38,6 +38,9 @@ export type ReviewEventType = (typeof REVIEW_EVENT_TYPES)[number];
 
 export type CommentIntent = "comment" | "ask" | "change";
 
+/** Who answers an Ask in a headless fork (RFM `model`; absent = `fast`). */
+export type AskModel = "fast" | "balanced" | "session";
+
 export interface CommentEventReply {
   id: string;
   author: string | null;
@@ -60,6 +63,11 @@ export interface CommentEventInput {
   commentId: string;
   threadRootId: string;
   intent: CommentIntent;
+  /**
+   * The Ask thread root's `model`, only when it is not the default (`fast`).
+   * Follow-ups in an Ask thread carry their root's model.
+   */
+  model?: Exclude<AskModel, "fast">;
   anchorText: string | null;
   /** Text of `commentId` (for a follow-up: the user's new reply). */
   body: string;

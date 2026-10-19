@@ -306,8 +306,15 @@ export async function runSessionListen(
 
     for (const event of payload.events) {
       cursor = Math.max(cursor, event.sequence);
+      // With `--quiet --fork-asks-after 0` the fork observer takes Asks
+      // over: their lines reach the session only if no fork answers them.
+      if (
+        event.type !== "review.completed" &&
+        options.observer?.observe(event) === true
+      ) {
+        continue;
+      }
       io.log(formatSessionEventLine(event, cli));
-      if (event.type !== "review.completed") options.observer?.observe(event);
     }
     cursor = Math.max(cursor, payload.nextSequence - 1);
   }
@@ -335,6 +342,12 @@ export class SessionForkObserver implements ListenObserver {
       sessionId: string;
       cwd: string;
       afterSeconds: number;
+      /**
+       * `listen --quiet`: print only what the session must act on. With
+       * `afterSeconds` 0 an Ask goes straight to a fork and its line is
+       * printed only if the fork cannot answer it.
+       */
+      quiet?: boolean;
       claudePath?: string;
       serverUrl: () => string | null;
       /** Test hook: replaces `runAnswerFork`. */
@@ -342,8 +355,8 @@ export class SessionForkObserver implements ListenObserver {
     },
   ) {}
 
-  observe(event: CommentEvent): void {
-    this.scheduler(event.documentPath).observe(event);
+  observe(event: CommentEvent): boolean {
+    return this.scheduler(event.documentPath).observe(event);
   }
 
   async close(): Promise<void> {
@@ -364,9 +377,12 @@ export class SessionForkObserver implements ListenObserver {
       documentPath,
     };
     const cli = cliCommandName(io.env);
+    const quiet = this.options.quiet === true;
     scheduler = new ForkScheduler({
       afterMs: this.options.afterSeconds * 1000,
       maxConcurrent: DEFAULT_MAX_CONCURRENT_FORKS,
+      takeOverAsks: quiet && this.options.afterSeconds === 0,
+      announceForks: !quiet,
       threadStatus: (threadRootId) =>
         fetchThreadStatus(io, target, threadRootId),
       runFork:
@@ -378,6 +394,14 @@ export class SessionForkObserver implements ListenObserver {
             cwd: this.options.cwd,
             claudePath: this.options.claudePath,
             onStarted: started,
+            ...(quiet
+              ? {}
+              : {
+                  onRetry: (reason: string) =>
+                    io.log(
+                      `[roughdraft] headless fork for ${event.threadRootId} failed (${reason}); retrying with the session model`,
+                    ),
+                }),
           })),
       log: io.log,
       formatEventLine: (event) => formatSessionEventLine(event, cli),
@@ -665,6 +689,15 @@ export function printSessionCommandHelp(
     );
     log("  --title <text>           Session name shown in Roughdraft");
     log("  --quiet                  Print only events and ownership changes");
+    log(
+      "  --fork-asks-after <s>    Answer an Ask still queued after <s> seconds from a",
+    );
+    log(
+      "                           headless fork of the session; with --quiet and 0 an Ask",
+    );
+    log(
+      "                           is printed only if the fork cannot answer it",
+    );
     log(
       "  --no-start               Never start a server; wait for one to appear",
     );
@@ -956,6 +989,7 @@ export async function runSessionCommand(
             sessionId,
             cwd: deps.cwd,
             afterSeconds: options.forkAsksAfter,
+            quiet: options.quiet,
             ...(options.claude ? { claudePath: options.claude } : {}),
             serverUrl: () => currentServer,
           })

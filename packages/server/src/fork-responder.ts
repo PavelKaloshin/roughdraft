@@ -7,7 +7,7 @@ import {
   shellQuote,
 } from "./agent-cli.js";
 import { buildCommentEventInput } from "./comment-events.js";
-import type { CommentEvent } from "./review-events.js";
+import type { AskModel, CommentEvent } from "./review-events.js";
 
 /**
  * Headless fork responder: answers an Ask while the owning Claude Code
@@ -63,6 +63,8 @@ export function forkChildEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 export function buildForkArgs(options: {
   sessionId: string;
   cliName: string;
+  /** A `claude --model` alias; omitted runs the session's own model. */
+  modelAlias?: string;
 }): string[] {
   return [
     "-p",
@@ -70,6 +72,7 @@ export function buildForkArgs(options: {
     options.sessionId,
     "--fork-session",
     "--no-session-persistence",
+    ...(options.modelAlias ? ["--model", options.modelAlias] : []),
     "--output-format",
     "json",
     "--permission-mode",
@@ -83,6 +86,25 @@ export function buildForkArgs(options: {
     "Write",
     "NotebookEdit",
   ];
+}
+
+/**
+ * The `claude --model` alias for an Ask's model. `fast` (the default) and
+ * `balanced` trade the session's prompt cache (a different model cannot read
+ * it, so the forked context is written to the cache again) for a quicker,
+ * cheaper answer; `session` keeps the session's model and its cache.
+ */
+export function forkModelAlias(
+  model: AskModel | undefined,
+): string | undefined {
+  switch (model ?? "fast") {
+    case "fast":
+      return "haiku";
+    case "balanced":
+      return "sonnet";
+    default:
+      return undefined;
+  }
 }
 
 export interface ForkPromptMessage {
@@ -171,7 +193,14 @@ export function findExecutable(
 }
 
 export type AnswerForkOutcome =
-  | { kind: "answered"; costUsd?: number }
+  | {
+      kind: "answered";
+      costUsd?: number;
+      /** The `--model` alias that answered; absent = the session's model. */
+      modelAlias?: string;
+      /** The first fork (with `--model`) failed and this is the retry. */
+      retried?: boolean;
+    }
   | { kind: "claude-missing" }
   /** The session (or another fork) already has the thread. */
   | { kind: "skipped"; reason: string }
@@ -192,6 +221,8 @@ export interface AnswerForkOptions {
   spawnImpl?: typeof spawn;
   /** Called once the thread is claimed and the fork is about to start. */
   onStarted?: () => void;
+  /** Called before retrying a failed `--model` fork with the session model. */
+  onRetry?: (reason: string) => void;
 }
 
 async function postAck(
@@ -243,7 +274,7 @@ export function readForkPrompt(
   commentId: string,
   cliName: string,
 ):
-  | { ok: true; threadRootId: string; prompt: string }
+  | { ok: true; threadRootId: string; prompt: string; model?: AskModel }
   | { ok: false; reason: string } {
   const markdown = fs.readFileSync(target.documentPath, "utf8");
   let built = buildCommentEventInput(markdown, {
@@ -285,6 +316,7 @@ export function readForkPrompt(
   return {
     ok: true,
     threadRootId: input.threadRootId,
+    ...(input.model ? { model: input.model } : {}),
     prompt: buildForkPrompt({
       cliName,
       documentPath: target.documentPath,
@@ -347,26 +379,111 @@ export async function runAnswerFork(
 
   options.onStarted?.();
   const timeoutMs = options.timeoutMs ?? DEFAULT_FORK_TIMEOUT_MS;
-  const run = await new Promise<{
-    code: number | null;
-    timedOut: boolean;
-    stdout: string;
-    stderr: string;
-    spawnError?: string;
-  }>((resolve) => {
-    const child = (options.spawnImpl ?? spawn)(
+  const modelAlias = forkModelAlias(built.model);
+  const runOnce = (alias: string | undefined) =>
+    spawnFork({
       claude,
-      buildForkArgs({ sessionId: options.sessionId, cliName }),
-      {
-        cwd: options.cwd,
-        env: forkChildEnv(io.env),
-        stdio: ["pipe", "pipe", "pipe"],
-        // Survives the listener being stopped (Monitor re-arm), and lets a
-        // timeout stop claude together with the tools it started.
-        detached: process.platform !== "win32",
-        windowsHide: true,
-      },
-    );
+      args: buildForkArgs({
+        sessionId: options.sessionId,
+        cliName,
+        ...(alias ? { modelAlias: alias } : {}),
+      }),
+      cwd: options.cwd,
+      env: forkChildEnv(io.env),
+      prompt,
+      timeoutMs,
+      spawnImpl: options.spawnImpl,
+    });
+  const answered = () =>
+    fetchThreadStatus(io, target, threadRootId)
+      .catch(() => undefined)
+      .then((status) => status === "answered");
+
+  let run = await runOnce(modelAlias);
+  let answeredWith = modelAlias;
+  let costUsd = parseCost(run.stdout).costUsd;
+  let retried = false;
+  // A smaller model can fail where the session's own would not (the forked
+  // context does not fit its window, an alias the account lacks): try once
+  // more with the session's model before handing the Ask back. A timeout is
+  // not retried; that would double an already long wait.
+  if (modelAlias && !run.spawnError && !run.timedOut && !(await answered())) {
+    options.onRetry?.(failureReason(run, timeoutMs));
+    retried = true;
+    run = await runOnce(undefined);
+    answeredWith = undefined;
+    const retryCost = parseCost(run.stdout).costUsd;
+    if (retryCost !== undefined) costUsd = (costUsd ?? 0) + retryCost;
+  }
+
+  if (await answered()) {
+    return {
+      kind: "answered",
+      ...(costUsd !== undefined ? { costUsd } : {}),
+      ...(answeredWith ? { modelAlias: answeredWith } : {}),
+      ...(retried ? { retried } : {}),
+    };
+  }
+
+  await postAck(io, target, { commentId: threadRootId, requeue: true }).catch(
+    () => undefined,
+  );
+  return { kind: "failed", reason: failureReason(run, timeoutMs) };
+}
+
+interface ForkRun {
+  code: number | null;
+  timedOut: boolean;
+  stdout: string;
+  stderr: string;
+  spawnError?: string;
+}
+
+function failureReason(run: ForkRun, timeoutMs: number): string {
+  return run.spawnError
+    ? `could not start claude: ${run.spawnError}`
+    : run.timedOut
+      ? `timed out after ${Math.round(timeoutMs / 1000)}s`
+      : run.code !== 0
+        ? `claude exited with code ${run.code}${lastLine(run.stderr || run.stdout)}`
+        : `claude finished without replying${resultError(run.stdout)}`;
+}
+
+/** `claude -p --output-format json` reports some failures with exit 0. */
+function resultError(stdout: string): string {
+  try {
+    const payload = JSON.parse(stdout) as {
+      is_error?: unknown;
+      result?: unknown;
+    };
+    return payload.is_error === true && typeof payload.result === "string"
+      ? `: ${payload.result.trim().slice(0, 200)}`
+      : "";
+  } catch {
+    return "";
+  }
+}
+
+function spawnFork(options: {
+  claude: string;
+  args: string[];
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  prompt: string;
+  timeoutMs: number;
+  spawnImpl?: typeof spawn;
+}): Promise<ForkRun> {
+  const { prompt, timeoutMs } = options;
+  return new Promise<ForkRun>((resolve) => {
+    const child = (options.spawnImpl ?? spawn)(options.claude, options.args, {
+      cwd: options.cwd,
+      env: options.env,
+      stdio: ["pipe", "pipe", "pipe"],
+      // Survives the listener being stopped (Monitor re-arm), and lets a
+      // timeout stop claude together with the tools it started.
+      detached: process.platform !== "win32",
+      windowsHide: true,
+    });
     let stdout = "";
     let stderr = "";
     let timedOut = false;
@@ -397,25 +514,6 @@ export async function runAnswerFork(
     child.stdin?.on("error", () => {});
     child.stdin?.end(prompt);
   });
-
-  const status = await fetchThreadStatus(io, target, threadRootId).catch(
-    () => undefined,
-  );
-  if (status === "answered") {
-    return { kind: "answered", ...parseCost(run.stdout) };
-  }
-
-  await postAck(io, target, { commentId: threadRootId, requeue: true }).catch(
-    () => undefined,
-  );
-  const reason = run.spawnError
-    ? `could not start claude: ${run.spawnError}`
-    : run.timedOut
-      ? `timed out after ${Math.round(timeoutMs / 1000)}s`
-      : run.code !== 0
-        ? `claude exited with code ${run.code}${lastLine(run.stderr || run.stdout)}`
-        : "claude finished without replying";
-  return { kind: "failed", reason };
 }
 
 function lastLine(text: string): string {
@@ -452,13 +550,25 @@ export interface ForkSchedulerOptions {
   ) => Promise<AnswerForkOutcome>;
   log: (line: string) => void;
   formatEventLine: (event: CommentEvent) => string;
+  /**
+   * Every Ask goes to a fork at once (`afterMs` is ignored) and its event
+   * line is kept from the session: `observe` returns true, and the listener
+   * does not print it. The line is printed only when no fork answers it
+   * (the fork failed, `claude` is missing, the thread status is unknown).
+   * Used by the plugin (`listen --quiet --fork-asks-after 0`), so an Ask
+   * never wakes the main session.
+   */
+  takeOverAsks?: boolean;
+  /** Prints `forked cN to a headless Claude` when a fork starts (default). */
+  announceForks?: boolean;
 }
 
 /**
  * Used by `listen --fork-asks-after`: an Ask event the session has not
  * acked `afterMs` after the listener printed it (still `queued`) goes to a
  * headless fork. Once per user message, never for a Change, at most
- * `maxConcurrent` forks at once.
+ * `maxConcurrent` forks at once. With `takeOverAsks` the session never sees
+ * the Ask unless the fork cannot answer it.
  */
 export class ForkScheduler {
   private readonly seen = new Set<string>();
@@ -472,12 +582,23 @@ export class ForkScheduler {
 
   constructor(private readonly options: ForkSchedulerOptions) {}
 
-  observe(event: CommentEvent): void {
-    if (this.disabled || this.closed || !isAskEvent(event)) return;
+  /**
+   * Sees an event the listener got. Returns true when the scheduler took
+   * the event over and the listener must not print its line.
+   */
+  observe(event: CommentEvent): boolean {
+    if (this.disabled || this.closed || !isAskEvent(event)) return false;
+    const takeOver = this.options.takeOverAsks === true;
     const key = `${event.threadRootId}/${event.commentId}`;
-    if (this.seen.has(key)) return;
+    // Shown again (a new round): the first delivery is already handled.
+    if (this.seen.has(key)) return takeOver;
     this.seen.add(key);
     this.latest.set(event.threadRootId, key);
+    if (takeOver) {
+      this.waiting.push(event);
+      void this.pump();
+      return true;
+    }
     const timer = setTimeout(() => {
       this.timers.delete(timer);
       this.waiting.push(event);
@@ -485,9 +606,14 @@ export class ForkScheduler {
     }, this.options.afterMs);
     timer.unref?.();
     this.timers.add(timer);
+    return false;
   }
 
-  /** Stops scheduling and waits for forks already running. */
+  /**
+   * Stops scheduling and waits for forks already running. Asks still waiting
+   * for a slot are dropped here; they stay `queued` on the server, which
+   * delivers them again to the next `listen` (its cursor starts over).
+   */
   async close(): Promise<void> {
     this.closed = true;
     for (const timer of this.timers) clearTimeout(timer);
@@ -498,13 +624,17 @@ export class ForkScheduler {
     }
   }
 
-  private async stillQueued(event: CommentEvent): Promise<boolean> {
+  /** `fork` when the Ask still waits for an answer, `skip` when not. */
+  private async check(
+    event: CommentEvent,
+  ): Promise<"fork" | "skip" | "unknown"> {
     const key = `${event.threadRootId}/${event.commentId}`;
-    if (this.latest.get(event.threadRootId) !== key) return false;
+    if (this.latest.get(event.threadRootId) !== key) return "skip";
     const status = await this.options
       .threadStatus(event.threadRootId)
       .catch(() => undefined);
-    return status === "queued";
+    if (status === undefined) return "unknown";
+    return status === "queued" ? "fork" : "skip";
   }
 
   private async pump(): Promise<void> {
@@ -529,14 +659,30 @@ export class ForkScheduler {
     }
   }
 
+  /** Gives an Ask the fork did not answer to the session, with its line. */
+  private handOver(event: CommentEvent, reason: string): void {
+    this.options.log(
+      `[roughdraft] headless fork for ${event.threadRootId} failed (${reason}); answer it yourself:`,
+    );
+    this.options.log(this.options.formatEventLine(event));
+  }
+
   private async start(event: CommentEvent): Promise<void> {
-    if (!(await this.stillQueued(event)) || this.disabled || this.closed) {
+    if (this.disabled || this.closed) return;
+    const takeOver = this.options.takeOverAsks === true;
+    const decision = await this.check(event);
+    if (this.disabled || this.closed) return;
+    if (decision === "unknown") {
+      // The session never saw this Ask: it must not get lost.
+      if (takeOver) this.handOver(event, "could not read the thread status");
       return;
     }
+    if (decision === "skip") return;
     const id = event.threadRootId;
     let outcome: AnswerForkOutcome;
     try {
       outcome = await this.options.runFork(event, () => {
+        if (this.options.announceForks === false) return;
         this.options.log(
           `[roughdraft] forked ${id} to a headless Claude (main session busy)`,
         );
@@ -548,6 +694,7 @@ export class ForkScheduler {
       };
     }
     if (outcome.kind === "claude-missing") {
+      const untaken = takeOver ? [event, ...this.waiting] : [];
       this.disabled = true;
       this.waiting.length = 0;
       for (const timer of this.timers) clearTimeout(timer);
@@ -555,13 +702,12 @@ export class ForkScheduler {
       this.options.log(
         "[roughdraft] claude CLI not found; not forking Asks to a headless Claude",
       );
+      // Asks the session has not seen yet: show them now, once each.
+      for (const ask of untaken) {
+        this.options.log(this.options.formatEventLine(ask));
+      }
       return;
     }
-    if (outcome.kind === "failed") {
-      this.options.log(
-        `[roughdraft] headless fork for ${id} failed (${outcome.reason}); answer it yourself:`,
-      );
-      this.options.log(this.options.formatEventLine(event));
-    }
+    if (outcome.kind === "failed") this.handOver(event, outcome.reason);
   }
 }

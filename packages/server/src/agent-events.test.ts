@@ -268,6 +268,37 @@ describe("agent comment events", () => {
     expect(outside.status).toBe(404);
   });
 
+  it("carries an Ask's non-default model on its events and its follow-ups", async () => {
+    fs.writeFileSync(
+      documentPath,
+      PLAN.replace(
+        "    intent: ask\n",
+        "    intent: ask\n    model: balanced\n",
+      ),
+    );
+    const app = makeApp();
+
+    const ask = await postEvent(app, "comment.ask", "c1");
+    appendUserReply("c3", "c1", "And the cache?");
+    const followup = await postEvent(app, "comment.followup", "c3");
+    const change = await postEvent(app, "comment.change", "c2");
+
+    expect(ask.body.event).toMatchObject({ intent: "ask", model: "balanced" });
+    expect(followup.body.event).toMatchObject({
+      type: "comment.followup",
+      model: "balanced",
+    });
+    expect(change.body.event).not.toHaveProperty("model");
+  });
+
+  it("leaves the fast default model off an Ask's event", async () => {
+    const app = makeApp();
+
+    const ask = await postEvent(app, "comment.ask", "c1");
+
+    expect(ask.body.event).not.toHaveProperty("model");
+  });
+
   it("does not emit the same ask twice, but does emit a follow-up after a new reply", async () => {
     const app = makeApp();
 

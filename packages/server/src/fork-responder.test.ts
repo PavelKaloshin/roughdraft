@@ -9,6 +9,7 @@ import {
   findExecutable,
   ForkScheduler,
   forkChildEnv,
+  forkModelAlias,
 } from "./fork-responder";
 import type { CommentEvent } from "./review-events";
 
@@ -115,6 +116,27 @@ describe("buildForkArgs", () => {
   });
 });
 
+describe("fork model", () => {
+  it("maps an Ask's model to a claude --model alias, fast by default", () => {
+    expect(forkModelAlias(undefined)).toBe("haiku");
+    expect(forkModelAlias("fast")).toBe("haiku");
+    expect(forkModelAlias("balanced")).toBe("sonnet");
+    expect(forkModelAlias("session")).toBeUndefined();
+  });
+
+  it("passes --model only when a model alias is given", () => {
+    const withModel = buildForkArgs({
+      sessionId: "s",
+      cliName: "rd",
+      modelAlias: "haiku",
+    });
+    expect(valuesOf(withModel, "--model")).toEqual(["haiku"]);
+    expect(
+      buildForkArgs({ sessionId: "s", cliName: "rd" }).includes("--model"),
+    ).toBe(false);
+  });
+});
+
 function valuesOf(args: string[], flag: string): string[] {
   const start = args.indexOf(flag);
   if (start < 0) return [];
@@ -188,11 +210,18 @@ describe("ForkScheduler", () => {
   });
 
   function scheduler(
-    options: { maxConcurrent?: number; outcome?: AnswerForkOutcome } = {},
+    options: {
+      maxConcurrent?: number;
+      outcome?: AnswerForkOutcome;
+      takeOverAsks?: boolean;
+    } = {},
   ) {
     return new ForkScheduler({
-      afterMs: 15_000,
+      afterMs: options.takeOverAsks ? 0 : 15_000,
       maxConcurrent: options.maxConcurrent ?? 2,
+      ...(options.takeOverAsks
+        ? { takeOverAsks: true, announceForks: false }
+        : {}),
       threadStatus: async (threadRootId) => statuses[threadRootId],
       runFork: (forked, started) => {
         forks.push(forked);
@@ -338,6 +367,140 @@ describe("ForkScheduler", () => {
       "[roughdraft] headless fork for c7 failed (timed out after 300s); answer it yourself:",
       "[roughdraft] ask c7 …",
     ]);
+  });
+
+  describe("taking Asks over (plugin: --quiet --fork-asks-after 0)", () => {
+    it("forks an Ask at once, silently, and tells the listener not to print it", async () => {
+      const forker = scheduler({
+        takeOverAsks: true,
+        outcome: { kind: "answered" },
+      });
+      statuses.c7 = "queued";
+
+      expect(forker.observe(event())).toBe(true);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(forks.map((forked) => forked.commentId)).toEqual(["c7"]);
+      expect(logs).toEqual([]);
+      // Shown again in a later round: still not printed, not forked twice.
+      expect(forker.observe(event({ sequence: 5 }))).toBe(true);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(forks).toHaveLength(1);
+    });
+
+    it("leaves a Change to the listener (printed, never forked)", async () => {
+      const forker = scheduler({ takeOverAsks: true });
+      statuses.c7 = "queued";
+
+      expect(
+        forker.observe(event({ type: "comment.change", intent: "change" })),
+      ).toBe(false);
+      expect(
+        forker.observe(
+          event({
+            type: "comment.followup",
+            intent: "change",
+            commentId: "c9",
+          }),
+        ),
+      ).toBe(false);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(forks).toEqual([]);
+    });
+
+    it("takes over a follow-up in an Ask thread", async () => {
+      const forker = scheduler({
+        takeOverAsks: true,
+        outcome: { kind: "answered" },
+      });
+      statuses.c7 = "queued";
+
+      expect(
+        forker.observe(
+          event({ type: "comment.followup", intent: "ask", commentId: "c9" }),
+        ),
+      ).toBe(true);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(forks.map((forked) => forked.commentId)).toEqual(["c9"]);
+    });
+
+    it("prints the Ask's line, once, when the fork fails", async () => {
+      const forker = scheduler({
+        takeOverAsks: true,
+        outcome: { kind: "failed", reason: "claude exited with code 1" },
+      });
+      statuses.c7 = "queued";
+
+      forker.observe(event());
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(logs).toEqual([
+        "[roughdraft] headless fork for c7 failed (claude exited with code 1); answer it yourself:",
+        "[roughdraft] ask c7 …",
+      ]);
+    });
+
+    it("prints the Ask's line when the thread status cannot be read", async () => {
+      const forker = scheduler({ takeOverAsks: true });
+
+      forker.observe(event());
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(forks).toEqual([]);
+      expect(logs).toEqual([
+        "[roughdraft] headless fork for c7 failed (could not read the thread status); answer it yourself:",
+        "[roughdraft] ask c7 …",
+      ]);
+    });
+
+    it("without claude: one notice, the lines of every Ask not yet shown, then normal printing", async () => {
+      const forker = scheduler({
+        takeOverAsks: true,
+        maxConcurrent: 1,
+        outcome: { kind: "claude-missing" },
+      });
+      statuses.c1 = "queued";
+      statuses.c2 = "queued";
+
+      expect(
+        forker.observe(event({ commentId: "c1", threadRootId: "c1" })),
+      ).toBe(true);
+      // Waits for the single slot.
+      expect(
+        forker.observe(event({ commentId: "c2", threadRootId: "c2" })),
+      ).toBe(true);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(forks.map((forked) => forked.commentId)).toEqual(["c1"]);
+      expect(logs).toEqual([
+        "[roughdraft] claude CLI not found; not forking Asks to a headless Claude",
+        "[roughdraft] ask c1 …",
+        "[roughdraft] ask c2 …",
+      ]);
+      // From now on the listener prints Asks itself.
+      expect(
+        forker.observe(event({ commentId: "c3", threadRootId: "c3" })),
+      ).toBe(false);
+    });
+
+    it("keeps an Ask waiting for a free slot without printing it", async () => {
+      const forker = scheduler({ takeOverAsks: true, maxConcurrent: 1 });
+      statuses.c1 = "queued";
+      statuses.c2 = "queued";
+
+      forker.observe(event({ commentId: "c1", threadRootId: "c1" }));
+      forker.observe(event({ commentId: "c2", threadRootId: "c2" }));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(forks.map((forked) => forked.commentId)).toEqual(["c1"]);
+
+      finishFork.get("c1")?.({ kind: "answered" });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(forks.map((forked) => forked.commentId)).toEqual(["c1", "c2"]);
+      expect(logs).toEqual([]);
+    });
   });
 
   it("stops scheduling on close and waits for running forks", async () => {

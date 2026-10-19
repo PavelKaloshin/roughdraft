@@ -232,7 +232,7 @@ describe("Claude Code plugin scripts", () => {
       expect(result).toMatchObject({ code: 0, stdout: "", stderr: "" });
       expect(calls()).toEqual(
         Array(3).fill(
-          `listen --session session-1 --quiet --no-start --max-seconds 600 --fork-asks-after 15 --claims-file ${dataDir}/sessions/session-1.json`,
+          `listen --session session-1 --quiet --no-start --max-seconds 600 --fork-asks-after 0 --claims-file ${dataDir}/sessions/session-1.json`,
         ),
       );
     });

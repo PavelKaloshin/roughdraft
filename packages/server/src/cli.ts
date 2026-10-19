@@ -2660,6 +2660,10 @@ async function runAgentCommand(
               cwd: deps.cwd,
               claudePath: options.claude,
               onStarted: started,
+              onRetry: (reason) =>
+                deps.log(
+                  `[roughdraft] headless fork for ${event.threadRootId} failed (${reason}); retrying with the session model`,
+                ),
             }),
           log: deps.log,
           formatEventLine: (event) =>
@@ -2703,13 +2707,26 @@ async function runAgentCommand(
         deps.log(
           `[roughdraft] forking session ${sessionId} to answer ${commentId} in ${target.documentPath}`,
         ),
+      onRetry: (reason) =>
+        deps.log(
+          `[roughdraft] the fork failed (${reason}); retrying with the session model`,
+        ),
     });
     switch (outcome.kind) {
-      case "answered":
+      case "answered": {
+        const details = [
+          outcome.modelAlias
+            ? `model ${outcome.modelAlias}`
+            : "the session model",
+          ...(outcome.costUsd !== undefined
+            ? [`cost $${outcome.costUsd.toFixed(2)}`]
+            : []),
+        ];
         deps.log(
-          `[roughdraft] a headless Claude answered ${commentId} in ${target.documentPath}${outcome.costUsd !== undefined ? ` (cost $${outcome.costUsd.toFixed(2)})` : ""}`,
+          `[roughdraft] a headless Claude answered ${commentId} in ${target.documentPath} (${details.join(", ")})`,
         );
         return 0;
+      }
       case "skipped":
         deps.log(`[roughdraft] not forking: ${outcome.reason}`);
         return 0;

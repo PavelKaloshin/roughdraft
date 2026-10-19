@@ -58,6 +58,12 @@ export interface CriticComment {
    * replies (a thread's intent is its root's).
    */
   intent?: CriticCommentIntent;
+  /**
+   * Which model a headless fork answers an Ask with. Only on root `ask`
+   * comments; absent means `fast`. The composer sets it only when it is not
+   * the default, so files stay clean.
+   */
+  model?: CriticAskModel;
   /** Review state from metadata, e.g. `resolved`. */
   status?: string | null;
   /**
@@ -82,6 +88,18 @@ export function parseCriticCommentIntent(
   return value === "ask" || value === "change" ? value : undefined;
 }
 
+export type CriticAskModel = "fast" | "balanced" | "session";
+
+export const DEFAULT_CRITIC_ASK_MODEL: CriticAskModel = "fast";
+
+export function parseCriticAskModel(
+  value: unknown,
+): CriticAskModel | undefined {
+  return value === "fast" || value === "balanced" || value === "session"
+    ? value
+    : undefined;
+}
+
 export function isCriticCommentResolved(
   comment: Pick<CriticComment, "status">,
 ): boolean {
@@ -94,6 +112,7 @@ const modeledAttributeKeys = new Set([
   "at",
   "re",
   "intent",
+  "model",
   "status",
 ]);
 
@@ -215,6 +234,13 @@ function parseAttributeMetadata(
   if (rawIntent !== undefined && !intent) {
     extraAttributes.push(["intent", rawIntent]);
   }
+  // Likewise a model the app does not know, or one outside a root Ask.
+  const model =
+    intent === "ask" ? parseCriticAskModel(fields.get("model")) : undefined;
+  const rawModel = fields.get("model");
+  if (rawModel !== undefined && !model) {
+    extraAttributes.push(["model", rawModel]);
+  }
 
   return {
     id: fields.get("id"),
@@ -223,6 +249,7 @@ function parseAttributeMetadata(
     authorId: author.toUpperCase() === "AI" ? null : author,
     parentCommentId,
     ...(intent ? { intent } : {}),
+    ...(model ? { model } : {}),
     ...(fields.has("status") ? { status: fields.get("status") } : {}),
     ...(extraAttributes.length > 0 ? { extraAttributes } : {}),
   };
@@ -239,6 +266,8 @@ function commentPartialFromEndmatterEntry(
     typeof entry?.re === "string"
       ? undefined
       : parseCriticCommentIntent(entry?.intent);
+  const model =
+    intent === "ask" ? parseCriticAskModel(entry?.model) : undefined;
 
   return {
     id,
@@ -249,6 +278,7 @@ function commentPartialFromEndmatterEntry(
     parentCommentId:
       includeParent && typeof entry?.re === "string" ? entry.re : null,
     ...(intent ? { intent } : {}),
+    ...(model ? { model } : {}),
     ...(typeof entry?.status === "string" ? { status: entry.status } : {}),
   };
 }
@@ -290,6 +320,9 @@ function serializeMetadata(comment: CriticComment): string {
     fields.push(["re", comment.parentCommentId]);
   } else if (comment.intent) {
     fields.push(["intent", comment.intent]);
+    if (comment.intent === "ask" && comment.model) {
+      fields.push(["model", comment.model]);
+    }
   }
   if (comment.status) {
     fields.push(["status", comment.status]);
@@ -435,6 +468,10 @@ function endmatterEntryForComment(
   // Unknown intent values already in the file survive via `existing`.
   if (comment.intent && !next.re) {
     next.intent = comment.intent;
+  }
+  // Same for `model`; it is written only when the comment has one.
+  if (comment.model && comment.intent === "ask" && !next.re) {
+    next.model = comment.model;
   }
   if (comment.status) {
     next.status = comment.status;
@@ -695,6 +732,9 @@ function createCommentWithContext(
     scope: partial?.scope,
     ...(partial?.intent && !partial.parentCommentId
       ? { intent: partial.intent }
+      : {}),
+    ...(partial?.model && partial.intent === "ask" && !partial.parentCommentId
+      ? { model: partial.model }
       : {}),
     ...(partial?.status ? { status: partial.status } : {}),
     ...(partial?.extraAttributes?.length
@@ -1918,6 +1958,7 @@ function comparableComments(comments: ReadonlyMap<string, CriticComment>) {
         comment.content,
         comment.parentCommentId ?? null,
         comment.intent ?? null,
+        comment.model ?? null,
         comment.status ?? null,
         comment.authorType,
         comment.authorId ?? null,

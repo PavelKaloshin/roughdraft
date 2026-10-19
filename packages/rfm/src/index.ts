@@ -37,6 +37,18 @@ export const RFM_COMMENT_INTENTS: readonly RfmCommentIntent[] = [
   "ask",
   "change",
 ];
+/**
+ * Which model answers an `ask` thread when a headless fork of the session
+ * answers it: `fast` (the default, also when absent) is a small fast model,
+ * `balanced` a mid-size one, `session` the session's own model.
+ */
+export type RfmAskModel = "fast" | "balanced" | "session";
+export const RFM_ASK_MODELS: readonly RfmAskModel[] = [
+  "fast",
+  "balanced",
+  "session",
+];
+export const RFM_DEFAULT_ASK_MODEL: RfmAskModel = "fast";
 export type RfmSuggestionKind = "addition" | "deletion" | "substitution";
 
 export interface RfmReviewItem {
@@ -49,6 +61,11 @@ export interface RfmReviewItem {
   status: string | null;
   /** Only set on root comments whose metadata carries a known `intent`. */
   intent?: RfmCommentIntent;
+  /**
+   * Only set on root `ask` comments whose metadata carries a known `model`.
+   * Absent means `fast`.
+   */
+  model?: RfmAskModel;
   text: string;
   originalText?: string;
   replacementText?: string;
@@ -147,6 +164,7 @@ interface YamlMetadataEntry {
   status?: string;
   resolved?: string;
   intent?: string;
+  model?: string;
   [key: string]: unknown;
 }
 
@@ -259,6 +277,15 @@ export function validateRoughdraftMarkdown(
         metadata.offset,
         addDiagnostic,
       );
+      validateAskModel(
+        id,
+        entry.model,
+        entry.intent,
+        kind === "comment" && Boolean(entry.re),
+        kind,
+        metadata.offset,
+        addDiagnostic,
+      );
       return;
     }
 
@@ -315,6 +342,15 @@ export function validateRoughdraftMarkdown(
 
     validateIntent(
       id ?? "",
+      metadata.attrs.get("intent"),
+      kind === "comment" && Boolean(parentId),
+      kind,
+      metadata.offset,
+      addDiagnostic,
+    );
+    validateAskModel(
+      id ?? "",
+      metadata.attrs.get("model"),
       metadata.attrs.get("intent"),
       kind === "comment" && Boolean(parentId),
       kind,
@@ -427,6 +463,15 @@ export function validateRoughdraftMarkdown(
       endmatter.offset ?? 0,
       addDiagnostic,
     );
+    validateAskModel(
+      id,
+      entry.model,
+      entry.intent,
+      Boolean(entry.re),
+      "comment",
+      endmatter.offset ?? 0,
+      addDiagnostic,
+    );
     if (entry.re) {
       replies.push({
         id,
@@ -499,6 +544,8 @@ export function extractRoughdraftReviewIndex(markdown: string): RfmReviewIndex {
     const id = attrs.get("id") ?? `comment-${parsed.offset.toString()}`;
     const parentId = attrs.get("re") ?? null;
     const intent = parentId ? undefined : knownIntent(attrs.get("intent"));
+    const model =
+      intent === "ask" ? knownAskModel(attrs.get("model")) : undefined;
 
     items.push({
       id,
@@ -508,6 +555,7 @@ export function extractRoughdraftReviewIndex(markdown: string): RfmReviewIndex {
       createdAt: attrs.get("at") ?? null,
       status: attrs.get("status") ?? null,
       ...(intent ? { intent } : {}),
+      ...(model ? { model } : {}),
       text: parsed.content,
       anchorText,
       offset: parsed.offset,
@@ -606,6 +654,7 @@ export function extractRoughdraftReviewIndex(markdown: string): RfmReviewIndex {
   for (const [id, entry] of endmatter.comments) {
     if (!entry.body) continue;
     const intent = entry.re ? undefined : knownIntent(entry.intent);
+    const model = intent === "ask" ? knownAskModel(entry.model) : undefined;
 
     items.push({
       id,
@@ -615,6 +664,7 @@ export function extractRoughdraftReviewIndex(markdown: string): RfmReviewIndex {
       createdAt: typeof entry.at === "string" ? entry.at : null,
       status: typeof entry.status === "string" ? entry.status : null,
       ...(intent ? { intent } : {}),
+      ...(model ? { model } : {}),
       text: String(entry.body),
       offset: endmatter.offset ?? markdown.length,
       endOffset: endmatter.offset ?? markdown.length,
@@ -1422,6 +1472,54 @@ function validateIntent(
       "warning",
       "unknown-intent",
       `Unknown \`intent\` for \`${id}\`; expected one of ${RFM_COMMENT_INTENTS.join(", ")}. It is treated as \`comment\`.`,
+      offset,
+    );
+  }
+}
+
+function knownAskModel(value: unknown): RfmAskModel | undefined {
+  return typeof value === "string" &&
+    (RFM_ASK_MODELS as readonly string[]).includes(value)
+    ? (value as RfmAskModel)
+    : undefined;
+}
+
+/**
+ * `model` is advisory like `intent`: it only means something on a root `ask`
+ * comment, and an unknown value degrades to the default (`fast`) with a
+ * warning, never an error.
+ */
+function validateAskModel(
+  id: string,
+  value: unknown,
+  intent: unknown,
+  isReply: boolean,
+  kind: "comment" | "suggestion",
+  offset: number,
+  addDiagnostic: (
+    severity: RfmDiagnosticSeverity,
+    code: string,
+    message: string,
+    offset: number,
+  ) => void,
+): void {
+  if (value === undefined) return;
+
+  if (kind === "suggestion" || isReply || intent !== "ask") {
+    addDiagnostic(
+      "warning",
+      "ignored-model",
+      `\`model\` on \`${id}\` is ignored; it only applies to root comments with \`intent: ask\`.`,
+      offset,
+    );
+    return;
+  }
+
+  if (!knownAskModel(value)) {
+    addDiagnostic(
+      "warning",
+      "unknown-model",
+      `Unknown \`model\` for \`${id}\`; expected one of ${RFM_ASK_MODELS.join(", ")}. It is treated as \`${RFM_DEFAULT_ASK_MODEL}\`.`,
       offset,
     );
   }

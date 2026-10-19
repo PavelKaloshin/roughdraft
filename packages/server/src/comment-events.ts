@@ -116,6 +116,11 @@ export function buildCommentEventInput(
       : options.type === "comment.change"
         ? "change"
         : (root.intent ?? "comment");
+  // Only an Ask thread has a model; the default (`fast`) is left out.
+  const model =
+    intent === "ask" && root.model && root.model !== "fast"
+      ? root.model
+      : undefined;
 
   return {
     ok: true,
@@ -128,6 +133,7 @@ export function buildCommentEventInput(
       commentId: item.id,
       threadRootId,
       intent,
+      ...(model ? { model } : {}),
       anchorText: root.anchorText ?? null,
       body: subject ? subject.body : item.text,
       author: subject ? subject.author : item.author,

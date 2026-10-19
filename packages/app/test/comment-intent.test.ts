@@ -166,6 +166,77 @@ describe("comment intent", () => {
   });
 });
 
+describe("Ask model", () => {
+  const withModel = (model: string) =>
+    askDocument.replace(
+      "    intent: ask\n",
+      `    intent: ask\n    model: ${model}\n`,
+    );
+
+  it("reads a known model on a root Ask and writes the document back byte for byte", () => {
+    const input = withModel("balanced");
+    const { comments } = criticMarkdownToEditorState(input);
+
+    expect(comments.get("c3")?.model).toBe("balanced");
+    expect(comments.get("c4")?.model).toBeUndefined();
+    expect(roundTrip(input)).toBe(input);
+  });
+
+  it("writes a model chosen for a new Ask right after its intent", () => {
+    const input = [
+      "One {==two==}{>>Why?<<}{#c1} three.",
+      "",
+      "---",
+      "comments:",
+      "  c1:",
+      "    by: user",
+      '    at: "2026-10-18T12:00:00.000Z"',
+      "",
+    ].join("\n");
+
+    const output = roundTrip(input, (comments) => {
+      update(comments, "c1", { intent: "ask", model: "session" });
+    });
+
+    expect(output).toContain("    intent: ask\n    model: session\n");
+    expect(
+      criticMarkdownToEditorState(output).comments.get("c1"),
+    ).toMatchObject({ intent: "ask", model: "session" });
+  });
+
+  it("writes no model for the fast default", () => {
+    const output = roundTrip(askDocument, (comments) => {
+      update(comments, "c3", { content: "What is included, exactly?" });
+    });
+
+    expect(output).not.toContain("model:");
+  });
+
+  it("keeps the model of an Ask written as inline attributes", () => {
+    const input =
+      'Why {==this==}{>>Explain<<}{id="c1" by="user" at="2026-10-18T12:00:00.000Z" intent="ask" model="balanced"}.\n';
+
+    const { comments } = criticMarkdownToEditorState(input);
+    expect(comments.get("c1")?.model).toBe("balanced");
+    expect(
+      roundTrip(input, (next) =>
+        update(next, "c1", { content: "Explain more" }),
+      ),
+    ).toMatch(/intent: ask\n {4}model: balanced\n/);
+  });
+
+  it("preserves an unknown model value already in the file", () => {
+    const input = withModel("genius");
+    const { comments } = criticMarkdownToEditorState(input);
+    expect(comments.get("c3")?.model).toBeUndefined();
+
+    const output = roundTrip(input, (next) => {
+      update(next, "c3", { content: "Edited question" });
+    });
+    expect(output).toContain("model: genius");
+  });
+});
+
 describe("comment resolved status", () => {
   it("writes status: resolved into endmatter and drops it on reopen", () => {
     const resolved = roundTrip(askDocument, (comments) => {

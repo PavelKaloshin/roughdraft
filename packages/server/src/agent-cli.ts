@@ -112,7 +112,10 @@ export function formatListenEventLine(
   if (event.type === "comment.followup") {
     parts.push(`reply=${event.commentId}`, `intent=${event.intent}`);
   }
-  parts.push(`seq=${event.sequence}`, `→ ${action} |`);
+  parts.push(`seq=${event.sequence}`);
+  // An Ask's non-default model (`fast` is left out, like in the file).
+  if (!wantsChange && event.model) parts.push(`model=${event.model}`);
+  parts.push(`→ ${action} |`);
   if (event.author) parts.push(`by=${escapeInline(event.author)}`);
   if (event.anchorText) {
     const anchor = clip(event.anchorText, MAX_ANCHOR_CHARS);
@@ -156,7 +159,11 @@ function isRetryableError(error: unknown): boolean {
 }
 
 export interface ListenObserver {
-  observe(event: CommentEvent): void;
+  /**
+   * Sees a comment event before its line is printed. Returning true means
+   * the observer took the event over and the line is not printed.
+   */
+  observe(event: CommentEvent): boolean;
   /** Called when listening ends; listen exits once it settles. */
   close(): Promise<void>;
 }
@@ -283,13 +290,13 @@ export async function runListen(
         );
         continue;
       }
+      if (options.observer?.observe(event) === true) continue;
       io.log(
         formatListenEventLine(event, {
           cliName: cli,
           documentPath: target.documentPath,
         }),
       );
-      options.observer?.observe(event);
     }
     cursor = Math.max(cursor, payload.nextSequence - 1);
   }

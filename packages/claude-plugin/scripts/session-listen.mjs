@@ -31,12 +31,17 @@ const SESSION_POLL_MS = numberFromEnv(
   "ROUGHDRAFT_PLUGIN_SESSION_POLL_MS",
   1000,
 );
-/** Seconds before a queued Ask goes to a headless fork; "off" disables. */
+/**
+ * Seconds before a queued Ask goes to a headless fork; "off" disables. The
+ * default 0 (with --quiet) sends every Ask straight to a fork and keeps its
+ * line from the session, so an Ask never costs the main session a turn; the
+ * line still arrives when the fork cannot answer it.
+ */
 const FORK_ASKS_AFTER = /^(off|\d+(\.\d+)?)$/.test(
   env.ROUGHDRAFT_PLUGIN_FORK_ASKS_AFTER ?? "",
 )
-  ? (env.ROUGHDRAFT_PLUGIN_FORK_ASKS_AFTER ?? "15")
-  : "15";
+  ? (env.ROUGHDRAFT_PLUGIN_FORK_ASKS_AFTER ?? "0")
+  : "0";
 /** Test hook: stop after this many runs of `listen` (0 = never). */
 const MAX_RUNS = numberFromEnv("ROUGHDRAFT_PLUGIN_MAX_RUNS", 0);
 /** A run this long was healthy: the next failure starts the backoff over. */
@@ -71,8 +76,8 @@ function runListen(cli, sessionId) {
       "--max-seconds",
       String(LISTEN_MAX_SECONDS),
     ];
-    // A busy session leaves an Ask queued; after this long a headless fork
-    // of the session answers it (`claude -p --resume … --fork-session`).
+    // Asks go to a headless fork of the session (`claude -p --resume …
+    // --fork-session`); with 0 at once, without waking the session.
     if (FORK_ASKS_AFTER !== "off") {
       args.push("--fork-asks-after", FORK_ASKS_AFTER);
     }

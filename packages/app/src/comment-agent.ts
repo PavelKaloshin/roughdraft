@@ -266,6 +266,9 @@ export function getThreadAgentStatusLabel(
   if (status === "delegated" && delegatedTo === "fork-process") {
     return "Passed to a forked Claude";
   }
+  if (status === "working" && delegatedTo === "fork-process") {
+    return "A forked Claude is working…";
+  }
   return THREAD_AGENT_STATUS_LABELS[status];
 }
 
