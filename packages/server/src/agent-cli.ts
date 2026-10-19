@@ -164,6 +164,12 @@ export interface ListenObserver {
    * the observer took the event over and the line is not printed.
    */
   observe(event: CommentEvent): boolean;
+  /**
+   * `listen --session` expired: stop taking new work. True while earlier
+   * work still runs; the listener keeps printing events until `close()`
+   * settles, so nothing it must print waits behind that work.
+   */
+  drain?(): boolean;
   /** Called when listening ends; listen exits once it settles. */
   close(): Promise<void>;
 }

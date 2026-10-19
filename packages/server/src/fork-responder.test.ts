@@ -503,6 +503,56 @@ describe("ForkScheduler", () => {
     });
   });
 
+  describe("draining at expiry (listen keeps printing until forks finish)", () => {
+    it("reports running forks, starts no new ones, and leaves new Asks queued for the next round", async () => {
+      const forker = scheduler({ takeOverAsks: true, maxConcurrent: 1 });
+      statuses.c1 = "queued";
+      statuses.c2 = "queued";
+      statuses.c3 = "queued";
+      forker.observe(event({ commentId: "c1", threadRootId: "c1" }));
+      // Waits for the single slot.
+      forker.observe(event({ commentId: "c2", threadRootId: "c2" }));
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(forker.drain()).toBe(true);
+      // An Ask that arrives while draining is not forked and not printed:
+      // it stays queued on the server, which shows it to the next round.
+      expect(
+        forker.observe(event({ commentId: "c3", threadRootId: "c3" })),
+      ).toBe(true);
+      finishFork.get("c1")?.({ kind: "answered" });
+      await forker.close();
+
+      expect(forks.map((forked) => forked.commentId)).toEqual(["c1"]);
+      expect(logs).toEqual([]);
+    });
+
+    it("reports no running forks when nothing was forked", () => {
+      const forker = scheduler({ takeOverAsks: true });
+      expect(forker.drain()).toBe(false);
+    });
+
+    it("prints the notice only when the shared gate allows it", async () => {
+      const allowed = false;
+      const forker = new ForkScheduler({
+        afterMs: 0,
+        maxConcurrent: 2,
+        takeOverAsks: true,
+        announceForks: false,
+        threadStatus: async () => "queued",
+        runFork: async () => ({ kind: "claude-missing" }),
+        claudeMissingNotice: () => allowed,
+        log: (line) => logs.push(line),
+        formatEventLine: (shown) => `[roughdraft] ask ${shown.threadRootId} …`,
+      });
+      forker.observe(event({ commentId: "c1", threadRootId: "c1" }));
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(logs).toEqual(["[roughdraft] ask c1 …"]);
+      expect(allowed).toBe(false);
+    });
+  });
+
   it("stops scheduling on close and waits for running forks", async () => {
     const forker = scheduler();
     statuses.c1 = "queued";

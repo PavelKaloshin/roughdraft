@@ -44,8 +44,18 @@ describe("agent comment events", () => {
     fs.rmSync(projectDir, { recursive: true, force: true });
   });
 
-  function makeApp(options: { agentListenerGraceMs?: number } = {}) {
+  function makeApp(
+    options: { agentListenerGraceMs?: number; agentClock?: () => number } = {},
+  ) {
     return createApp({ staticDirPath: projectDir, ...options }).app;
+  }
+
+  async function waitUntil(condition: () => Promise<boolean>) {
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      if (await condition()) return;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    throw new Error("condition not met within 1s");
   }
 
   const target = () => ({ projectPath: projectDir, path: "plan.md" });
@@ -744,17 +754,21 @@ describe("agent comment events", () => {
   });
 
   it("reports a listener while its long-poll is open and for a grace period after", async () => {
-    const app = makeApp({ agentListenerGraceMs: 50 });
+    // A manual clock drives presence, so the grace window does not depend on
+    // how fast this machine runs the requests.
+    let now = 1_000_000;
+    const app = makeApp({ agentListenerGraceMs: 1_000, agentClock: () => now });
     const status = async () =>
       (await request(app).get("/api/agent/status").query(target())).body;
 
     expect(await status()).toMatchObject({ listening: false });
 
+    // The long-poll stays open until the Ask below ends it.
     const waiting = watchComments(app, {
-      timeoutSeconds: 0.2,
+      timeoutSeconds: 30,
       listener: { id: "listener-1", sessionId: "session-abc" },
     }).then((response) => response);
-    await new Promise((resolve) => setTimeout(resolve, 30));
+    await waitUntil(async () => (await status()).listening === true);
 
     expect(await status()).toMatchObject({
       listening: true,
@@ -768,9 +782,13 @@ describe("agent comment events", () => {
       sessionId: "session-abc",
     });
 
-    await waiting;
+    const delivered = (await waiting).body.events as Array<{
+      commentId: string;
+    }>;
+    expect(delivered.map((event) => event.commentId)).toContain("c1");
+    now += 1_000;
     expect((await status()).listening).toBe(true);
-    await new Promise((resolve) => setTimeout(resolve, 80));
+    now += 1;
     expect((await status()).listening).toBe(false);
   });
 

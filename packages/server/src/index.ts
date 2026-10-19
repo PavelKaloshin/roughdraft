@@ -104,6 +104,11 @@ interface CreateAppOptions {
   remoteDocumentToken?: string;
   /** How long an agent listener stays "present" between long-poll rounds. */
   agentListenerGraceMs?: number;
+  /**
+   * Clock for listener presence and ownership liveness (tests pass a manual
+   * clock so the grace period does not depend on wall time).
+   */
+  agentClock?: () => number;
   /** Live-socket heartbeat interval (tests shorten it). */
   liveSocketHeartbeatMs?: number;
 }
@@ -518,10 +523,12 @@ export function createApp(options: CreateAppOptions = {}): CreateAppResult {
   // status snapshot of every document a tab watches.
   const ownership = new SessionOwnership({
     graceMs: options.agentListenerGraceMs ?? DEFAULT_LISTENER_GRACE_MS,
+    now: options.agentClock,
     onChange: () => agentRegistry.refreshAll(),
   });
   const agentRegistry: AgentRegistry = new AgentRegistry({
     graceMs: options.agentListenerGraceMs,
+    now: options.agentClock,
     decorate: (status) => {
       const owner = ownership.owner(status.documentPath);
       const sessions = ownership.liveSessions();

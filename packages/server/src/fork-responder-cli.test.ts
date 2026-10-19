@@ -84,6 +84,9 @@ process.stdin.on("end", async () => {
     }
   };
   run(ack, "");
+  if (process.env.FAKE_MODE === "slow") {
+    await new Promise((resolve) => setTimeout(resolve, Number(process.env.FAKE_SLOW_MS)));
+  }
   const reply = prompt.match(/^ {3}(\\S+ reply .+ --stdin) <<'EOF'$/m)[1];
   run(reply, "The **code word** is PLUM.\\n");
   process.stdout.write(JSON.stringify({ type: "result", total_cost_usd: 0.25 }));
@@ -555,6 +558,128 @@ describe("headless fork answers", () => {
     ]);
     expect(await threadStatus("c1")).toBe("queued");
   }, 30_000);
+
+  /** PLAN plus more comments (`intent` per id), all unanswered. */
+  function planWith(extra: Record<string, "ask" | "change">): string {
+    const ids = Object.keys(extra);
+    const body = ids
+      .map((id) => `Also {==${id} text==}{>>Question ${id}?<<}{#${id}}.`)
+      .join("\n\n");
+    const meta = ids.flatMap((id) => [
+      `  ${id}:`,
+      "    by: pavel",
+      '    at: "2026-10-18T12:01:00.000Z"',
+      `    intent: ${extra[id]}`,
+    ]);
+    const [head, end] = PLAN.split("\n---\n");
+    return `${head}\n${body}\n\n---\n${end?.trimEnd()}\n${meta.join("\n")}\n`;
+  }
+
+  function postComment(type: string, commentId: string) {
+    return fetch(`http://127.0.0.1:${server.port}/api/review-events`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        projectPath: projectDir,
+        path: "plan.md",
+        type,
+        commentId,
+      }),
+    });
+  }
+
+  async function waitFor<T>(
+    read: () =>
+      | Promise<T | undefined | null | false>
+      | T
+      | undefined
+      | null
+      | false,
+    what: string,
+    timeoutMs = 10_000,
+  ): Promise<T> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const value = await read();
+      if (value) return value;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    throw new Error(`timed out waiting for ${what}`);
+  }
+
+  it("plugin mode: a Change arriving while a fork runs past expiry is printed at once", async () => {
+    const { deps, logs, errors } = makeDeps({
+      FAKE_MODE: "slow",
+      FAKE_SLOW_MS: "6000",
+    });
+    const startedAt = Date.now();
+    let exited = false;
+    const listening = pluginListen(deps).finally(() => {
+      exited = true;
+    });
+
+    await waitFor(
+      // The fork acked c1 and is now "thinking" (FAKE_SLOW_MS).
+      async () => (await threadStatus("c1")) === "working",
+      "the fork to take c1",
+    );
+    // Past --max-seconds 1: the round has expired, the fork still runs.
+    await new Promise((resolve) =>
+      setTimeout(resolve, Math.max(0, startedAt + 1_500 - Date.now())),
+    );
+    fs.writeFileSync(documentPath, planWith({ c3: "change" }));
+    await postComment("comment.change", "c3");
+
+    await waitFor(
+      () => logs.find((line) => line.startsWith("[roughdraft] change c3 ")),
+      "the Change line during the fork",
+      3_000,
+    );
+    // Printed while the fork still runs, past the round's expiry.
+    expect(await threadStatus("c1")).toBe("working");
+    expect(exited).toBe(false);
+
+    expect(await listening).toBe(0);
+    expect(fakeError()).toBe("");
+    expect(errors).toEqual([]);
+    expect(await threadStatus("c1")).toBe("answered");
+    // One line each; the Ask never reached the session.
+    const lines = logs.map((line) => line.split(" ").slice(0, 3).join(" "));
+    expect(lines).toEqual([
+      `[roughdraft] claimed ${documentPath}`,
+      "[roughdraft] change c2",
+      "[roughdraft] change c3",
+    ]);
+  }, 40_000);
+
+  it("plugin mode: an Ask still waiting for a fork slot at expiry is forked by the next round, once", async () => {
+    fs.writeFileSync(documentPath, planWith({ c3: "ask", c4: "ask" }));
+    const { deps, logs, errors } = makeDeps({
+      FAKE_MODE: "slow",
+      FAKE_SLOW_MS: "2500",
+    });
+
+    // Two fork slots: c1 and c3 run, c4 waits and is dropped at expiry.
+    expect(await pluginListen(deps)).toBe(0);
+    expect(fakeError()).toBe("");
+    expect(runArgs()).toHaveLength(2);
+    expect(await threadStatus("c4")).toBe("queued");
+
+    // The wrapper's next round: the server shows c4 again.
+    expect(await pluginListen(deps)).toBe(0);
+
+    expect(fakeError()).toBe("");
+    expect(errors).toEqual([]);
+    expect(runArgs()).toHaveLength(3);
+    for (const id of ["c1", "c3", "c4"]) {
+      expect(await threadStatus(id)).toBe("answered");
+    }
+    expect(aiReplies()).toHaveLength(3);
+    // No Ask line ever reached the session.
+    expect(logs.filter((line) => line.startsWith("[roughdraft] ask "))).toEqual(
+      [],
+    );
+  }, 60_000);
 
   it("answer-fork retries a failed --model fork once with the session model", async () => {
     const { deps, logs, errors } = makeDeps({ FAKE_MODE: "fail-with-model" });
