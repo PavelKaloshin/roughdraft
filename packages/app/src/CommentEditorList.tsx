@@ -761,13 +761,10 @@ function CommentThreadNode({
     : variant === "banner"
       ? "border-[#D2C7B8] bg-[#DED8CE] text-stone-700 dark:border-slate-600 dark:bg-slate-700 dark:text-stone-300"
       : "border-[#D2C7B8] bg-[#DED8CE] text-stone-700 dark:border-slate-600 dark:bg-slate-700 dark:text-stone-300";
+  // Same surface as the selected banner card, in both themes.
   const bodyTone =
-    variant === "banner"
-      ? isSelected
-        ? "bg-white"
-        : isHovered
-          ? "bg-white"
-          : "bg-transparent"
+    variant === "banner" && (isSelected || isHovered)
+      ? "bg-white dark:bg-card"
       : "bg-transparent";
   const treeLineTone =
     variant === "banner"
@@ -1165,7 +1162,10 @@ function CommentThreadNode({
               )}
             >
               <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5">
-                <div className="max-w-full truncate text-xs font-semibold text-slate-900 dark:text-slate-100">
+                <div
+                  data-testid={`comment-${variant}-${comment.id}-author`}
+                  className="max-w-full truncate text-xs font-semibold text-slate-900 dark:text-slate-100"
+                >
                   {authorLabel}
                 </div>
                 {rootIntent ? (
