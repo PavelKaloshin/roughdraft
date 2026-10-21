@@ -550,6 +550,8 @@ export interface ForkSchedulerOptions {
   ) => Promise<AnswerForkOutcome>;
   log: (line: string) => void;
   formatEventLine: (event: CommentEvent) => string;
+  /** Called after this scheduler printed an event's line itself. */
+  onEventPrinted?: (event: CommentEvent) => void;
   /**
    * Every Ask goes to a fork at once (`afterMs` is ignored) and its event
    * line is kept from the session: `observe` returns true, and the listener
@@ -690,7 +692,12 @@ export class ForkScheduler {
     this.options.log(
       `[roughdraft] headless fork for ${event.threadRootId} failed (${reason}); answer it yourself:`,
     );
+    this.printEventLine(event);
+  }
+
+  private printEventLine(event: CommentEvent): void {
     this.options.log(this.options.formatEventLine(event));
+    this.options.onEventPrinted?.(event);
   }
 
   private async start(event: CommentEvent): Promise<void> {
@@ -731,9 +738,7 @@ export class ForkScheduler {
         );
       }
       // Asks the session has not seen yet: show them now, once each.
-      for (const ask of untaken) {
-        this.options.log(this.options.formatEventLine(ask));
-      }
+      for (const ask of untaken) this.printEventLine(ask);
       return;
     }
     if (outcome.kind === "failed") this.handOver(event, outcome.reason);

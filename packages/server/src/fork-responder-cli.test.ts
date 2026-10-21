@@ -660,13 +660,13 @@ describe("headless fork answers", () => {
     });
 
     // Two fork slots: c1 and c3 run, c4 waits and is dropped at expiry.
-    expect(await pluginListen(deps)).toBe(0);
+    expect(await pluginListen(deps, ["--monitor-id", "m1"])).toBe(0);
     expect(fakeError()).toBe("");
     expect(runArgs()).toHaveLength(2);
     expect(await threadStatus("c4")).toBe("queued");
 
     // The wrapper's next round: the server shows c4 again.
-    expect(await pluginListen(deps)).toBe(0);
+    expect(await pluginListen(deps, ["--monitor-id", "m1"])).toBe(0);
 
     expect(fakeError()).toBe("");
     expect(errors).toEqual([]);
@@ -675,11 +675,69 @@ describe("headless fork answers", () => {
       expect(await threadStatus(id)).toBe("answered");
     }
     expect(aiReplies()).toHaveLength(3);
-    // No Ask line ever reached the session.
+    // No Ask line ever reached the session, and the Change only once.
     expect(logs.filter((line) => line.startsWith("[roughdraft] ask "))).toEqual(
       [],
     );
+    expect(
+      logs.filter((line) => line.startsWith("[roughdraft] change c2 ")),
+    ).toHaveLength(1);
   }, 60_000);
+
+  describe("rounds of one plugin monitor (--monitor-id)", () => {
+    const changeLines = (logs: string[]) =>
+      logs.filter((line) => line.startsWith("[roughdraft] change c2 "));
+
+    it("prints a Change the session has not acked yet once per monitor, and again to a new monitor", async () => {
+      const round1 = makeDeps();
+      expect(await pluginListen(round1.deps, ["--monitor-id", "m1"])).toBe(0);
+      expect(changeLines(round1.logs)).toHaveLength(1);
+      expect(await threadStatus("c2")).toBe("queued");
+
+      // Same Claude Code process, next round: nothing new to say.
+      const round2 = makeDeps();
+      expect(await pluginListen(round2.deps, ["--monitor-id", "m1"])).toBe(0);
+      expect(round2.errors).toEqual([]);
+      expect(round2.logs).toEqual([]);
+
+      // A new Claude Code process (resume after exit) has never seen it.
+      const fresh = makeDeps();
+      expect(await pluginListen(fresh.deps, ["--monitor-id", "m2"])).toBe(0);
+      expect(changeLines(fresh.logs)).toHaveLength(1);
+    }, 30_000);
+
+    it("does not print a Change again once the session acked it", async () => {
+      const round1 = makeDeps();
+      expect(await pluginListen(round1.deps, ["--monitor-id", "m1"])).toBe(0);
+      expect(changeLines(round1.logs)).toHaveLength(1);
+      // The session starts editing but has not replied yet.
+      expect(await runCli(["ack", documentPath, "c2"], round1.deps)).toBe(0);
+      expect(await threadStatus("c2")).toBe("working");
+
+      const round2 = makeDeps();
+      expect(await pluginListen(round2.deps, ["--monitor-id", "m1"])).toBe(0);
+      expect(round2.logs).toEqual([]);
+    }, 30_000);
+
+    it("prints an Ask the fork could not answer, and neither prints nor forks it again next round", async () => {
+      const round1 = makeDeps({ FAKE_MODE: "fail" });
+      expect(await pluginListen(round1.deps, ["--monitor-id", "m1"])).toBe(0);
+      expect(
+        round1.logs.filter((line) =>
+          new RegExp(`^\\[roughdraft\\] ask c1 file=${documentPath} `).test(
+            line,
+          ),
+        ),
+      ).toHaveLength(1);
+      const forkRuns = runArgs().length;
+      expect(await threadStatus("c1")).toBe("queued");
+
+      const round2 = makeDeps({ FAKE_MODE: "fail" });
+      expect(await pluginListen(round2.deps, ["--monitor-id", "m1"])).toBe(0);
+      expect(round2.logs).toEqual([]);
+      expect(runArgs()).toHaveLength(forkRuns);
+    }, 30_000);
+  });
 
   it("answer-fork retries a failed --model fork once with the session model", async () => {
     const { deps, logs, errors } = makeDeps({ FAKE_MODE: "fail-with-model" });

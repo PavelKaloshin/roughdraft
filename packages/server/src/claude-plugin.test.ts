@@ -230,11 +230,52 @@ describe("Claude Code plugin scripts", () => {
       });
 
       expect(result).toMatchObject({ code: 0, stdout: "", stderr: "" });
-      expect(calls()).toEqual(
-        Array(3).fill(
-          `listen --session session-1 --quiet --no-start --max-seconds 600 --fork-asks-after 0 --claims-file ${dataDir}/sessions/session-1.json`,
-        ),
-      );
+      const listenArgs = `listen --session session-1 --quiet --no-start --max-seconds 600 --fork-asks-after 0 --claims-file ${dataDir}/sessions/session-1.json --monitor-id `;
+      expect(calls()).toHaveLength(3);
+      for (const call of calls()) {
+        expect(call.startsWith(listenArgs), call).toBe(true);
+      }
+    });
+
+    it("gives every round of one wrapper process the same monitor id, and another process a new one", async () => {
+      fakeCli("exit 0");
+      const env = baseEnv({
+        ...fastLoop,
+        CLAUDE_CODE_SESSION_ID: "session-1",
+        ROUGHDRAFT_PLUGIN_MAX_RUNS: "3",
+      });
+      const monitorIds = () =>
+        calls().map((call) => call.match(/--monitor-id (\S+)/)?.[1]);
+
+      await run(sessionListen, [dataDir], { env });
+      const first = monitorIds();
+      expect(first).toHaveLength(3);
+      expect(first[0]).toMatch(/^[0-9a-f-]{36}$/);
+      expect(new Set(first)).toEqual(new Set([first[0]]));
+
+      // A new Claude Code process (e.g. resumed after exit) runs a new one.
+      await run(sessionListen, [dataDir], { env });
+      const second = monitorIds().slice(3);
+      expect(new Set(second).size).toBe(1);
+      expect(second[0]).not.toBe(first[0]);
+    });
+
+    it("drops --monitor-id for an older roughdraft that rejects it", async () => {
+      fakeCli('case "$*" in *--monitor-id*) exit 2;; esac\nexit 0');
+      const result = await run(sessionListen, [dataDir], {
+        env: baseEnv({
+          ...fastLoop,
+          CLAUDE_CODE_SESSION_ID: "session-1",
+          ROUGHDRAFT_PLUGIN_MAX_RUNS: "3",
+        }),
+      });
+
+      expect(result).toMatchObject({ code: 0, stdout: "" });
+      expect(calls().map((call) => call.includes("--monitor-id"))).toEqual([
+        true,
+        false,
+        false,
+      ]);
     });
 
     it("passes the listener's lines through and nothing else, even when it fails", async () => {

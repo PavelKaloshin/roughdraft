@@ -172,6 +172,11 @@ export interface ListenObserver {
   drain?(): boolean;
   /** Called when listening ends; listen exits once it settles. */
   close(): Promise<void>;
+  /**
+   * Set by `listen --session`: the observer calls it after printing an
+   * event's line itself (an Ask a fork gave back).
+   */
+  onEventPrinted?: (event: CommentEvent) => void;
 }
 
 export async function runListen(

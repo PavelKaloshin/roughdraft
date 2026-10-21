@@ -4,6 +4,7 @@
 // which in --quiet mode is one line per event or ownership change.
 // Usage: session-listen.mjs <CLAUDE_PLUGIN_DATA>
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import {
   discoverSessionId,
   findHostPid,
@@ -47,8 +48,19 @@ const MAX_RUNS = numberFromEnv("ROUGHDRAFT_PLUGIN_MAX_RUNS", 0);
 /** A run this long was healthy: the next failure starts the backoff over. */
 const HEALTHY_RUN_MS = 30_000;
 
+/**
+ * One id for this wrapper, i.e. this Claude Code process, passed to every
+ * round: the server then does not print a line again that an earlier round
+ * already printed to this process. A new process (resume after exit) gets a
+ * new id, and with it every unanswered event again.
+ */
+const MONITOR_ID = randomUUID();
+/** USAGE_ERROR of `roughdraft`: an older CLI without --monitor-id. */
+const USAGE_ERROR = 2;
+
 const dataDir = process.argv[2] ?? "";
 let child = null;
+let sendMonitorId = true;
 let stopping = false;
 
 function stop() {
@@ -84,6 +96,7 @@ function runListen(cli, sessionId) {
     if (dataDir) {
       args.push("--claims-file", sessionFilePath(dataDir, sessionId));
     }
+    if (sendMonitorId) args.push("--monitor-id", MONITOR_ID);
     child = spawn(cli, args, { stdio: ["ignore", "inherit", "ignore"] });
     child.on("error", () => resolve(127));
     child.on("exit", (code) => resolve(code ?? 1));
@@ -118,6 +131,12 @@ async function main() {
     if (stopping) return;
 
     const ranFor = Date.now() - startedAt;
+    if (sendMonitorId && code === USAGE_ERROR && ranFor < 1000) {
+      // An older roughdraft rejects the flag: listen without it (lines may
+      // then repeat across rounds, as before).
+      sendMonitorId = false;
+      continue;
+    }
     if (ranFor >= HEALTHY_RUN_MS) backoff = BACKOFF_MIN_MS;
     // A clean expiry re-arms at once; an instant exit is not "clean".
     if (code === 0 && ranFor >= 1000) continue;

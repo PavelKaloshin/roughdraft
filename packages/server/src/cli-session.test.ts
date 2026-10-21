@@ -515,6 +515,50 @@ describe("session CLI commands", () => {
     expect(readClaims().sort()).toEqual([notesPath, planPath].sort());
   });
 
+  it("prints each line once per monitor, and again after a server restart", async () => {
+    const port = server.port;
+    const { deps } = makeDeps();
+    await runCli(
+      ["claim", planPath, "--session", "session-a", "--quiet"],
+      deps,
+    );
+    const round = async (monitorId: string) => {
+      const listener = makeDeps();
+      const code = await runCli(
+        [
+          "listen",
+          "--session",
+          "session-a",
+          "--quiet",
+          "--no-start",
+          "--max-seconds",
+          "0.8",
+          "--monitor-id",
+          monitorId,
+        ],
+        listener.deps,
+      );
+      expect(listener.errors).toEqual([]);
+      expect(code).toBe(0);
+      return listener.logs.map((line) => line.split(" ").slice(0, 3).join(" "));
+    };
+
+    expect(await round("m1")).toEqual([
+      `[roughdraft] claimed ${planPath}`,
+      "[roughdraft] ask c1",
+    ]);
+    expect(await round("m1")).toEqual([]);
+
+    // The server forgets what it printed: better twice than never.
+    await server.close();
+    server = await startServer(projectA, port);
+    await runCli(
+      ["claim", planPath, "--session", "session-a", "--quiet"],
+      deps,
+    );
+    expect(await round("m1")).toContain("[roughdraft] ask c1");
+  });
+
   it("lists live sessions", async () => {
     const listener = makeDeps();
     const listening = runCli(

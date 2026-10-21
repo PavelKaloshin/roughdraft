@@ -32,6 +32,7 @@ const SESSION_BATCH_WINDOW_SECONDS = 0.1;
 const RETRY_MIN_DELAY_MS = 500;
 const RETRY_MAX_DELAY_MS = 5_000;
 const CLAIM_TIMEOUT_MS = 5_000;
+const PRINTED_TIMEOUT_MS = 2_000;
 
 /** Resolves the server to talk to, or null when none is running. */
 export type ServerLocator = () => Promise<string | null>;
@@ -176,6 +177,12 @@ export async function runSessionListen(
     sessionId: string;
     claimsFile?: string;
     title?: string;
+    /**
+     * The long-lived process that relays this listener's lines to the
+     * session (the plugin's wrapper, one per Claude Code process). Lines
+     * already printed under this id are not printed again by later rounds.
+     */
+    monitorId?: string;
     cwd: string;
     maxSeconds: number;
     quiet: boolean;
@@ -248,6 +255,7 @@ export async function runSessionListen(
         afterSequence: cursor,
         afterNotice: noticeCursor,
         ...(instanceId ? { instanceId } : {}),
+        ...(options.monitorId ? { monitorId: options.monitorId } : {}),
         timeoutSeconds,
         batchWindowSeconds: SESSION_BATCH_WINDOW_SECONDS,
       }),
@@ -266,6 +274,48 @@ export async function runSessionListen(
     }
     return (await response.json()) as SessionListenPayload;
   };
+
+  // `--monitor-id`: tell the server which lines reached the session, so the
+  // wrapper's next round skips them. Best effort: a report that does not
+  // arrive means a line is printed again, never that one is lost.
+  const eventInstance = new WeakMap<ReviewEvent, string>();
+  const reports = new Set<Promise<void>>();
+  const reportPrinted = (
+    serverInstance: string | undefined,
+    sequences: number[],
+    printedNotices: number,
+  ) => {
+    const url = serverUrl;
+    if (!options.monitorId || !url || !serverInstance) return;
+    if (sequences.length === 0 && printedNotices === 0) return;
+    const report = io
+      .fetchImpl(new URL("/api/sessions/printed", url), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sessionId: options.sessionId,
+          monitorId: options.monitorId,
+          instanceId: serverInstance,
+          sequences,
+          noticeCursor: printedNotices,
+        }),
+        signal: AbortSignal.timeout(PRINTED_TIMEOUT_MS),
+      })
+      .then(
+        () => {},
+        () => {},
+      );
+    reports.add(report);
+    void report.finally(() => reports.delete(report));
+  };
+  const settleReports = async () => {
+    while (reports.size > 0) await Promise.all([...reports]);
+  };
+  if (options.observer) {
+    // Lines the fork scheduler prints itself (an Ask a fork gave back).
+    options.observer.onEventPrinted = (event) =>
+      reportPrinted(eventInstance.get(event), [event.sequence], 0);
+  }
 
   const sleepUntilRetry = async () => {
     if (draining) {
@@ -304,6 +354,7 @@ export async function runSessionListen(
         if (!options.quiet)
           io.log(`[roughdraft] listen stopped: ${error.message}`);
         await options.observer?.close();
+        await settleReports();
         return 1;
       }
       // The server went away or restarted (maybe on another port), or the
@@ -369,8 +420,10 @@ export async function runSessionListen(
     // The server's cursor is authoritative (it starts over with the process).
     noticeCursor = payload.noticeCursor;
 
+    const printed: number[] = [];
     for (const event of payload.events) {
       cursor = Math.max(cursor, event.sequence);
+      if (payload.instanceId) eventInstance.set(event, payload.instanceId);
       // With `--quiet --fork-asks-after 0` the fork observer takes Asks
       // over: their lines reach the session only if no fork answers them.
       if (
@@ -380,11 +433,18 @@ export async function runSessionListen(
         continue;
       }
       io.log(formatSessionEventLine(event, cli));
+      printed.push(event.sequence);
     }
+    reportPrinted(
+      payload.instanceId,
+      printed,
+      payload.notices.length > 0 ? noticeCursor : 0,
+    );
     cursor = Math.max(cursor, payload.nextSequence - 1);
   }
 
   await options.observer?.close();
+  await settleReports();
   if (!options.quiet) {
     io.log(
       `[roughdraft] listen expired; re-arm with: ${cli} listen --session ${shellQuote(options.sessionId)}`,
@@ -429,6 +489,8 @@ export class SessionForkObserver implements ListenObserver {
     this.noticeShown = options.claudeMissingNoticed === true;
   }
 
+  /** Set by the listener: an event line this observer printed itself. */
+  onEventPrinted?: (event: CommentEvent) => void;
   private draining = false;
   /** Found out once for all documents: `claude` is not runnable. */
   private claudeMissing = false;
@@ -495,6 +557,7 @@ export class SessionForkObserver implements ListenObserver {
           })),
       log: io.log,
       formatEventLine: (event) => formatSessionEventLine(event, cli),
+      onEventPrinted: (event) => this.onEventPrinted?.(event),
       // Each line wakes the session: say it once per session, not once per
       // document or per listen round.
       claudeMissingNotice: () => {
@@ -788,6 +851,12 @@ export function printSessionCommandHelp(
       "                           (re)connect and kept in sync with claimed/released lines",
     );
     log("  --title <text>           Session name shown in Roughdraft");
+    log(
+      "  --monitor-id <id>        Id of the process relaying the lines to the session;",
+    );
+    log(
+      "                           a later listen with the same id skips lines already printed",
+    );
     log("  --quiet                  Print only events and ownership changes");
     log(
       "  --fork-asks-after <s>    Answer an Ask still queued after <s> seconds from a",
@@ -861,7 +930,7 @@ export function printSessionCommandHelp(
 
 export const SESSION_COMMAND_USAGE = {
   listenSession:
-    "Usage: roughdraft listen --session <id> [--claims-file <path>] [--title <text>] [--quiet] [--no-start] [--max-seconds <seconds>]",
+    "Usage: roughdraft listen --session <id> [--claims-file <path>] [--title <text>] [--monitor-id <id>] [--quiet] [--no-start] [--max-seconds <seconds>]",
   claim:
     "Usage: roughdraft claim <file.md> [--session <id>] [--force] [--claims-file <path>] [--no-start] [--quiet] [--json]",
   sessions: "Usage: roughdraft sessions [--json]",
@@ -879,6 +948,7 @@ interface SessionArgs {
   session?: string;
   claimsFile?: string;
   title?: string;
+  monitorId?: string;
   maxSeconds?: number;
   forkAsksAfter?: number;
   claude?: string;
@@ -890,6 +960,7 @@ type SessionStringFlag =
   | "session"
   | "claimsFile"
   | "title"
+  | "monitorId"
   | "claude"
   | "stateDir"
   | "stateFile";
@@ -909,6 +980,7 @@ const SESSION_VALUE_FLAGS: Record<
   "--session": "session",
   "--claims-file": "claimsFile",
   "--title": "title",
+  "--monitor-id": "monitorId",
   "--max-seconds": "maxSeconds",
   "--fork-asks-after": "forkAsksAfter",
   "--claude": "claude",
@@ -1113,6 +1185,9 @@ export async function runSessionCommand(
       sessionId,
       ...(claimsFile ? { claimsFile } : {}),
       ...(options.title ? { title: options.title } : {}),
+      ...(options.monitorId?.trim()
+        ? { monitorId: options.monitorId.trim() }
+        : {}),
       cwd: deps.cwd,
       maxSeconds: options.maxSeconds ?? DEFAULT_SESSION_LISTEN_MAX_SECONDS,
       quiet: options.quiet,

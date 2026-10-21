@@ -16,6 +16,7 @@ import type { SessionOwnership } from "./session-ownership.js";
  * - `POST /api/sessions/release` give a document up
  * - `POST /api/sessions/listen`  long-poll: events for every owned document,
  *   plus claimed/released notices
+ * - `POST /api/sessions/printed` which of those lines a monitor printed
  * - `GET  /api/sessions`         live sessions and what they own
  */
 
@@ -39,6 +40,59 @@ export interface SessionRoutesDeps {
     projectPath: string,
     relativePath: string,
   ) => string | null;
+}
+
+const MAX_PRINTED_SEQUENCES = 2_000;
+const MAX_PRINTED_SESSIONS = 500;
+
+interface PrintedRecord {
+  monitorId: string;
+  /** Event sequences of this server process printed to the session. */
+  sequences: Set<number>;
+  /** Highest ownership notice printed. */
+  noticeCursor: number;
+}
+
+/**
+ * What each session's monitor (the plugin's wrapper: one per Claude Code
+ * process, `listen --monitor-id`) printed, so its next `listen` round, whose
+ * cursor starts over, does not wake the session with the same lines again.
+ * One monitor per session: a different one (a new Claude Code process) gets
+ * everything again. In memory only (ADR 0004): after a server restart lines
+ * are printed again rather than lost.
+ */
+export class PrintedLines {
+  private readonly bySession = new Map<string, PrintedRecord>();
+
+  get(sessionId: string, monitorId: string): PrintedRecord | null {
+    const record = this.bySession.get(sessionId);
+    return record?.monitorId === monitorId ? record : null;
+  }
+
+  record(
+    sessionId: string,
+    monitorId: string,
+    sequences: number[],
+    noticeCursor: number,
+  ): void {
+    let record = this.get(sessionId, monitorId);
+    if (!record) {
+      record = { monitorId, sequences: new Set(), noticeCursor: 0 };
+      this.bySession.delete(sessionId);
+      this.bySession.set(sessionId, record);
+      if (this.bySession.size > MAX_PRINTED_SESSIONS) {
+        const oldest = this.bySession.keys().next().value;
+        if (oldest !== undefined) this.bySession.delete(oldest);
+      }
+    }
+    for (const sequence of sequences) record.sequences.add(sequence);
+    // Oldest first: forgetting one prints it again at worst.
+    for (const sequence of record.sequences) {
+      if (record.sequences.size <= MAX_PRINTED_SEQUENCES) break;
+      record.sequences.delete(sequence);
+    }
+    record.noticeCursor = Math.max(record.noticeCursor, noticeCursor);
+  }
 }
 
 function text(value: unknown, max = 1000): string | null {
@@ -69,6 +123,7 @@ export function registerSessionRoutes(
   deps: SessionRoutesDeps,
 ): void {
   const { ownership, reviewEvents, instanceId } = deps;
+  const printedLines = new PrintedLines();
 
   const targetFor = (absolutePath: string) => ({
     absolutePath,
@@ -135,9 +190,41 @@ export function registerSessionRoutes(
     res.json({ sessions: ownership.liveSessions(), instanceId });
   });
 
+  app.post("/api/sessions/printed", (req, res) => {
+    const sessionId = sessionFromBody(req, res);
+    if (!sessionId) return;
+    const monitorId = text(req.body?.monitorId, 200);
+    if (!monitorId) {
+      res.status(400).json({ error: "monitorId is required" });
+      return;
+    }
+    // Sequences of another server process name other events here.
+    if (text(req.body?.instanceId, 200) !== instanceId) {
+      res.json({ recorded: false, instanceId });
+      return;
+    }
+    const sequences: number[] = Array.isArray(req.body?.sequences)
+      ? req.body.sequences
+          .slice(0, MAX_PRINTED_SEQUENCES)
+          .filter(
+            (value: unknown): value is number =>
+              typeof value === "number" && Number.isInteger(value),
+          )
+      : [];
+    printedLines.record(
+      sessionId,
+      monitorId,
+      sequences,
+      Math.max(0, numberOr(req.body?.noticeCursor, 0)),
+    );
+    res.json({ recorded: true, instanceId });
+  });
+
   app.post("/api/sessions/listen", async (req, res) => {
     const sessionId = sessionFromBody(req, res);
     if (!sessionId) return;
+    const monitorId = text(req.body?.monitorId, 200);
+    const printed = monitorId ? printedLines.get(sessionId, monitorId) : null;
     const listenerId = text(req.body?.listenerId, 200) ?? `anon-${sessionId}`;
     const meta = {
       title: text(req.body?.title, MAX_TITLE_CHARS),
@@ -181,7 +268,11 @@ export function registerSessionRoutes(
       }
     }
 
-    let afterNotice = Math.max(0, numberOr(req.body?.afterNotice, 0));
+    let afterNotice = Math.max(
+      0,
+      numberOr(req.body?.afterNotice, 0),
+      printed?.noticeCursor ?? 0,
+    );
     // The session record was forgotten (it was dead and owned nothing).
     if (afterNotice > ownership.noticeCursor(sessionId)) afterNotice = 0;
 
@@ -210,6 +301,8 @@ export function registerSessionRoutes(
       const replay =
         isCommentEvent(event) && ownership.needsReplay(sessionId, documentPath);
       if (event.sequence <= afterSequence && !replay) return false;
+      // Printed to this monitor by an earlier round.
+      if (!replay && printed?.sequences.has(event.sequence)) return false;
       if (!isCommentEvent(event)) return true;
       if (deps.isHandled(event)) return false;
       return isOpenThread(event);
