@@ -1,0 +1,459 @@
+import { createContext, useContext } from "react";
+import {
+  buildCommentThreads,
+  type CriticAskModel,
+  type CriticComment,
+  type CriticCommentIntent,
+  flattenCommentThreads,
+  isCriticCommentResolved,
+} from "./critic-markup";
+
+/**
+ * Client-side contract for talking to a Claude Code session through comment
+ * threads. The server owns the transient state (who is listening, how far each
+ * thread got); the Markdown file owns the thread content.
+ */
+
+/**
+ * Server-side thread lifecycle, in order: stored without a listener
+ * (`pending`), received by a listening session (`queued`), handed to a
+ * subagent (`delegated`), acknowledged (`working`), replied to.
+ */
+export type AgentThreadStatus =
+  | "pending"
+  | "queued"
+  | "delegated"
+  | "working"
+  | "answered"
+  | "applied";
+
+export const AGENT_THREAD_STATUSES: readonly AgentThreadStatus[] = [
+  "pending",
+  "queued",
+  "delegated",
+  "working",
+  "answered",
+  "applied",
+];
+
+export type CommentEventType =
+  | "comment.ask"
+  | "comment.change"
+  | "comment.followup";
+
+/** Server timestamps for a thread (ISO 8601). */
+export interface AgentThreadTiming {
+  /** When the thread entered its current status. */
+  since?: string;
+  /** When the user's latest Ask/Change/follow-up reached the server. */
+  requestedAt?: string;
+  /**
+   * Who a `delegated` thread went to: absent for a subagent of the session,
+   * `fork-process` for a headless fork the listener started while the
+   * session was busy.
+   */
+  delegatedTo?: "fork-process";
+}
+
+export interface AgentStatusSnapshot {
+  listening: boolean;
+  listenerCount: number;
+  sessionId?: string;
+  threads: Record<string, AgentThreadStatus>;
+  /** Absent from older servers. */
+  threadDetails?: Record<string, AgentThreadTiming>;
+  /**
+   * The Claude Code session that owns the document (ADR 0007): only it
+   * receives the document's comments. Null when unowned; absent from older
+   * servers.
+   */
+  owner?: AgentSessionOwner | null;
+  /** Live sessions the document can be connected to. */
+  sessions?: AgentSessionSummary[];
+}
+
+export interface AgentSessionOwner {
+  sessionId: string;
+  title?: string;
+  cwd?: string;
+  live: boolean;
+  lastActiveAt?: string;
+}
+
+export interface AgentSessionSummary {
+  sessionId: string;
+  title?: string;
+  cwd?: string;
+  /** ISO 8601. */
+  lastActiveAt: string;
+  /** Absolute paths of the documents the session owns. */
+  documents: string[];
+}
+
+export const SETUP_CLAUDE_COMMAND = "roughdraft setup claude";
+
+export function formatShortSessionId(sessionId: string) {
+  return sessionId.slice(0, 8);
+}
+
+/** "auth refactor" or the short id. */
+export function getSessionName(session: { sessionId: string; title?: string }) {
+  return session.title?.trim() || formatShortSessionId(session.sessionId);
+}
+
+/** Last path segment of a session's folder. */
+export function getSessionFolderName(cwd: string | undefined) {
+  if (!cwd) return null;
+  const trimmed = cwd.replace(/[\\/]+$/, "");
+  return trimmed.split(/[\\/]/).at(-1) || trimmed || null;
+}
+
+function isSameOrInside(folder: string, documentPath: string) {
+  const base = folder.replace(/[\\/]+$/, "");
+  return documentPath === base || documentPath.startsWith(`${base}/`);
+}
+
+/**
+ * Sessions for the "Connect session" menu: ones working in the document's
+ * folder (or above it) first, then by most recent activity.
+ */
+export function sortSessionsForDocument(
+  sessions: readonly AgentSessionSummary[],
+  documentPath: string | null,
+): AgentSessionSummary[] {
+  const local = (session: AgentSessionSummary) =>
+    documentPath && session.cwd && isSameOrInside(session.cwd, documentPath)
+      ? 0
+      : 1;
+  return [...sessions].sort(
+    (a, b) =>
+      local(a) - local(b) || b.lastActiveAt.localeCompare(a.lastActiveAt),
+  );
+}
+
+export function isSessionInDocumentFolder(
+  session: { cwd?: string },
+  documentPath: string | null,
+) {
+  return Boolean(
+    documentPath && session.cwd && isSameOrInside(session.cwd, documentPath),
+  );
+}
+
+export interface CommentEventResult {
+  duplicate: boolean;
+  agent: { listening: boolean; sessionId?: string };
+}
+
+export type CommentComposerMode = "comment" | CriticCommentIntent;
+
+export const COMMENT_COMPOSER_MODES: readonly CommentComposerMode[] = [
+  "comment",
+  "ask",
+  "change",
+];
+
+export const COMMENT_COMPOSER_MODE_LABELS: Record<CommentComposerMode, string> =
+  {
+    comment: "Comment",
+    ask: "Ask",
+    change: "Change",
+  };
+
+/** Who answers an Ask (RFM `model`), in picker order; `fast` is the default. */
+export const ASK_MODELS: readonly CriticAskModel[] = [
+  "fast",
+  "balanced",
+  "session",
+];
+
+export const ASK_MODEL_LABELS: Record<CriticAskModel, string> = {
+  fast: "Fast",
+  balanced: "Balanced",
+  session: "Session",
+};
+
+export const ASK_MODEL_HINTS: Record<CriticAskModel, string> = {
+  fast: "A fast small model (Haiku) answers in a few seconds.",
+  balanced: "A mid-size model (Sonnet) answers; a little slower.",
+  session: "Your session's own model answers; slowest, most capable.",
+};
+
+const COMPOSER_MODE_STORAGE_KEY = "roughdraft.commentComposerMode";
+
+export function readComposerModePreference(): CommentComposerMode {
+  try {
+    const stored = window.localStorage.getItem(COMPOSER_MODE_STORAGE_KEY);
+    return stored === "ask" || stored === "change" ? stored : "comment";
+  } catch {
+    return "comment";
+  }
+}
+
+export function writeComposerModePreference(mode: CommentComposerMode) {
+  try {
+    window.localStorage.setItem(COMPOSER_MODE_STORAGE_KEY, mode);
+  } catch {
+    // Storage can be unavailable (private mode, blocked site data).
+  }
+}
+
+/** Which event, if any, submitting a new comment should send to the agent. */
+export function getCommentSubmitEventType({
+  isRoot,
+  intent,
+  rootIntent,
+  authorType,
+}: {
+  isRoot: boolean;
+  /** The mode chosen in the composer, for a new root comment. */
+  intent?: CommentComposerMode;
+  /** The intent of the thread root, for a reply. */
+  rootIntent?: CriticCommentIntent;
+  authorType?: CriticComment["authorType"];
+}): CommentEventType | null {
+  if (isRoot) {
+    if (intent === "ask") return "comment.ask";
+    if (intent === "change") return "comment.change";
+    return null;
+  }
+  if (authorType === "ai") return null;
+  return rootIntent ? "comment.followup" : null;
+}
+
+/** An unresolved Ask/Change thread in the document. */
+export interface OpenAgentThread {
+  rootId: string;
+  intent: CriticCommentIntent;
+  /** The thread's latest comment (the root itself when it has no replies). */
+  latestCommentId: string;
+  latestCommentIsFromAgent: boolean;
+}
+
+export function getOpenAgentThreads(
+  comments: Iterable<CriticComment>,
+): OpenAgentThread[] {
+  const threads: OpenAgentThread[] = [];
+  for (const thread of buildCommentThreads(comments)) {
+    const root = thread.comment;
+    if (!root.intent || isCriticCommentResolved(root)) continue;
+    const latest = flattenCommentThreads([thread]).at(-1) ?? root;
+    threads.push({
+      rootId: root.id,
+      intent: root.intent,
+      latestCommentId: latest.id,
+      latestCommentIsFromAgent: latest.authorType === "ai",
+    });
+  }
+  return threads;
+}
+
+export function isHandledThreadStatus(
+  status: AgentThreadStatus | ThreadAgentDisplayStatus | null | undefined,
+) {
+  return status === "answered" || status === "applied";
+}
+
+export type ThreadAgentDisplayStatus = "sending" | AgentThreadStatus;
+
+export const THREAD_AGENT_STATUS_LABELS: Record<
+  ThreadAgentDisplayStatus,
+  string
+> = {
+  sending: "Sending to Claude…",
+  pending: "Waiting for a Claude session",
+  queued: "Queued in Claude's session",
+  delegated: "Passed to a subagent",
+  working: "Claude is working…",
+  answered: "Answered",
+  applied: "Applied",
+};
+
+/**
+ * `pending` with a session listening means the session has not polled yet
+ * (between `listen` rounds, or an MCP agent between waits).
+ */
+export function getThreadAgentStatusLabel(
+  status: ThreadAgentDisplayStatus,
+  {
+    listening,
+    delegatedTo,
+  }: { listening: boolean; delegatedTo?: AgentThreadTiming["delegatedTo"] },
+) {
+  if (status === "pending" && listening) {
+    return "Waiting for Claude to pick it up";
+  }
+  if (status === "delegated" && delegatedTo === "fork-process") {
+    return "Passed to a forked Claude";
+  }
+  if (status === "working" && delegatedTo === "fork-process") {
+    return "A forked Claude is working…";
+  }
+  return THREAD_AGENT_STATUS_LABELS[status];
+}
+
+/** Statuses that are still waiting on Claude: they show a live timer. */
+export function isActiveThreadStatus(
+  status: ThreadAgentDisplayStatus | null | undefined,
+) {
+  return (
+    status === "pending" ||
+    status === "queued" ||
+    status === "delegated" ||
+    status === "working"
+  );
+}
+
+/** After this long in `queued`, the session is busy with a long step. */
+export const QUEUED_BUSY_HINT_AFTER_MS = 60_000;
+export const QUEUED_BUSY_HINT =
+  "Claude is busy; it will answer after its current step";
+
+export function formatAgentElapsed(ms: number) {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  if (totalMinutes < 60) return `${totalMinutes}m ${totalSeconds % 60}s`;
+  return `${Math.floor(totalMinutes / 60)}h ${totalMinutes % 60}m`;
+}
+
+type SummaryBucket = AgentThreadStatus | "forked";
+
+const SUMMARY_PARTS: ReadonlyArray<[SummaryBucket, string]> = [
+  ["queued", "queued"],
+  ["delegated", "with a subagent"],
+  ["forked", "with a forked Claude"],
+  ["working", "working"],
+];
+
+/**
+ * Header summary of threads a session has picked up, e.g. "2 queued · 1
+ * working". `openThreadIds` limits it to threads still open in the document
+ * (the server keeps a thread the user resolved locally).
+ */
+export function summarizeAgentThreads(
+  threads: Record<string, AgentThreadStatus>,
+  openThreadIds?: ReadonlySet<string> | null,
+  threadDetails?: Record<string, AgentThreadTiming>,
+): string | null {
+  const counts = new Map<SummaryBucket, number>();
+  for (const [id, status] of Object.entries(threads)) {
+    if (openThreadIds && !openThreadIds.has(id)) continue;
+    const bucket: SummaryBucket =
+      status === "delegated" &&
+      threadDetails?.[id]?.delegatedTo === "fork-process"
+        ? "forked"
+        : status;
+    counts.set(bucket, (counts.get(bucket) ?? 0) + 1);
+  }
+  const parts = SUMMARY_PARTS.flatMap(([status, label]) => {
+    const count = counts.get(status) ?? 0;
+    return count > 0 ? [`${count} ${label}`] : [];
+  });
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
+
+/**
+ * The status line shown on an Ask/Change thread. The live server state wins;
+ * without it (no event this server session, or after a restart) a thread whose
+ * latest comment is from the agent still reads as answered/applied.
+ */
+export function getThreadAgentDisplayStatus({
+  intent,
+  resolved,
+  sending,
+  serverStatus,
+  latestCommentIsFromAgent,
+}: {
+  intent?: CriticCommentIntent;
+  resolved: boolean;
+  sending: boolean;
+  serverStatus?: AgentThreadStatus;
+  latestCommentIsFromAgent: boolean;
+}): ThreadAgentDisplayStatus | null {
+  if (!intent || resolved) return null;
+  if (sending) return "sending";
+  if (serverStatus) return serverStatus;
+  if (latestCommentIsFromAgent) {
+    return intent === "change" ? "applied" : "answered";
+  }
+  return null;
+}
+
+function quoteShellArgument(value: string) {
+  if (/^[A-Za-z0-9_./:@%+=,-]+$/.test(value)) return value;
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+export function buildListenCommand(absolutePath: string) {
+  return `roughdraft listen ${quoteShellArgument(absolutePath)}`;
+}
+
+export interface CommentAgentThreadState {
+  /** An event for this thread is being saved/sent right now. */
+  sending: boolean;
+  /** The last event was accepted while no Claude session was listening. */
+  undelivered: boolean;
+  /** The last event could not be sent. */
+  error: string | null;
+}
+
+export interface CommentAgentContextValue {
+  /** False outside a document backed by the local server. */
+  available: boolean;
+  status: AgentStatusSnapshot | null;
+  /** Header summary such as "2 queued · 1 working", or null. */
+  threadSummary: string | null;
+  /** Some event was accepted while no session listened and is still waiting. */
+  hasUndeliveredEvents: boolean;
+  listenCommand: string | null;
+  showResolved: boolean;
+  setShowResolved: (show: boolean) => void;
+  getThreadState: (threadRootId: string) => CommentAgentThreadState;
+  /**
+   * Called after a new comment was submitted. Waits for the document save to
+   * land on disk, then posts the event exactly once per comment.
+   */
+  submitCommentEvent: (input: {
+    type: CommentEventType;
+    commentId: string;
+    threadRootId: string;
+  }) => void;
+  retryThread: (threadRootId: string) => void;
+  /** Absolute path of the document, for sorting sessions by folder. */
+  documentAbsolutePath?: string | null;
+  /**
+   * Make a live session the document's owner (ADR 0007). Absent when the
+   * backend cannot reassign.
+   */
+  connectSession?: (sessionId: string) => Promise<void>;
+}
+
+const idleThreadState: CommentAgentThreadState = {
+  sending: false,
+  undelivered: false,
+  error: null,
+};
+
+export const defaultCommentAgentContext: CommentAgentContextValue = {
+  available: false,
+  status: null,
+  threadSummary: null,
+  hasUndeliveredEvents: false,
+  listenCommand: null,
+  showResolved: false,
+  setShowResolved: () => {},
+  getThreadState: () => idleThreadState,
+  submitCommentEvent: () => {},
+  retryThread: () => {},
+};
+
+export const CommentAgentContext = createContext<CommentAgentContextValue>(
+  defaultCommentAgentContext,
+);
+
+export function useCommentAgent() {
+  return useContext(CommentAgentContext);
+}
+
+export { idleThreadState };

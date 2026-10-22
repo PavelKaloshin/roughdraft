@@ -38,6 +38,27 @@ export async function openMarkdownFile(
   await page.goto(`/?${params.toString()}`);
 }
 
+/**
+ * Stop the tab from hearing about file changes on disk, so a test can
+ * exercise the save-conflict path. File changes arrive on the tab's live
+ * WebSocket; every other channel on it keeps working.
+ */
+export async function blockMarkdownFileEvents(page: Page) {
+  await page.routeWebSocket("**/api/live**", (socket) => {
+    const server = socket.connectToServer();
+    socket.onMessage((message) => {
+      try {
+        const parsed = JSON.parse(String(message)) as { channel?: unknown };
+        if (parsed.channel === "markdown-file") return;
+      } catch {
+        // Not a channel message; pass it through.
+      }
+      server.send(message);
+    });
+    server.onMessage((message) => socket.send(message));
+  });
+}
+
 export function codeEditor(page: Page) {
   return page.getByTestId("markdown-code-editor").locator(".cm-content");
 }

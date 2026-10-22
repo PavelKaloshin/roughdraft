@@ -2,6 +2,7 @@ import {
   buildCommentThreads,
   type CriticComment,
   flattenCommentThreads,
+  getCommentDescendantIds,
 } from "./critic-markup";
 
 interface CommentAnchorMeasurement {
@@ -199,7 +200,15 @@ export function buildCommentThreadRailItems(
   const items: CommentThreadRailItem[] = [];
 
   for (const group of groups) {
-    const visibleComments = group.commentIds
+    // Replies are found through `parentCommentId`, not only the anchor's
+    // mark: replies written to endmatter (e.g. by an agent) are not in it.
+    const threadIds = new Set(group.commentIds);
+    for (const commentId of group.commentIds) {
+      for (const descendantId of getCommentDescendantIds(commentId, comments)) {
+        threadIds.add(descendantId);
+      }
+    }
+    const visibleComments = [...threadIds]
       .map((commentId) => comments.get(commentId))
       .filter((comment): comment is CriticComment => Boolean(comment));
 

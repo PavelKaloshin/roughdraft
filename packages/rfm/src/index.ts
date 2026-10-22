@@ -26,6 +26,29 @@ export interface RfmValidationResult {
 }
 
 export type RfmReviewItemKind = "comment" | "suggestion" | "reply";
+/**
+ * What a root comment asks of an agent. `comment` (or no intent) is a normal
+ * review note; `ask` requests an answer in the thread without editing the
+ * document; `change` requests an edit to the document.
+ */
+export type RfmCommentIntent = "comment" | "ask" | "change";
+export const RFM_COMMENT_INTENTS: readonly RfmCommentIntent[] = [
+  "comment",
+  "ask",
+  "change",
+];
+/**
+ * Which model answers an `ask` thread when a headless fork of the session
+ * answers it: `fast` (the default, also when absent) is a small fast model,
+ * `balanced` a mid-size one, `session` the session's own model.
+ */
+export type RfmAskModel = "fast" | "balanced" | "session";
+export const RFM_ASK_MODELS: readonly RfmAskModel[] = [
+  "fast",
+  "balanced",
+  "session",
+];
+export const RFM_DEFAULT_ASK_MODEL: RfmAskModel = "fast";
 export type RfmSuggestionKind = "addition" | "deletion" | "substitution";
 
 export interface RfmReviewItem {
@@ -36,6 +59,13 @@ export interface RfmReviewItem {
   author: string | null;
   createdAt: string | null;
   status: string | null;
+  /** Only set on root comments whose metadata carries a known `intent`. */
+  intent?: RfmCommentIntent;
+  /**
+   * Only set on root `ask` comments whose metadata carries a known `model`.
+   * Absent means `fast`.
+   */
+  model?: RfmAskModel;
   text: string;
   originalText?: string;
   replacementText?: string;
@@ -133,13 +163,16 @@ interface YamlMetadataEntry {
   re?: string;
   status?: string;
   resolved?: string;
+  intent?: string;
+  model?: string;
   [key: string]: unknown;
 }
 
 interface RoughdraftEndmatter {
   comments: Map<string, YamlMetadataEntry>;
   suggestions: Map<string, YamlMetadataEntry>;
-  data: Record<string, unknown> | null;
+  /** Endmatter YAML text (after the `---` line) when it is review endmatter. */
+  yaml: string | null;
   raw: string | null;
   offset: number | null;
   diagnostics: Array<{ code: string; message: string; offset: number }>;
@@ -236,6 +269,23 @@ export function validateRoughdraftMarkdown(
       }
 
       validateEndmatterEntry(id, entry, metadata.offset, addDiagnostic, false);
+      validateIntent(
+        id,
+        entry.intent,
+        kind === "comment" && Boolean(entry.re),
+        kind,
+        metadata.offset,
+        addDiagnostic,
+      );
+      validateAskModel(
+        id,
+        entry.model,
+        entry.intent,
+        kind === "comment" && Boolean(entry.re),
+        kind,
+        metadata.offset,
+        addDiagnostic,
+      );
       return;
     }
 
@@ -289,25 +339,42 @@ export function validateRoughdraftMarkdown(
     if (kind === "comment" && id && parentId) {
       replies.push({ id, parentId, offset: metadata.offset });
     }
+
+    validateIntent(
+      id ?? "",
+      metadata.attrs.get("intent"),
+      kind === "comment" && Boolean(parentId),
+      kind,
+      metadata.offset,
+      addDiagnostic,
+    );
+    validateAskModel(
+      id ?? "",
+      metadata.attrs.get("model"),
+      metadata.attrs.get("intent"),
+      kind === "comment" && Boolean(parentId),
+      kind,
+      metadata.offset,
+      addDiagnostic,
+    );
   };
 
   let offset = 0;
   const scanEndOffset = endmatter.offset ?? markdown.length;
-  let fence: FenceState | null = null;
 
   while (offset < scanEndOffset) {
     if (isLineStart(markdown, offset)) {
-      const fenceMatch = matchFence(markdown, offset, fence);
-      if (fenceMatch) {
-        fence = fence ? null : fenceMatch.fence;
-        offset = nextLineOffset(markdown, offset);
+      const fenced = matchFencedCodeBlock(markdown, offset, scanEndOffset);
+      if (fenced) {
+        forEachFencedCommentChain(markdown, fenced, (comments) => {
+          for (const parsed of comments) {
+            summary.comments += 1;
+            validateMetadata(parsed.metadata, "comment", parsed.offset);
+          }
+        });
+        offset = fenced.endOffset;
         continue;
       }
-    }
-
-    if (fence) {
-      offset = nextLineOffset(markdown, offset);
-      continue;
     }
 
     const codeSpanEnd = matchInlineCodeSpan(markdown, offset);
@@ -388,6 +455,23 @@ export function validateRoughdraftMarkdown(
       addDiagnostic,
       Boolean(entry.re),
     );
+    validateIntent(
+      id,
+      entry.intent,
+      Boolean(entry.re),
+      "comment",
+      endmatter.offset ?? 0,
+      addDiagnostic,
+    );
+    validateAskModel(
+      id,
+      entry.model,
+      entry.intent,
+      Boolean(entry.re),
+      "comment",
+      endmatter.offset ?? 0,
+      addDiagnostic,
+    );
     if (entry.re) {
       replies.push({
         id,
@@ -459,6 +543,9 @@ export function extractRoughdraftReviewIndex(markdown: string): RfmReviewIndex {
     const attrs = hydrateMetadataAttrs(parsed.metadata, endmatter, "comment");
     const id = attrs.get("id") ?? `comment-${parsed.offset.toString()}`;
     const parentId = attrs.get("re") ?? null;
+    const intent = parentId ? undefined : knownIntent(attrs.get("intent"));
+    const model =
+      intent === "ask" ? knownAskModel(attrs.get("model")) : undefined;
 
     items.push({
       id,
@@ -467,6 +554,8 @@ export function extractRoughdraftReviewIndex(markdown: string): RfmReviewIndex {
       author: attrs.get("by") ?? null,
       createdAt: attrs.get("at") ?? null,
       status: attrs.get("status") ?? null,
+      ...(intent ? { intent } : {}),
+      ...(model ? { model } : {}),
       text: parsed.content,
       anchorText,
       offset: parsed.offset,
@@ -502,21 +591,17 @@ export function extractRoughdraftReviewIndex(markdown: string): RfmReviewIndex {
 
   let offset = 0;
   const scanEndOffset = endmatter.offset ?? markdown.length;
-  let fence: FenceState | null = null;
 
   while (offset < scanEndOffset) {
     if (isLineStart(markdown, offset)) {
-      const fenceMatch = matchFence(markdown, offset, fence);
-      if (fenceMatch) {
-        fence = fence ? null : fenceMatch.fence;
-        offset = nextLineOffset(markdown, offset);
+      const fenced = matchFencedCodeBlock(markdown, offset, scanEndOffset);
+      if (fenced) {
+        forEachFencedCommentChain(markdown, fenced, (comments, anchorText) => {
+          for (const parsed of comments) addComment(parsed, anchorText);
+        });
+        offset = fenced.endOffset;
         continue;
       }
-    }
-
-    if (fence) {
-      offset = nextLineOffset(markdown, offset);
-      continue;
     }
 
     const codeSpanEnd = matchInlineCodeSpan(markdown, offset);
@@ -568,6 +653,8 @@ export function extractRoughdraftReviewIndex(markdown: string): RfmReviewIndex {
 
   for (const [id, entry] of endmatter.comments) {
     if (!entry.body) continue;
+    const intent = entry.re ? undefined : knownIntent(entry.intent);
+    const model = intent === "ask" ? knownAskModel(entry.model) : undefined;
 
     items.push({
       id,
@@ -576,6 +663,8 @@ export function extractRoughdraftReviewIndex(markdown: string): RfmReviewIndex {
       author: typeof entry.by === "string" ? entry.by : null,
       createdAt: typeof entry.at === "string" ? entry.at : null,
       status: typeof entry.status === "string" ? entry.status : null,
+      ...(intent ? { intent } : {}),
+      ...(model ? { model } : {}),
       text: String(entry.body),
       offset: endmatter.offset ?? markdown.length,
       endOffset: endmatter.offset ?? markdown.length,
@@ -604,18 +693,12 @@ export function appendRoughdraftDocumentComment(
   assertSafeCommentBodyText(options.message);
 
   const index = extractRoughdraftReviewIndex(markdown);
-  const endmatter = parseRoughdraftEndmatter(markdown);
   const commentId = options.id ?? nextCommentId(index.items);
-  const comments = new Map(endmatter.comments);
-  comments.set(commentId, {
+
+  return addRoughdraftEndmatterEntry(markdown, "comments", commentId, {
     body: options.message,
     by: options.author ?? "user",
     at: options.at ?? new Date().toISOString(),
-  });
-
-  return writeRoughdraftEndmatter(markdown, {
-    comments,
-    suggestions: endmatter.suggestions,
   });
 }
 
@@ -632,18 +715,15 @@ export function appendRoughdraftReply(
   }
 
   const endmatter = parseRoughdraftEndmatter(markdown);
-  if (isEndmatterBackedItem(markdown, parent)) {
+  const parentLivesInEndmatter =
+    typeof endmatter.comments.get(parent.id)?.body === "string";
+  if (parentLivesInEndmatter || isEndmatterBackedItem(markdown, parent)) {
     const replyId = options.id ?? nextCommentId(index.items);
-    const comments = new Map(endmatter.comments);
-    comments.set(replyId, {
+    return addRoughdraftEndmatterEntry(markdown, "comments", replyId, {
       body: options.message,
       by: options.author ?? "AI",
       at: options.at ?? new Date().toISOString(),
       re: options.parentId,
-    });
-    return writeRoughdraftEndmatter(markdown, {
-      comments,
-      suggestions: endmatter.suggestions,
     });
   }
 
@@ -684,16 +764,16 @@ export function markRoughdraftResolved(
       : null;
 
   if (endmatterKind) {
-    const comments = new Map(endmatter.comments);
-    const suggestions = new Map(endmatter.suggestions);
-    const map = endmatterKind === "comment" ? comments : suggestions;
-    const current = map.get(options.targetId) ?? {};
-    map.set(options.targetId, {
-      ...current,
-      status: "resolved",
-      ...(options.summary ? { resolved: options.summary } : {}),
+    const section = endmatterKind === "comment" ? "comments" : "suggestions";
+    return updateRoughdraftEndmatter(markdown, (document) => {
+      document.setIn([section, options.targetId, "status"], "resolved");
+      if (options.summary) {
+        document.setIn(
+          [section, options.targetId, "resolved"],
+          options.summary,
+        );
+      }
     });
-    return writeRoughdraftEndmatter(markdown, { comments, suggestions });
   }
 
   const metadataStart = findCanonicalMetadataStart(markdown, target.endOffset);
@@ -797,6 +877,93 @@ function matchFence(
   }
 
   return { fence };
+}
+
+interface FencedCodeBlock {
+  /** Offset of the first content line (after the opening fence line). */
+  contentStart: number;
+  /** Offset of the closing fence line, or the scan end for an unclosed fence. */
+  contentEnd: number;
+  /** Offset just after the closing fence line. */
+  endOffset: number;
+}
+
+/** Matches a fenced code block whose opening fence starts at `offset`. */
+function matchFencedCodeBlock(
+  markdown: string,
+  offset: number,
+  scanEndOffset: number,
+): FencedCodeBlock | null {
+  const opening = matchFence(markdown, offset, null);
+  if (!opening) return null;
+
+  const contentStart = Math.min(
+    nextLineOffset(markdown, offset),
+    scanEndOffset,
+  );
+  let lineOffset = contentStart;
+  while (lineOffset < scanEndOffset) {
+    if (matchFence(markdown, lineOffset, opening.fence)) {
+      return {
+        contentStart,
+        contentEnd: lineOffset,
+        endOffset: Math.min(
+          nextLineOffset(markdown, lineOffset),
+          scanEndOffset,
+        ),
+      };
+    }
+    lineOffset = nextLineOffset(markdown, lineOffset);
+  }
+
+  return { contentStart, contentEnd: scanEndOffset, endOffset: scanEndOffset };
+}
+
+/**
+ * Code in a fence is literal, except for one construct: a highlight
+ * immediately followed by one or more comments (`{==code==}{>>note<<}{#c1}`),
+ * which is how a comment is anchored on code. This mirrors the app's
+ * `renderCriticCodeText`: standalone comments, suggestions, unclosed markers,
+ * and highlights without a comment stay literal and produce no diagnostics.
+ * Markers never pair across the fence boundary, and backticks inside a fence
+ * are not code spans.
+ */
+function forEachFencedCommentChain(
+  markdown: string,
+  block: FencedCodeBlock,
+  visit: (comments: ParsedComment[], anchorText: string) => void,
+): void {
+  // Searching a prefix keeps every offset absolute while bounding all
+  // `indexOf` lookups to the fence content.
+  const content = markdown.slice(0, block.contentEnd);
+  const noopDiagnostic = () => {};
+  let offset = block.contentStart;
+
+  while (offset < block.contentEnd) {
+    const start = content.indexOf("{==", offset);
+    if (start === -1) return;
+
+    // The anchor text must be non-empty, like the app's `{==([\s\S]+?)==}`.
+    const close = content.indexOf("==}", start + 4);
+    if (close === -1) {
+      offset = start + 1;
+      continue;
+    }
+
+    const comments: ParsedComment[] = [];
+    let next = close + 3;
+    while (content.startsWith("{>>", next)) {
+      const parsed = parseComment(content, next, noopDiagnostic);
+      if (!parsed) break;
+      comments.push(parsed);
+      next = parsed.endOffset;
+    }
+
+    if (comments.length > 0) {
+      visit(comments, content.slice(start + 3, close));
+    }
+    offset = next;
+  }
 }
 
 function matchInlineCodeSpan(markdown: string, offset: number): number | null {
@@ -1102,7 +1269,7 @@ function parseRoughdraftEndmatter(markdown: string): RoughdraftEndmatter {
   const empty: RoughdraftEndmatter = {
     comments: new Map(),
     suggestions: new Map(),
-    data: null,
+    yaml: null,
     raw: null,
     offset: null,
     diagnostics: [],
@@ -1143,7 +1310,7 @@ function parseRoughdraftEndmatter(markdown: string): RoughdraftEndmatter {
   return {
     comments: readEndmatterEntries(parsed.comments),
     suggestions: readEndmatterEntries(parsed.suggestions),
-    data: parsed,
+    yaml: match.yaml,
     raw: match.raw,
     offset: match.offset,
     diagnostics: [],
@@ -1263,31 +1430,142 @@ function validateEndmatterEntry(
   }
 }
 
-function writeRoughdraftEndmatter(
+function knownIntent(value: unknown): RfmCommentIntent | undefined {
+  return typeof value === "string" &&
+    (RFM_COMMENT_INTENTS as readonly string[]).includes(value)
+    ? (value as RfmCommentIntent)
+    : undefined;
+}
+
+/**
+ * `intent` is advisory: an unknown value (or one on a reply/suggestion) is a
+ * warning, not an error, so documents written by a newer Roughdraft that adds
+ * intents stay valid and simply degrade to a plain comment.
+ */
+function validateIntent(
+  id: string,
+  value: unknown,
+  isReply: boolean,
+  kind: "comment" | "suggestion",
+  offset: number,
+  addDiagnostic: (
+    severity: RfmDiagnosticSeverity,
+    code: string,
+    message: string,
+    offset: number,
+  ) => void,
+): void {
+  if (value === undefined) return;
+
+  if (kind === "suggestion" || isReply) {
+    addDiagnostic(
+      "warning",
+      "ignored-intent",
+      `\`intent\` on \`${id}\` is ignored; it only applies to root comments.`,
+      offset,
+    );
+    return;
+  }
+
+  if (!knownIntent(value)) {
+    addDiagnostic(
+      "warning",
+      "unknown-intent",
+      `Unknown \`intent\` for \`${id}\`; expected one of ${RFM_COMMENT_INTENTS.join(", ")}. It is treated as \`comment\`.`,
+      offset,
+    );
+  }
+}
+
+function knownAskModel(value: unknown): RfmAskModel | undefined {
+  return typeof value === "string" &&
+    (RFM_ASK_MODELS as readonly string[]).includes(value)
+    ? (value as RfmAskModel)
+    : undefined;
+}
+
+/**
+ * `model` is advisory like `intent`: it only means something on a root `ask`
+ * comment, and an unknown value degrades to the default (`fast`) with a
+ * warning, never an error.
+ */
+function validateAskModel(
+  id: string,
+  value: unknown,
+  intent: unknown,
+  isReply: boolean,
+  kind: "comment" | "suggestion",
+  offset: number,
+  addDiagnostic: (
+    severity: RfmDiagnosticSeverity,
+    code: string,
+    message: string,
+    offset: number,
+  ) => void,
+): void {
+  if (value === undefined) return;
+
+  if (kind === "suggestion" || isReply || intent !== "ask") {
+    addDiagnostic(
+      "warning",
+      "ignored-model",
+      `\`model\` on \`${id}\` is ignored; it only applies to root comments with \`intent: ask\`.`,
+      offset,
+    );
+    return;
+  }
+
+  if (!knownAskModel(value)) {
+    addDiagnostic(
+      "warning",
+      "unknown-model",
+      `Unknown \`model\` for \`${id}\`; expected one of ${RFM_ASK_MODELS.join(", ")}. It is treated as \`${RFM_DEFAULT_ASK_MODEL}\`.`,
+      offset,
+    );
+  }
+}
+
+/**
+ * Edits the final YAML endmatter in place through the `yaml` Document API, so
+ * entries the edit does not touch keep their exact formatting (quotes,
+ * comments, flow style, blank lines). Creates the endmatter when missing.
+ */
+function updateRoughdraftEndmatter(
   markdown: string,
-  endmatter: {
-    comments: Map<string, YamlMetadataEntry>;
-    suggestions: Map<string, YamlMetadataEntry>;
-  },
+  mutate: (document: YamlDocument) => void,
 ): string {
   const existing = parseRoughdraftEndmatter(markdown);
   const body =
     existing.offset === null
       ? markdown.replace(/\s*$/, "\n")
       : markdown.slice(0, existing.offset).replace(/\s*$/, "\n");
-  const data: Record<string, unknown> = { ...(existing.data ?? {}) };
-  if (endmatter.comments.size > 0) {
-    data.comments = Object.fromEntries(endmatter.comments);
-  } else {
-    delete data.comments;
-  }
-  if (endmatter.suggestions.size > 0) {
-    data.suggestions = Object.fromEntries(endmatter.suggestions);
-  } else {
-    delete data.suggestions;
-  }
 
-  return `${body}\n---\n${stringifyYaml(data)}`;
+  const parsed = existing.yaml === null ? null : parseDocument(existing.yaml);
+  // Unparseable endmatter was never usable review state; start over, as the
+  // previous whole-object writer did.
+  const document: YamlDocument =
+    parsed && parsed.errors.length === 0 && isMap(parsed.contents)
+      ? (parsed as unknown as YamlDocument)
+      : new YamlDocument({});
+  mutate(document);
+
+  return `${body}\n---\n${document.toString(ENDMATTER_YAML_OPTIONS)}`;
+}
+
+function addRoughdraftEndmatterEntry(
+  markdown: string,
+  section: "comments" | "suggestions",
+  id: string,
+  entry: { body: string; by: string; at: string; re?: string },
+): string {
+  return updateRoughdraftEndmatter(markdown, (document) => {
+    const node = document.createNode(entry);
+    // Match the spec's examples (and keep timestamps from looking like YAML
+    // timestamps to other tools): quote `at`.
+    const at = node.get("at", true);
+    if (isScalar(at)) at.type = "QUOTE_DOUBLE";
+    document.setIn([section, id], node);
+  });
 }
 
 function isEndmatterBackedItem(markdown: string, item: RfmReviewItem): boolean {
@@ -1360,4 +1638,14 @@ function findCanonicalMetadataStart(
 function isValidDateTime(value: string): boolean {
   return dateTimePattern.test(value) && !Number.isNaN(Date.parse(value));
 }
-import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import {
+  isMap,
+  isScalar,
+  parseDocument,
+  parse as parseYaml,
+  Document as YamlDocument,
+} from "yaml";
+
+// Endmatter is read by people too: write multiline bodies as literal `|`
+// blocks and never re-wrap long lines (the default folds them with `>`).
+const ENDMATTER_YAML_OPTIONS = { blockQuote: "literal", lineWidth: 0 } as const;

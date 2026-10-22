@@ -1088,6 +1088,122 @@ describe("cli", () => {
     });
   });
 
+  it("times out watch --timeout cleanly when the remaining wait is a fraction of a millisecond", async () => {
+    // The last round waits for whatever time is left, which is rarely a whole
+    // number of milliseconds; AbortSignal.timeout() rejects non-integers.
+    const test = createTestDependencies();
+    const documentPath = path.join(projectDir, "draft.md");
+    fs.writeFileSync(documentPath, "# Draft\n");
+
+    const exitCode = await runCli(
+      ["watch", documentPath, "--json", "--timeout", "0.2003"],
+      test.deps,
+    );
+
+    expect(test.errors).toEqual([]);
+    expect(exitCode).toBe(1);
+    expect(
+      parseOnlyJsonLog<{ timedOut: boolean; events: unknown[] }>(test.logs),
+    ).toMatchObject({ timedOut: true, events: [] });
+  });
+
+  it("keeps waiting for review when the watch response outlives the client's headers timeout", async () => {
+    // Node's built-in fetch (undici) rejects with
+    // `TypeError: fetch failed { cause: HeadersTimeoutError }` when a response
+    // sends no headers within `headersTimeout` (300s by default). The review
+    // watch is an unbounded long-poll, so a slow reviewer used to crash
+    // `roughdraft open`. Scale that client limit down to keep the test fast.
+    const CLIENT_HEADERS_TIMEOUT_MS = 200;
+    const test = createTestDependencies();
+    const documentPath = path.join(projectDir, "draft.md");
+    fs.writeFileSync(documentPath, "# Draft\n");
+    let watchRequestCount = 0;
+
+    const fetchWithHeadersTimeout: typeof fetch = async (input, init) => {
+      const url =
+        input instanceof URL
+          ? input
+          : new URL(
+              typeof input === "string" ? input : input.url,
+              "http://localhost",
+            );
+      if (url.pathname !== "/api/review-events/watch") {
+        return test.deps.fetchImpl(input, init);
+      }
+
+      watchRequestCount += 1;
+      const headersTimeout = new AbortController();
+      const timer = setTimeout(
+        () => headersTimeout.abort(),
+        CLIENT_HEADERS_TIMEOUT_MS,
+      );
+      try {
+        return await test.deps.fetchImpl(input, {
+          ...init,
+          signal: init?.signal
+            ? AbortSignal.any([init.signal, headersTimeout.signal])
+            : headersTimeout.signal,
+        });
+      } catch (error) {
+        if (!headersTimeout.signal.aborted) throw error;
+        throw new TypeError("fetch failed", {
+          cause: Object.assign(new Error("Headers Timeout Error"), {
+            name: "HeadersTimeoutError",
+            code: "UND_ERR_HEADERS_TIMEOUT",
+          }),
+        });
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+
+    const watchPromise = runCli(
+      ["open", documentPath, "--json", "--batch-window", "0"],
+      { ...test.deps, fetchImpl: fetchWithHeadersTimeout },
+    );
+    // Surface a crash immediately instead of as an unhandled rejection.
+    const settled = watchPromise.then(
+      (exitCode) => ({ exitCode, error: null as unknown }),
+      (error: unknown) => ({ exitCode: null, error }),
+    );
+
+    let persisted: { port: number } | null = null;
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      const stateFile = getServerStateFilePath(test.deps.env);
+      if (fs.existsSync(stateFile)) {
+        persisted = JSON.parse(fs.readFileSync(stateFile, "utf8")) as {
+          port: number;
+        };
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(persisted).not.toBeNull();
+
+    // The reviewer takes longer than the client is willing to wait for headers.
+    await new Promise((resolve) =>
+      setTimeout(resolve, CLIENT_HEADERS_TIMEOUT_MS * 3),
+    );
+    await fetch(`http://localhost:${persisted?.port}/api/review-events`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ projectPath: projectDir, path: "draft.md" }),
+    });
+
+    const result = await settled;
+    expect(result.error).toBeNull();
+    expect(result.exitCode).toBe(0);
+    expect(watchRequestCount).toBeGreaterThan(0);
+    const payload = parseOnlyJsonLog<{
+      timedOut: boolean;
+      events: Array<{ documentPath: string; type: string }>;
+    }>(test.logs);
+    expect(payload).toMatchObject({
+      timedOut: false,
+      events: [{ documentPath, type: "review.completed" }],
+    });
+  });
+
   it("opens a document and waits for the next review event by default from open --json", async () => {
     const test = createTestDependencies();
     const documentPath = path.join(projectDir, "draft.md");
@@ -1137,14 +1253,18 @@ describe("cli", () => {
     }
 
     expect(persisted).not.toBeNull();
+    // Wait for a long-poll round, not the immediate round that anchors "now".
     for (let attempt = 0; attempt < 20; attempt += 1) {
-      if (watchRequestBody) break;
+      if (watchRequestBody && watchRequestBody.timeoutSeconds !== 0) break;
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     expect(watchRequestBody).toMatchObject({
       batchWindowSeconds: 0,
     });
-    expect(watchRequestBody).not.toHaveProperty("timeoutSeconds");
+    // No --timeout means wait indefinitely, but each round stays under Node
+    // fetch's 300s headers timeout so a slow review cannot crash the CLI.
+    expect(watchRequestBody?.timeoutSeconds).toBeGreaterThan(0);
+    expect(watchRequestBody?.timeoutSeconds).toBeLessThan(300);
     await fetch(`http://localhost:${persisted?.port}/api/review-events`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1445,7 +1565,10 @@ describe("cli", () => {
       "  Comment ids are document-local and usually look like `c1`, `c2`, `c3`.",
     );
     expect(test.logs).toContain(
-      "  Treat CriticMarkup inside fenced code blocks as literal example text.",
+      "  To comment on code in a fence, anchor it: {==code==}{>>note<<}{#c1}.",
+    );
+    expect(test.logs).toContain(
+      "  Any other CriticMarkup inside fenced code blocks is literal example text.",
     );
     expect(test.logs).toContain(
       "  https://roughdraft.md/spec/roughdraft-flavored-markdown.md",
@@ -2058,6 +2181,76 @@ describe("runCli open in remote mode", () => {
       expect(
         logs.some((m) => m.includes("Opened remote Roughdraft session")),
       ).toBe(true);
+    } finally {
+      await remote.close();
+    }
+  });
+
+  it("keeps the CLI save-back stream open past its connect timeout", {
+    timeout: 15_000,
+  }, async () => {
+    // The connect timeout used to be an AbortSignal on the whole fetch, which
+    // also aborts the streamed body: `open` on a remote host silently stopped
+    // saving 10s after it connected. Scale the timeout down to keep it fast.
+    const CONNECT_TIMEOUT_MS = 200;
+    const remote = await startRemoteHost();
+    try {
+      const filePath = path.join(projectDir, "slow-review.md");
+      fs.writeFileSync(filePath, "before\n");
+      const logs: string[] = [];
+      const errors: string[] = [];
+      let openedUrl: string | null = null;
+      let cliSettled = false;
+
+      const cliPromise = runCli(["open", "--open", filePath], {
+        env: { ROUGHDRAFT_HOST: remote.url },
+        cwd: projectDir,
+        remoteConnectTimeoutMs: CONNECT_TIMEOUT_MS,
+        log: (m) => logs.push(m),
+        error: (m) => errors.push(m),
+        openUrl: (url) => {
+          openedUrl = url;
+          return "disabled";
+        },
+      }).finally(() => {
+        cliSettled = true;
+      });
+
+      const openDeadline = Date.now() + 4000;
+      while (openedUrl === null && Date.now() < openDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      const sessionId = new URL(
+        openedUrl as unknown as string,
+      ).searchParams.get("session");
+
+      // The reviewer saves well after the connect timeout has elapsed.
+      await new Promise((resolve) =>
+        setTimeout(resolve, CONNECT_TIMEOUT_MS * 3),
+      );
+      expect(cliSettled).toBe(false);
+      const loaded = await fetch(
+        `${remote.url}/api/remote-document/${sessionId}`,
+      );
+      const { version } = (await loaded.json()) as { version: string };
+      await fetch(`${remote.url}/api/remote-document/${sessionId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: "after\n", expectedVersion: version }),
+      });
+
+      const writeDeadline = Date.now() + 4000;
+      while (
+        fs.readFileSync(filePath, "utf-8") !== "after\n" &&
+        Date.now() < writeDeadline
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      expect(fs.readFileSync(filePath, "utf-8")).toBe("after\n");
+
+      await remote.close();
+      expect(await cliPromise).toBe(0);
+      expect(errors).toEqual([]);
     } finally {
       await remote.close();
     }

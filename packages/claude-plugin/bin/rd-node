@@ -1,0 +1,7 @@
+#!/bin/sh
+# Runs one of the plugin's Node scripts. Quietly does nothing without Node:
+# Roughdraft needs Node anyway, so there is nothing to connect to.
+command -v node >/dev/null 2>&1 || exit 0
+script="$1"
+shift
+exec node "$(dirname "$0")/../scripts/$script" "$@"

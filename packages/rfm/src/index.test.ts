@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   appendRoughdraftReply,
@@ -492,6 +494,45 @@ describe("RFM mutation helpers", () => {
     );
   });
 
+  it("writes a long multiline reply as a readable literal block", () => {
+    const markdown = [
+      "Keep {==this claim==}{>>Needs proof<<}{#c1} as written.",
+      "",
+      "---",
+      "comments:",
+      "  c1:",
+      "    by: user",
+      '    at: "2026-04-28T12:00:00.000Z"',
+      "",
+    ].join("\n");
+    const message =
+      "Two reasons:\n\n- the cache is empty after a deploy, so the first request always goes to the origin server;\n- later requests are served from the cache.";
+
+    const updated = appendRoughdraftReply(markdown, {
+      parentId: "c1",
+      id: "c2",
+      author: "AI",
+      at: "2026-04-28T12:10:00.000Z",
+      message,
+    });
+
+    // People read endmatter too: no folded `>` style, no re-wrapped lines.
+    expect(updated).toContain(
+      [
+        "    body: |-",
+        "      Two reasons:",
+        "",
+        "      - the cache is empty after a deploy, so the first request always goes to the origin server;",
+        "      - later requests are served from the cache.",
+      ].join("\n"),
+    );
+    expect(
+      extractRoughdraftReviewIndex(updated).items.find(
+        (item) => item.id === "c2",
+      )?.text,
+    ).toBe(message);
+  });
+
   it("appends a reply to YAML endmatter without adding inline reply markup", () => {
     const markdown = [
       "# Plan",
@@ -557,7 +598,7 @@ describe("RFM mutation helpers", () => {
     expect(output).toContain("  c2:");
     expect(output).toContain("    body: Please address the risk section.");
     expect(output).toContain("    by: user");
-    expect(output).toContain("    at: 2026-05-24T12:00:00.000Z");
+    expect(output).toContain('    at: "2026-05-24T12:00:00.000Z"');
   });
 
   it("rejects reply text that would close CriticMarkup early", () => {
@@ -615,5 +656,452 @@ describe("RFM mutation helpers", () => {
       id: "s1",
       status: "resolved",
     });
+  });
+});
+
+describe("comment intent", () => {
+  const fixture = JSON.parse(
+    fs.readFileSync(
+      fileURLToPath(
+        new URL(
+          "../../../docs/spec/fixtures/ask-intent-with-multiline-reply.json",
+          import.meta.url,
+        ),
+      ),
+      "utf8",
+    ),
+  ) as {
+    source: { markdown: string };
+    comments: Array<{ id: string; body: string; intent?: string }>;
+  };
+
+  function withIntent(intent: string, extra: string[] = []): string {
+    return [
+      "Cold start takes {==four seconds==}{>>Why?<<}{#c1}.",
+      "",
+      "---",
+      "comments:",
+      "  c1:",
+      "    by: user",
+      '    at: "2026-10-18T12:00:00.000Z"',
+      `    intent: ${intent}`,
+      ...extra,
+      "",
+    ].join("\n");
+  }
+
+  it("exposes a known intent on the root comment of the spec fixture", () => {
+    const index = extractRoughdraftReviewIndex(fixture.source.markdown);
+
+    expect(index.diagnostics).toEqual([]);
+    expect(index.items.find((item) => item.id === "c3")).toMatchObject({
+      kind: "comment",
+      intent: "ask",
+      anchorText: "about four seconds",
+    });
+  });
+
+  it("reads a multiline YAML block-scalar reply body verbatim", () => {
+    const index = extractRoughdraftReviewIndex(fixture.source.markdown);
+    const expected = fixture.comments.find((comment) => comment.id === "c4");
+
+    expect(index.items.find((item) => item.id === "c4")).toMatchObject({
+      kind: "reply",
+      parentId: "c3",
+      text: expected?.body,
+    });
+  });
+
+  it("treats a comment without intent as having no intent", () => {
+    const index = extractRoughdraftReviewIndex(
+      'Hi {==there==}{>>Note<<}{#c1}.\n\n---\ncomments:\n  c1:\n    by: user\n    at: "2026-10-18T12:00:00.000Z"\n',
+    );
+
+    expect(index.items[0]).not.toHaveProperty("intent");
+  });
+
+  it("warns about an unknown intent value and degrades it to a plain comment", () => {
+    const markdown = withIntent("shout");
+    const result = validateRoughdraftMarkdown(markdown);
+
+    expect(result.ok).toBe(true);
+    expect(result.warnings.map((warning) => warning.code)).toEqual([
+      "unknown-intent",
+    ]);
+    expect(extractRoughdraftReviewIndex(markdown).items[0]).not.toHaveProperty(
+      "intent",
+    );
+  });
+
+  it("warns about and ignores intent on a reply", () => {
+    const markdown = withIntent("ask", [
+      "  c2:",
+      "    body: Because of the cache.",
+      "    by: AI",
+      '    at: "2026-10-18T12:00:20.000Z"',
+      "    re: c1",
+      "    intent: change",
+    ]);
+
+    expect(codes(markdown)).toEqual(["ignored-intent"]);
+    const reply = extractRoughdraftReviewIndex(markdown).items.find(
+      (item) => item.id === "c2",
+    );
+    expect(reply).not.toHaveProperty("intent");
+  });
+
+  it("reads intent from older inline attribute metadata", () => {
+    const index = extractRoughdraftReviewIndex(
+      'Fix {==this==}{>>Please tighten<<}{id="c1" by="user" at="2026-10-18T12:00:00.000Z" intent="change"}.\n',
+    );
+
+    expect(index.diagnostics).toEqual([]);
+    expect(index.items[0]).toMatchObject({ id: "c1", intent: "change" });
+  });
+
+  it("preserves intent and round-trips a multiline reply when appending and resolving", () => {
+    const message = "Two parts:\n- warm-up\n- `model.load()`\n\nThat's it.";
+    const replied = appendRoughdraftReply(withIntent("ask"), {
+      parentId: "c1",
+      message,
+      author: "AI",
+      at: "2026-10-18T12:01:00.000Z",
+    });
+    const resolved = markRoughdraftResolved(replied, { targetId: "c1" });
+
+    expect(resolved).toContain("    intent: ask\n");
+    expect(resolved).toContain("    body: |-\n      Two parts:\n");
+    expect(validateRoughdraftMarkdown(resolved).diagnostics).toEqual([]);
+    const items = extractRoughdraftReviewIndex(resolved).items;
+    expect(items.find((item) => item.id === "c1")).toMatchObject({
+      intent: "ask",
+      status: "resolved",
+    });
+    expect(items.find((item) => item.id === "c2")).toMatchObject({
+      parentId: "c1",
+      text: message,
+    });
+  });
+
+  it("exposes a known Ask model and keeps it through a reply and a resolve", () => {
+    const markdown = withIntent("ask", ["    model: balanced"]);
+    expect(validateRoughdraftMarkdown(markdown).diagnostics).toEqual([]);
+    expect(extractRoughdraftReviewIndex(markdown).items[0]).toMatchObject({
+      id: "c1",
+      intent: "ask",
+      model: "balanced",
+    });
+
+    const replied = appendRoughdraftReply(markdown, {
+      parentId: "c1",
+      message: "Because of the cache.",
+      author: "AI",
+      at: "2026-10-18T12:01:00.000Z",
+    });
+    const resolved = markRoughdraftResolved(replied, { targetId: "c1" });
+
+    expect(resolved).toContain("    model: balanced\n");
+    expect(validateRoughdraftMarkdown(resolved).diagnostics).toEqual([]);
+    expect(
+      extractRoughdraftReviewIndex(resolved).items.find(
+        (item) => item.id === "c1",
+      ),
+    ).toMatchObject({ model: "balanced", status: "resolved" });
+  });
+
+  it("treats an Ask without a model as the fast default (no model on the item)", () => {
+    const item = extractRoughdraftReviewIndex(withIntent("ask")).items[0];
+
+    expect(item).toMatchObject({ intent: "ask" });
+    expect(item).not.toHaveProperty("model");
+  });
+
+  it("reads the model from older inline attribute metadata", () => {
+    const index = extractRoughdraftReviewIndex(
+      'Why {==this==}{>>Explain<<}{id="c1" by="user" at="2026-10-18T12:00:00.000Z" intent="ask" model="session"}.\n',
+    );
+
+    expect(index.diagnostics).toEqual([]);
+    expect(index.items[0]).toMatchObject({ intent: "ask", model: "session" });
+  });
+
+  it("warns about an unknown model value and degrades it to the default", () => {
+    const markdown = withIntent("ask", ["    model: genius"]);
+    const result = validateRoughdraftMarkdown(markdown);
+
+    expect(result.ok).toBe(true);
+    expect(result.warnings.map((warning) => warning.code)).toEqual([
+      "unknown-model",
+    ]);
+    expect(extractRoughdraftReviewIndex(markdown).items[0]).not.toHaveProperty(
+      "model",
+    );
+  });
+
+  it("warns about and ignores a model outside a root Ask comment", () => {
+    const onChange = withIntent("change", ["    model: balanced"]);
+    expect(codes(onChange)).toEqual(["ignored-model"]);
+    expect(extractRoughdraftReviewIndex(onChange).items[0]).not.toHaveProperty(
+      "model",
+    );
+
+    const onReply = withIntent("ask", [
+      "  c2:",
+      "    body: Because of the cache.",
+      "    by: AI",
+      '    at: "2026-10-18T12:00:20.000Z"',
+      "    re: c1",
+      "    model: session",
+    ]);
+    expect(codes(onReply)).toEqual(["ignored-model"]);
+    expect(
+      extractRoughdraftReviewIndex(onReply).items.find(
+        (item) => item.id === "c2",
+      ),
+    ).not.toHaveProperty("model");
+  });
+
+  it("appends a reply to an endmatter-only document comment inside the endmatter", () => {
+    const markdown = appendRoughdraftDocumentComment("# Draft\n", {
+      message: "Overall: shorter please.",
+      author: "user",
+      at: "2026-10-18T12:00:00.000Z",
+    });
+
+    const replied = appendRoughdraftReply(markdown, {
+      parentId: "c1",
+      message: "Will do.",
+      at: "2026-10-18T12:01:00.000Z",
+    });
+
+    expect(replied.startsWith("# Draft\n\n---\n")).toBe(true);
+    expect(replied).not.toContain("{>>");
+    expect(extractRoughdraftReviewIndex(replied).items).toMatchObject([
+      { id: "c1", kind: "comment" },
+      { id: "c2", kind: "reply", parentId: "c1", text: "Will do." },
+    ]);
+  });
+});
+
+// Endmatter is edited by people, agents, and the app; a write must only touch
+// the entry it changes, so diffs and 3-way merges stay small.
+describe("endmatter writes keep untouched entries byte-identical", () => {
+  const endmatter = [
+    "---",
+    "# review state",
+    "comments:",
+    "  c1:",
+    "    by: pavel",
+    '    at: "2026-10-18T12:00:00.000Z"',
+    "    intent: ask",
+    "",
+    "  c2:",
+    "    body: 'Single-quoted: kept'",
+    "    by: AI",
+    "    at: 2026-10-18T12:01:00.000Z",
+    "    re: c1",
+    "suggestions:",
+    '  s1: { by: AI, at: "2026-10-18T12:02:00.000Z" }',
+    "workflow:",
+    "  owner: editorial # who triages",
+    "",
+  ];
+  const markdown = [
+    "Keep {==this claim==}{>>Why?<<}{#c1} and {++this++}{#s1}.",
+    "",
+    ...endmatter,
+  ].join("\n");
+
+  it("appends a reply as new lines and leaves every other line as it was", () => {
+    const updated = appendRoughdraftReply(markdown, {
+      parentId: "c1",
+      id: "c3",
+      message: "Because.",
+      at: "2026-10-18T12:03:00.000Z",
+    });
+
+    const replyLines = [
+      "  c3:",
+      "    body: Because.",
+      "    by: AI",
+      '    at: "2026-10-18T12:03:00.000Z"',
+      "    re: c1",
+    ];
+    expect(updated).toBe(
+      [
+        "Keep {==this claim==}{>>Why?<<}{#c1} and {++this++}{#s1}.",
+        "",
+        ...endmatter.slice(0, 13),
+        ...replyLines,
+        ...endmatter.slice(13),
+      ].join("\n"),
+    );
+  });
+
+  it("resolves an entry by adding lines to that entry only", () => {
+    const updated = markRoughdraftResolved(markdown, {
+      targetId: "c1",
+      summary: "Answered.",
+    });
+
+    expect(updated).toBe(
+      [
+        "Keep {==this claim==}{>>Why?<<}{#c1} and {++this++}{#s1}.",
+        "",
+        ...endmatter.slice(0, 7),
+        "    status: resolved",
+        "    resolved: Answered.",
+        ...endmatter.slice(7),
+      ].join("\n"),
+    );
+  });
+
+  it("creates endmatter for a document-level comment on a plain document", () => {
+    const updated = appendRoughdraftDocumentComment("# Draft\n", {
+      message: "Line one\nline two",
+      author: "user",
+      at: "2026-10-18T12:00:00.000Z",
+    });
+
+    expect(updated).toBe(
+      [
+        "# Draft",
+        "",
+        "---",
+        "comments:",
+        "  c1:",
+        "    body: |-",
+        "      Line one",
+        "      line two",
+        "    by: user",
+        '    at: "2026-10-18T12:00:00.000Z"',
+        "",
+      ].join("\n"),
+    );
+  });
+});
+
+// Users may comment on code inside a fenced block (the app anchors a comment
+// on a selection in a code block). Only anchored comment chains are live
+// there; standalone comments, suggestions, and inline code stay literal.
+describe("anchored comments inside fenced code blocks", () => {
+  const fencedComment = [
+    "Run this:",
+    "",
+    "```ts",
+    'const command = "{==roughdraft open==}{>>Why not `watch`?<<}{#c1}";',
+    "const literal = {>>not a comment<<} + {++not a suggestion++};",
+    "```",
+    "",
+    "After `{==code span==}{>>still literal<<}{#c9}` text.",
+    "",
+    "---",
+    "comments:",
+    "  c1:",
+    "    by: user",
+    '    at: "2026-10-18T12:00:00.000Z"',
+    "    intent: ask",
+    "",
+  ].join("\n");
+
+  it("indexes an anchored comment on code and nothing else from the fence", () => {
+    const index = extractRoughdraftReviewIndex(fencedComment);
+
+    expect(index.diagnostics).toEqual([]);
+    expect(index.items).toEqual([
+      expect.objectContaining({
+        id: "c1",
+        kind: "comment",
+        intent: "ask",
+        author: "user",
+        text: "Why not `watch`?",
+        anchorText: "roughdraft open",
+        line: 4,
+      }),
+    ]);
+  });
+
+  it("validates a fenced anchored comment like any other comment", () => {
+    const valid = validateRoughdraftMarkdown(fencedComment);
+    expect(valid.ok).toBe(true);
+    expect(valid.summary).toMatchObject({ comments: 1, suggestions: 0 });
+
+    const missingEntry = codes(
+      ["```js", "{==x==}{>>Why?<<}{#c1}", "```", ""].join("\n"),
+    );
+    expect(missingEntry).toEqual(["missing-endmatter-entry"]);
+  });
+
+  it("does not let a marker inside a fence pair with text after the fence", () => {
+    const index = extractRoughdraftReviewIndex(
+      [
+        "```",
+        "{==unclosed anchor",
+        "```",
+        "",
+        'Prose ==}{>>after<<}{id="c1" by="user" at="2026-10-18T12:00:00.000Z"}',
+        "",
+      ].join("\n"),
+    );
+
+    // The prose comment is a standalone comment, not anchored on fence text.
+    expect(index.items).toEqual([
+      expect.objectContaining({ id: "c1", anchorText: undefined }),
+    ]);
+  });
+
+  it("appends a reply to and resolves a fenced comment", () => {
+    const replied = appendRoughdraftReply(fencedComment, {
+      parentId: "c1",
+      id: "c2",
+      message: "`watch` blocks; `open` returns a URL.",
+      at: "2026-10-18T12:01:00.000Z",
+    });
+    expect(
+      extractRoughdraftReviewIndex(replied).items.map((item) => [
+        item.id,
+        item.parentId,
+      ]),
+    ).toEqual([
+      ["c1", null],
+      ["c2", "c1"],
+    ]);
+
+    const resolved = markRoughdraftResolved(replied, { targetId: "c1" });
+    expect(
+      extractRoughdraftReviewIndex(resolved).items.find(
+        (item) => item.id === "c1",
+      )?.status,
+    ).toBe("resolved");
+  });
+
+  it("splices an inline reply into the fence next to inline-metadata comments", () => {
+    const markdown = [
+      "```sh",
+      'roughdraft {==open==}{>>flags?<<}{id="c1" by="user" at="2026-10-18T12:00:00.000Z"} file.md',
+      "```",
+      "",
+    ].join("\n");
+
+    const replied = appendRoughdraftReply(markdown, {
+      parentId: "c1",
+      id: "c2",
+      message: "Use --print-url.",
+      at: "2026-10-18T12:01:00.000Z",
+    });
+
+    expect(replied).toBe(
+      [
+        "```sh",
+        'roughdraft {==open==}{>>flags?<<}{id="c1" by="user" at="2026-10-18T12:00:00.000Z"}{>>Use --print-url.<<}{id="c2" by="AI" at="2026-10-18T12:01:00.000Z" re="c1"} file.md',
+        "```",
+        "",
+      ].join("\n"),
+    );
+    expect(
+      extractRoughdraftReviewIndex(replied).items.find(
+        (item) => item.id === "c2",
+      ),
+    ).toMatchObject({ kind: "reply", parentId: "c1", anchorText: "open" });
   });
 });

@@ -1,3 +1,9 @@
+import type {
+  AgentStatusSnapshot,
+  CommentEventResult,
+  CommentEventType,
+} from "./comment-agent";
+
 export interface Page {
   id: string;
   title: string;
@@ -72,12 +78,33 @@ export interface StorageBackend {
   watchMarkdownFile?(
     relativePath: string,
     onChange: (event: MarkdownFileChangeEvent) => void,
+    /** Version the tab already has; a newer one on disk is reported at once. */
+    knownVersion?: string,
   ): () => void;
   completeReview?(
     relativePath: string,
     options?: CompleteReviewOptions,
   ): Promise<CompleteReviewResult>;
   getReviewWatchStatus?(relativePath: string): Promise<ReviewWatchStatus>;
+  /**
+   * Tell a listening agent session about a saved Ask/Change comment or a
+   * follow-up reply. Call only after the comment is on disk: the server builds
+   * the event from the file, not from client text.
+   */
+  postCommentEvent?(
+    relativePath: string,
+    input: { type: CommentEventType; commentId: string },
+  ): Promise<CommentEventResult>;
+  /**
+   * Make a live Claude Code session the document's owner (ADR 0007); the
+   * previous owner is told. The status stream reports the change.
+   */
+  connectSession?(relativePath: string, sessionId: string): Promise<void>;
+  /** Live agent presence and per-thread progress for one document. */
+  watchAgentStatus?(
+    relativePath: string,
+    onStatus: (status: AgentStatusSnapshot) => void,
+  ): () => void;
   saveAsset(file: File): Promise<StoredAsset>;
   resolveFileUrl(path: string): string | null;
   openProject(path: string): Promise<void>;

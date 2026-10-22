@@ -34,3 +34,15 @@ The mitigation is a shared bearer token, `ROUGHDRAFT_TOKEN`:
 - The viewerUrl printed by the CLI includes `?token=...` so the browser tab can authenticate. The frontend forwards the token as a header on fetches and as `?token=` on the EventSource.
 
 Loopback-only deployments stay back-compatible: no token required, no behavior change. The token is the contract that lets non-loopback deployments be safe; the secure-by-default startup guard is the contract that lets us ship the feature without expecting users to read documentation before exposing the endpoints.
+
+## Clarification (2026-10-18): Live Connection
+
+Each browser tab now receives its live updates (open requests, markdown file changes, agent status) over **one WebSocket per tab** at `/api/live`, instead of one EventSource per channel. Long-lived HTTP/1.1 streams count against the browser's six-connections-per-host limit, shared by all tabs; with two tabs open, saves and comment events queued behind them for minutes. A WebSocket is outside that pool.
+
+The trust model is unchanged:
+
+- Loopback peers connect without a token, as the equivalent SSE routes always allowed.
+- When `ROUGHDRAFT_TOKEN` is set, non-loopback peers must present it as `?token=` on the upgrade (browsers cannot set headers on a WebSocket either). The app forwards the `?token=` from its page URL, as remote-document tabs already do.
+- Because browsers do not apply CORS to WebSockets, the upgrade also requires that a browser's `Origin` names the host it connected to, so another site's page cannot subscribe to local file events.
+
+The socket carries no new state: channel subscriptions live only as long as the connection, like the SSE streams they replace. The SSE routes stay for the CLI, remote-document sessions, and older tabs.

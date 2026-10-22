@@ -24,6 +24,7 @@ import {
   mathLatexAttribute,
   rawMarkdownBlockAttribute,
 } from "./markdown";
+import { ExternalChangeHighlight } from "./external-change-highlight";
 import { MathView } from "./MathView";
 import { MermaidCodeBlockView } from "./MermaidCodeBlockView";
 
@@ -938,6 +939,7 @@ export function createEditorExtensions(placeholder: string) {
     MarkdownCodeBlock,
     CommentHighlight,
     CriticChangeHighlight,
+    ExternalChangeHighlight,
     MarkdownImage.configure({
       allowBase64: true,
       inline: false,

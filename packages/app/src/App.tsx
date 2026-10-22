@@ -57,6 +57,7 @@ import {
   resolveAnchoredRailLayouts,
 } from "./document-comments";
 import { cn } from "./lib/utils";
+import { getLiveConnection } from "./live-connection";
 import {
   extractMarkdownOutline,
   type OutlineHeading,
@@ -65,7 +66,7 @@ import {
   createOutlineJumpRequest,
   type OutlineJumpRequest,
 } from "./outline-navigation";
-import type { DocumentSaveState } from "./PageCard";
+import type { DocumentSaveController, DocumentSaveState } from "./PageCard";
 import { PreviewBackend } from "./preview-backend";
 import { RoughdraftFormatDemo } from "./RoughdraftFormatDemo";
 import {
@@ -592,7 +593,10 @@ function HomepageWorkflowScene({
       data-testid="homepage-workflow-scene"
       ref={sceneRef}
     >
-      <div className="font-die-grotesk-a min-w-0 max-w-[28rem] font-bold max-[899px]:max-w-[min(100%,27rem)]">
+      <div
+        className="font-die-grotesk-a min-w-0 max-w-[28rem] font-bold max-[899px]:max-w-[min(100%,27rem)]"
+        data-testid="homepage-workflow-scene-copy"
+      >
         <div className="inline-flex h-12 min-w-12 items-center justify-center rounded-full border border-slate-950 bg-slate-950 px-2 text-[2.25rem] leading-none font-bold text-white dark:border-slate-100 dark:bg-slate-100 dark:text-slate-950">
           {step}
         </div>
@@ -1526,6 +1530,7 @@ export function App() {
   const documentDirtyRef = useRef(false);
   const documentSaveStateRef = useRef<DocumentSaveState>("saved");
   const documentDraftContentRef = useRef<string | null>(null);
+  const documentSaveControllerRef = useRef<DocumentSaveController | null>(null);
   const activeViewerFileRef = useRef<string | null>(null);
 
   backendRef.current = backend;
@@ -1536,8 +1541,18 @@ export function App() {
 
   const applyDocumentPage = useCallback((nextDocument: Page) => {
     setDocumentPage(nextDocument);
+    // Keep the ref current right away: a save issued before the next render
+    // (for example the re-save of a merged draft) must use this version.
+    documentPageRef.current = nextDocument;
     documentDraftContentRef.current = nextDocument.content;
   }, []);
+
+  const handleDocumentSaveControllerChange = useCallback(
+    (controller: DocumentSaveController | null) => {
+      documentSaveControllerRef.current = controller;
+    },
+    [],
+  );
 
   const loadDocument = useCallback(
     async (nextBackend: StorageBackend, relativePath: string) => {
@@ -1573,23 +1588,18 @@ export function App() {
   );
 
   useEffect(() => {
-    const sourceUrl = new URL("/api/open-requests", window.location.origin);
+    // The static web preview has no server to ask.
+    if (import.meta.env.VITE_PREVIEW_WEB === "1") return;
     // In directory mode the CLI sends an open request keyed on the directory,
     // so register this window under the directory path; otherwise use the file.
     const registrationPath =
       requestedPathState.mode === "directory"
         ? requestedPathState.directoryPath
         : requestedPathState.rawPath;
-    if (registrationPath) {
-      sourceUrl.searchParams.set("path", registrationPath);
-    }
 
-    const source = new EventSource(`${sourceUrl.pathname}${sourceUrl.search}`);
-    const handleOpenRequest = (event: Event) => {
+    const handleOpenRequest = (data: unknown) => {
       try {
-        const payload = JSON.parse((event as MessageEvent<string>).data) as {
-          url?: unknown;
-        };
+        const payload = (data ?? {}) as { url?: unknown };
         if (typeof payload.url !== "string" || !payload.url.trim()) return;
 
         const nextUrl = new URL(payload.url, window.location.origin);
@@ -1616,12 +1626,13 @@ export function App() {
       }
     };
 
-    source.addEventListener("open-request", handleOpenRequest);
-
-    return () => {
-      source.removeEventListener("open-request", handleOpenRequest);
-      source.close();
-    };
+    return getLiveConnection().subscribe(
+      "open-requests",
+      () => (registrationPath ? { path: registrationPath } : {}),
+      (event, data) => {
+        if (event === "open-request") handleOpenRequest(data);
+      },
+    );
   }, [
     requestedPathState.directoryPath,
     requestedPathState.mode,
@@ -1776,6 +1787,17 @@ export function App() {
         );
       } catch (error) {
         if (error instanceof MarkdownFileConflictError) {
+          // The file changed on disk since our last save. Merge the disk
+          // version into the draft first; only overlapping edits need the
+          // conflict banner. A clean merge re-saves the merged draft.
+          const merge = documentSaveControllerRef.current?.mergeExternalContent(
+            error.current.content,
+          );
+          if (merge?.status === "merged") {
+            applyDocumentPage(error.current);
+            setDocumentDiskChangeState("clean");
+            return;
+          }
           setDocumentDiskChangeState("conflict");
         }
         throw error;
@@ -1920,10 +1942,18 @@ export function App() {
     [applyDocumentPage],
   );
 
+  // Subscribe once the page is loaded, so the subscription can start from
+  // the version the tab shows. (On first load the path is known from the URL
+  // before the file is read; subscribing then started from "whatever is on
+  // disk when the server gets the subscription", and a write landing before
+  // that was never reported.)
+  const documentLoaded = documentPage !== null;
   useEffect(() => {
-    if (!backend?.watchMarkdownFile || !activeDocumentPath) return;
+    if (!backend?.watchMarkdownFile || !activeDocumentPath || !documentLoaded)
+      return;
 
     let disposed = false;
+    const loadedPage = documentPageRef.current;
     const stopWatching = backend.watchMarkdownFile(
       activeDocumentPath,
       (event) => {
@@ -1943,20 +1973,40 @@ export function App() {
           return;
         }
 
-        if (documentDirtyRef.current) {
-          setDocumentDiskChangeState("changed");
-          return;
-        }
-
         void (async () => {
           const currentBackend = backendRef.current;
           const currentPath = activeDocumentPathRef.current;
           if (!currentBackend || !currentPath || disposed) return;
 
           try {
+            // Let an in-flight autosave land first, so its own echo is
+            // recognised by version instead of being merged as a change.
+            if (documentDirtyRef.current) {
+              await documentSaveControllerRef.current?.waitForPendingSave();
+            }
             const nextDocument =
               await currentBackend.getMarkdownFile(currentPath);
             if (disposed) return;
+            if (
+              nextDocument.version &&
+              nextDocument.version === documentPageRef.current?.version
+            ) {
+              return;
+            }
+
+            if (documentDirtyRef.current) {
+              // The user is typing while the file changed (an agent edit):
+              // three-way merge instead of interrupting with the banner.
+              const merge =
+                documentSaveControllerRef.current?.mergeExternalContent(
+                  nextDocument.content,
+                );
+              if (merge?.status !== "merged") {
+                setDocumentDiskChangeState("changed");
+                return;
+              }
+            }
+
             applyDocumentPage(nextDocument);
             setDocumentDiskChangeState("clean");
           } catch (error) {
@@ -1964,13 +2014,23 @@ export function App() {
           }
         })();
       },
+      // A write between loading the page and this subscription is reported
+      // at once instead of being missed. (After a file switch this may be the
+      // previous page's version; the extra event then just re-reads the file.)
+      loadedPage?.version,
     );
 
     return () => {
       disposed = true;
       stopWatching();
     };
-  }, [activeDocumentPath, applyDocumentPage, backend, documentDiskChangeState]);
+  }, [
+    activeDocumentPath,
+    applyDocumentPage,
+    backend,
+    documentDiskChangeState,
+    documentLoaded,
+  ]);
 
   const handleDocumentEditorViewModeChange = useCallback(
     (nextMode: DocumentEditorViewMode) => {
@@ -2164,6 +2224,7 @@ export function App() {
       onDocumentLocalContentChange={handleDocumentLocalContentChange}
       documentDiskChangeState={documentDiskChangeState}
       documentForceResetKey={documentForceResetKey}
+      onDocumentSaveControllerChange={handleDocumentSaveControllerChange}
       onReloadDocumentFromDisk={handleReloadDocumentFromDisk}
       onKeepEditingWithoutAutosave={handleKeepEditingWithoutAutosave}
       onOverwriteDocumentOnDisk={handleOverwriteDocumentOnDisk}

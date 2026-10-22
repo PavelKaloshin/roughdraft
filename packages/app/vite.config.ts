@@ -19,7 +19,8 @@ export default defineConfig(() => {
     },
     server: {
       proxy: {
-        "/api": `http://localhost:${apiPort}`,
+        // `ws` forwards the per-tab live WebSocket (`/api/live`).
+        "/api": { target: `http://localhost:${apiPort}`, ws: true },
       },
     },
   };

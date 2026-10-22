@@ -10,13 +10,45 @@ import {
   validateRoughdraftMarkdown,
 } from "@roughdraft/rfm";
 import {
+  type AgentCliTarget,
+  cliCommandName,
+  DEFAULT_LISTEN_MAX_SECONDS,
+  formatListenEventLine,
+  type ParsedAgentArgs,
+  parseAgentArgs,
+  runAck,
+  runListen,
+  runReply,
+  runResolve,
+} from "./agent-cli.js";
+import {
+  DEFAULT_FORK_TIMEOUT_MS,
+  DEFAULT_MAX_CONCURRENT_FORKS,
+  ForkScheduler,
+  fetchThreadStatus,
+  runAnswerFork,
+  SUGGESTED_FORK_ASKS_AFTER_SECONDS,
+} from "./fork-responder.js";
+import {
   ROUGHDRAFT_BIND_HOST,
   ROUGHDRAFT_DEFAULT_PORT,
   ROUGHDRAFT_LOOPBACK_HOSTS,
   ROUGHDRAFT_PUBLIC_HOST,
 } from "./network.js";
 import { findAvailablePort } from "./ports.js";
+import {
+  claimForCallingSession,
+  isSessionListenArgs,
+  printSessionCommandHelp,
+  runSessionCommand,
+  type SessionCommandDeps,
+} from "./session-cli.js";
 import { resolveUpdateStatus, type UpdateStatus } from "./update-status.js";
+import {
+  roundTimeoutSignal,
+  type WatchRoundPayload,
+  watchInRounds,
+} from "./watch-rounds.js";
 
 const AGENT_SETUP_URL = "https://roughdraft.md/setup.md";
 const ROUGHDRAFT_FLAVORED_MARKDOWN_SPEC_URL =
@@ -35,11 +67,19 @@ const KNOWN_COMMANDS = [
   "status",
   "stop",
   "watch",
+  "listen",
+  "reply",
+  "ack",
+  "resolve",
+  "answer-fork",
   "mcp",
   "doctor",
   "help",
   "agent-setup",
   "criticmarkup",
+  "claim",
+  "sessions",
+  "setup",
 ] as const;
 
 export interface RoughdraftServerState {
@@ -89,8 +129,11 @@ export interface CliDependencies {
   stopProcess: (pid: number) => Promise<void>;
   openUrl: (url: string) => OpenMode;
   resolveUpdateStatus: () => Promise<UpdateStatus>;
+  readStdin: () => Promise<string>;
   log: (message: string) => void;
   error: (message: string) => void;
+  /** How long `open --remote` waits for the save-back stream to connect. */
+  remoteConnectTimeoutMs?: number;
 }
 
 type OpenMode =
@@ -812,6 +855,14 @@ function defaultSpawnServerProcess(options: {
   return { pid: child.pid };
 }
 
+async function defaultReadStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) {
+    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
 export function createCliDependencies(
   overrides: Partial<CliDependencies> = {},
 ): CliDependencies {
@@ -831,8 +882,10 @@ export function createCliDependencies(
     resolveUpdateStatus:
       overrides.resolveUpdateStatus ??
       (() => resolveUpdateStatus({ fetchImpl })),
+    readStdin: overrides.readStdin ?? defaultReadStdin,
     log: overrides.log ?? ((message) => console.log(message)),
     error: overrides.error ?? ((message) => console.error(message)),
+    remoteConnectTimeoutMs: overrides.remoteConnectTimeoutMs,
   };
 }
 
@@ -862,6 +915,27 @@ function printHelp(log: (message: string) => void) {
   log("  status             Show server status");
   log("  stop               Stop the managed background server");
   log("  watch <path>       Wait for a Done Reviewing event");
+  log(
+    "  listen <file.md>   Print one line per Ask/Change comment (for an agent's Monitor)",
+  );
+  log("  reply <file.md> <id>    Reply to a comment thread as AI");
+  log(
+    "  ack <file.md> <id>      Mark a comment thread as being worked on (--delegated: passed to a subagent)",
+  );
+  log("  resolve <file.md> <id>  Mark a comment thread resolved");
+  log(
+    "  answer-fork <file.md> <id>  Answer an Ask from a headless fork of a Claude session",
+  );
+  log(
+    "  listen --session <id>   Print Ask/Change lines for every file a Claude session owns",
+  );
+  log(
+    "  claim <file.md>    Make a Claude session the owner of a file (--force: reassign)",
+  );
+  log("  sessions           List live Claude Code sessions and their files");
+  log(
+    "  setup claude       Install the Claude Code plugin (automatic live review)",
+  );
   log("  mcp                Start the experimental stdio MCP server");
   log("  doctor [path]      Diagnose setup or validate Markdown");
   log("  help agent         Print the agent setup prompt");
@@ -893,6 +967,11 @@ function printCommandHelp(
   command: KnownCommand,
   log: (message: string) => void,
 ) {
+  if (command === "claim" || command === "sessions" || command === "setup") {
+    printSessionCommandHelp(command, log);
+    return;
+  }
+
   if (command === "open") {
     log("Usage:");
     log(
@@ -1017,6 +1096,171 @@ function printCommandHelp(
     return;
   }
 
+  if (command === "listen") {
+    log("Usage:");
+    log(
+      "  roughdraft listen <file.md> [--since <seq>] [--max-seconds <seconds>]",
+    );
+    log("");
+    log(
+      "Registers as the agent listening to one Markdown file and prints exactly one",
+    );
+    log(
+      "line per Ask, Change, or follow-up comment posted from Roughdraft, and one",
+    );
+    log("when the user clicks Done Reviewing. Each line");
+    log(
+      "is self-contained and starts with the command to answer it. Designed to run",
+    );
+    log(
+      "under Claude Code's Monitor tool, which wakes the session on every line.",
+    );
+    log("");
+    log("Output lines:");
+    log("  [roughdraft] listening on <file> (session <id>) since=<seq>");
+    log(
+      '  [roughdraft] ask c3 seq=12 → <command to run> | by=<who> anchor="..." text="..."',
+    );
+    log(
+      "  [roughdraft] done seq=13 file=<file> comments=<n> unresolved=<n> → ...",
+    );
+    log(
+      "  [roughdraft] listen expired; re-arm with: roughdraft listen <file> --since <seq>",
+    );
+    log("");
+    log(
+      "Without --since, unanswered events retained by the server are replayed.",
+    );
+    log("Threads already answered after an event are skipped.");
+    log("");
+    log("Flags:");
+    log(
+      "  --since <seq>            Only events after this sequence (from the expired line)",
+    );
+    log(
+      "  --instance <id>          Server instance the --since cursor came from",
+    );
+    log(
+      `  --max-seconds <seconds>  Exit cleanly after this long, default ${DEFAULT_LISTEN_MAX_SECONDS}`,
+    );
+    log(
+      `  --fork-asks-after <s>    Answer an Ask still queued after <s> seconds (e.g. ${SUGGESTED_FORK_ASKS_AFTER_SECONDS})`,
+    );
+    log(
+      "                           from a headless fork of the session (see answer-fork); off by default",
+    );
+    log(
+      "  --session <id>           Session to fork, default CLAUDE_CODE_SESSION_ID",
+    );
+    log(
+      "  --claude <path>          claude CLI for forks, default claude on PATH",
+    );
+    log("  --state-file <path>      Server state file");
+    log("  --state-dir <dir>        Directory containing server.json");
+    log("");
+    log("Environment variables:");
+    log(
+      "  CLAUDE_CODE_SESSION_ID   Reported to the Roughdraft UI as the listening session",
+    );
+    printSessionCommandHelp("listen", log);
+    return;
+  }
+
+  if (command === "answer-fork") {
+    log("Usage:");
+    log(
+      "  roughdraft answer-fork <file.md> <commentId> [--session <id>] [--claude <path>] [--timeout <seconds>]",
+    );
+    log("");
+    log(
+      "Answers an Ask thread while the Claude Code session that owns it is busy:",
+    );
+    log(
+      "runs `claude -p --resume <id> --fork-session`, a fork of the session's context",
+    );
+    log(
+      "that may only read files and run `roughdraft ack` and `roughdraft reply`. It never",
+    );
+    log(
+      "edits the document, and refuses Change threads. The UI shows the thread as",
+    );
+    log(
+      "passed to a forked Claude; if the fork fails or times out, the thread goes back",
+    );
+    log("to the session's queue.");
+    log("");
+    log("Flags:");
+    log(
+      "  --session <id>          Session to fork, default CLAUDE_CODE_SESSION_ID",
+    );
+    log("  --claude <path>         claude CLI, default claude on PATH");
+    log(
+      `  --timeout <seconds>     Stop the fork after this long, default ${DEFAULT_FORK_TIMEOUT_MS / 1000}`,
+    );
+    log("  --state-file <path>     Server state file");
+    log("  --state-dir <dir>       Directory containing server.json");
+    return;
+  }
+
+  if (command === "reply") {
+    log("Usage:");
+    log(
+      "  roughdraft reply <file.md> <commentId> (--stdin | --body <text>) [--status answered|applied]",
+    );
+    log("");
+    log(
+      "Appends an AI reply (Markdown allowed, multiline OK) to the comment's thread",
+    );
+    log(
+      "through the Roughdraft server, so it never races the browser's autosave.",
+    );
+    log("");
+    log("Flags:");
+    log("  --stdin                 Read the reply body from stdin");
+    log("  --body <text>           Reply body");
+    log(
+      "  --status <status>       answered (default, for Ask) or applied (for Change)",
+    );
+    log("  --json                  Print machine-readable output");
+    log("  --state-file <path>     Server state file");
+    log("  --state-dir <dir>       Directory containing server.json");
+    return;
+  }
+
+  if (command === "ack") {
+    log("Usage:");
+    log("  roughdraft ack <file.md> <commentId> [--delegated]");
+    log("");
+    log(
+      "Tells the Roughdraft UI that the agent is working on this comment thread.",
+    );
+    log(
+      "With --delegated, it shows the thread as passed to a subagent; the subagent",
+    );
+    log("then runs ack without the flag when it starts.");
+    log("");
+    log("Flags:");
+    log("  --delegated             The thread was handed to a subagent");
+    log("  --json                  Print machine-readable output");
+    log("  --state-file <path>     Server state file");
+    log("  --state-dir <dir>       Directory containing server.json");
+    return;
+  }
+
+  if (command === "resolve") {
+    log("Usage:");
+    log("  roughdraft resolve <file.md> <commentId> [--summary <text>]");
+    log("");
+    log("Marks the comment thread resolved in the Markdown file.");
+    log("");
+    log("Flags:");
+    log("  --summary <text>        Short resolution summary");
+    log("  --json                  Print machine-readable output");
+    log("  --state-file <path>     Server state file");
+    log("  --state-dir <dir>       Directory containing server.json");
+    return;
+  }
+
   if (command === "mcp") {
     log("Usage:");
     log("  roughdraft mcp");
@@ -1120,8 +1364,9 @@ function printCriticMarkupHelp(log: (message: string) => void) {
   );
   log("");
   log("Code blocks:");
+  log("  To comment on code in a fence, anchor it: {==code==}{>>note<<}{#c1}.");
   log(
-    "  Treat CriticMarkup inside fenced code blocks as literal example text.",
+    "  Any other CriticMarkup inside fenced code blocks is literal example text.",
   );
   log("");
   log("Full spec:");
@@ -1339,18 +1584,27 @@ async function runRemoteOpen(
     deps.log(`Holding session open for ${options.openPath}. Ctrl-C to exit.`);
   }
 
-  const SSE_CONNECT_TIMEOUT_MS = 10_000;
+  const SSE_CONNECT_TIMEOUT_MS = deps.remoteConnectTimeoutMs ?? 10_000;
   const eventsUrl = new URL(
     `/api/remote-document/${encodeURIComponent(sessionId)}/events`,
     baseUrl,
   );
   eventsUrl.searchParams.set("role", "cli");
 
+  // Only the connect is time-limited: an AbortSignal on the fetch would also
+  // abort the long-lived body stream, so clear the timer once headers arrive.
+  // The host sends keepalives, so undici's body timeout does not fire either.
+  const connectAbort = new AbortController();
+  const connectTimer = setTimeout(
+    () =>
+      connectAbort.abort(new DOMException("Connect timeout", "TimeoutError")),
+    SSE_CONNECT_TIMEOUT_MS,
+  );
   let eventsResponse: Response;
   try {
     eventsResponse = await deps.fetchImpl(eventsUrl.toString(), {
       headers: { Accept: "text/event-stream", ...authHeaders },
-      signal: AbortSignal.timeout(SSE_CONNECT_TIMEOUT_MS),
+      signal: connectAbort.signal,
     });
   } catch (error) {
     deps.error(
@@ -1359,6 +1613,8 @@ async function runRemoteOpen(
       }`,
     );
     return 1;
+  } finally {
+    clearTimeout(connectTimer);
   }
 
   if (!eventsResponse.ok || !eventsResponse.body) {
@@ -2149,43 +2405,29 @@ async function runWatch(
     serverUrl = result.server.url;
   }
   const relativePath = path.relative(target.projectDir, target.openPath);
-  const body: {
-    projectPath: string;
-    path: string;
-    timeoutSeconds?: number;
-    batchWindowSeconds: number;
-    fromNow: boolean;
-  } = {
-    projectPath: target.projectDir,
-    path: relativePath,
-    batchWindowSeconds: options.batchWindowSeconds,
-    fromNow: !options.replay,
-  };
-  if (options.timeoutSeconds !== undefined) {
-    body.timeoutSeconds = options.timeoutSeconds;
-  }
+  const watchUrl = new URL("/api/review-events/watch", serverUrl);
 
-  const response = await deps.fetchImpl(
-    new URL("/api/review-events/watch", serverUrl),
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      ...(options.timeoutSeconds !== undefined
-        ? { signal: AbortSignal.timeout((options.timeoutSeconds + 5) * 1000) }
-        : {}),
+  const payload = await watchInRounds({
+    afterSequence: options.replay ? 0 : undefined,
+    timeoutSeconds: options.timeoutSeconds,
+    poll: async (cursor) => {
+      const response = await deps.fetchImpl(watchUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectPath: target.projectDir,
+          path: relativePath,
+          batchWindowSeconds: options.batchWindowSeconds,
+          ...cursor,
+        }),
+        signal: roundTimeoutSignal(cursor.timeoutSeconds, 5),
+      });
+      if (!response.ok) {
+        throw new Error(`Failed to watch review events: ${response.status}`);
+      }
+      return (await response.json()) as WatchRoundPayload;
     },
-  );
-
-  if (!response.ok) {
-    throw new Error(`Failed to watch review events: ${response.status}`);
-  }
-
-  const payload = (await response.json()) as {
-    events?: unknown[];
-    timedOut?: boolean;
-    nextSequence?: number;
-  };
+  });
 
   if (json) {
     emitJson(deps.log, payload);
@@ -2232,6 +2474,294 @@ function getConfidentStopCandidate(
   }
 
   return payload.pid;
+}
+
+/**
+ * Server lookups for the session commands (ADR 0007): the dev API behind a
+ * live dev frontend for this checkout, otherwise the background server.
+ * `locateServer` never starts one (the plugin's listener runs in every
+ * Claude Code session, whether or not Roughdraft is in use).
+ */
+function createSessionCommandDeps(deps: CliDependencies): SessionCommandDeps {
+  const withEnv = (env: NodeJS.ProcessEnv): CliDependencies => ({
+    ...deps,
+    env,
+  });
+  return {
+    ...deps,
+    locateServer: async (env) => {
+      const scoped = withEnv(env);
+      const liveDevFrontend = await resolveLiveDevFrontendBaseUrl(scoped);
+      if (liveDevFrontend?.apiUrl) return liveDevFrontend.apiUrl;
+      return (await findReusableServer(scoped))?.url ?? null;
+    },
+    ensureServer: async (env, projectDir) => {
+      const scoped = withEnv(env);
+      const liveDevFrontend = await resolveLiveDevFrontendBaseUrl(scoped);
+      if (liveDevFrontend?.apiUrl) return liveDevFrontend.apiUrl;
+      return (await ensureServerRunning(scoped, { projectDir })).server.url;
+    },
+    pluginDir: path.join(currentServerRoot, "packages", "claude-plugin"),
+    runCommand: (argv) => {
+      const [bin = "", ...args] = argv;
+      const result = spawnSync(bin, args, { stdio: "inherit" });
+      return result.error ? 127 : (result.status ?? 1);
+    },
+    printHelp: (command) =>
+      command === "listen"
+        ? printCommandHelp("listen", deps.log)
+        : printSessionCommandHelp(command, deps.log),
+  };
+}
+
+const AGENT_COMMAND_USAGE = {
+  listen:
+    "Usage: roughdraft listen <file.md> [--since <seq>] [--max-seconds <seconds>]",
+  reply:
+    "Usage: roughdraft reply <file.md> <commentId> (--stdin | --body <text>) [--status answered|applied]",
+  ack: "Usage: roughdraft ack <file.md> <commentId> [--delegated]",
+  resolve: "Usage: roughdraft resolve <file.md> <commentId> [--summary <text>]",
+  "answer-fork":
+    "Usage: roughdraft answer-fork <file.md> <commentId> [--session <id>] [--claude <path>] [--timeout <seconds>]",
+} as const;
+
+async function runAgentCommand(
+  command: keyof typeof AGENT_COMMAND_USAGE,
+  rest: string[],
+  baseDeps: CliDependencies,
+  globalJson: boolean,
+): Promise<number> {
+  const usage = AGENT_COMMAND_USAGE[command];
+  const commonFlags = ["--state-dir", "--state-file"] as const;
+  let options: ParsedAgentArgs;
+  try {
+    options =
+      command === "listen"
+        ? parseAgentArgs(rest, [
+            ...commonFlags,
+            "--since",
+            "--instance",
+            "--max-seconds",
+            "--fork-asks-after",
+            "--session",
+            "--claude",
+          ])
+        : command === "answer-fork"
+          ? parseAgentArgs(rest, [
+              ...commonFlags,
+              "--session",
+              "--claude",
+              "--timeout",
+            ])
+          : command === "reply"
+            ? parseAgentArgs(rest, [...commonFlags, "--body", "--status"], {
+                allowStdin: true,
+              })
+            : command === "resolve"
+              ? parseAgentArgs(rest, [...commonFlags, "--summary"])
+              : parseAgentArgs(rest, commonFlags, { allowDelegated: true });
+  } catch (error) {
+    baseDeps.error(error instanceof Error ? error.message : "Invalid usage.");
+    baseDeps.error(usage);
+    return USAGE_ERROR;
+  }
+
+  if (options.help) {
+    printCommandHelp(command, baseDeps.log);
+    return 0;
+  }
+
+  const expectedPositionals = command === "listen" ? 1 : 2;
+  if (options.positionals.length !== expectedPositionals) {
+    baseDeps.error(usage);
+    return USAGE_ERROR;
+  }
+
+  if (
+    command === "reply" &&
+    options.status !== undefined &&
+    options.status !== "answered" &&
+    options.status !== "applied"
+  ) {
+    baseDeps.error("--status must be answered or applied.");
+    return USAGE_ERROR;
+  }
+  if (command === "reply" && options.stdin === (options.body !== undefined)) {
+    baseDeps.error("Pass exactly one of --stdin or --body <text>.");
+    baseDeps.error(usage);
+    return USAGE_ERROR;
+  }
+
+  const deps: CliDependencies = {
+    ...baseDeps,
+    env: {
+      ...baseDeps.env,
+      ...(options.stateDir ? { ROUGHDRAFT_STATE_DIR: options.stateDir } : {}),
+      ...(options.stateFile
+        ? { ROUGHDRAFT_STATE_FILE: options.stateFile }
+        : {}),
+    },
+  };
+
+  const [filePath = "", commentId = ""] = options.positionals;
+  let resolved: ResolvedTargetPath;
+  try {
+    resolved = resolveTargetPath(filePath);
+  } catch (error) {
+    deps.error(error instanceof Error ? error.message : "Invalid path.");
+    return 1;
+  }
+  if (resolved.isDirectory) {
+    deps.error(`${command} works on a single .md file, not a directory.`);
+    return USAGE_ERROR;
+  }
+
+  let body = "";
+  if (command === "reply") {
+    body = (
+      options.stdin ? await deps.readStdin() : (options.body ?? "")
+    ).replace(/\s+$/, "");
+    if (body.trim().length === 0) {
+      deps.error("Reply body is empty.");
+      return USAGE_ERROR;
+    }
+  }
+
+  // Talk to the same API the browser uses: the dev API behind a live dev
+  // frontend for this checkout, otherwise the (auto-started) background server.
+  const liveDevFrontend = await resolveLiveDevFrontendBaseUrl(deps);
+  const serverUrl =
+    liveDevFrontend?.apiUrl ??
+    (await ensureServerRunning(deps, { projectDir: resolved.projectDir }))
+      .server.url;
+  const target: AgentCliTarget = {
+    serverUrl,
+    projectDir: resolved.projectDir,
+    documentPath: resolved.openPath,
+  };
+  const json = globalJson || options.json;
+
+  const sessionId =
+    options.session?.trim() || deps.env.CLAUDE_CODE_SESSION_ID?.trim() || "";
+
+  if (command === "listen") {
+    let observer: ForkScheduler | undefined;
+    if (options.forkAsksAfter !== undefined) {
+      if (sessionId) {
+        observer = new ForkScheduler({
+          afterMs: options.forkAsksAfter * 1000,
+          maxConcurrent: DEFAULT_MAX_CONCURRENT_FORKS,
+          threadStatus: (threadRootId) =>
+            fetchThreadStatus(deps, target, threadRootId),
+          runFork: (event, started) =>
+            runAnswerFork(deps, target, {
+              commentId: event.commentId,
+              sessionId,
+              cwd: deps.cwd,
+              claudePath: options.claude,
+              onStarted: started,
+              onRetry: (reason) =>
+                deps.log(
+                  `[roughdraft] headless fork for ${event.threadRootId} failed (${reason}); retrying with the session model`,
+                ),
+            }),
+          log: deps.log,
+          formatEventLine: (event) =>
+            formatListenEventLine(event, {
+              cliName: cliCommandName(deps.env),
+              documentPath: target.documentPath,
+            }),
+        });
+      } else {
+        deps.log(
+          "[roughdraft] --fork-asks-after needs a session id (CLAUDE_CODE_SESSION_ID or --session); not forking Asks",
+        );
+      }
+    }
+    // `--session` also names the listening session (it claims the file).
+    const listenDeps = sessionId
+      ? { ...deps, env: { ...deps.env, CLAUDE_CODE_SESSION_ID: sessionId } }
+      : deps;
+    return runListen(listenDeps, target, {
+      since: options.since,
+      instanceId: options.instance,
+      maxSeconds: options.maxSeconds ?? DEFAULT_LISTEN_MAX_SECONDS,
+      observer,
+    });
+  }
+  if (command === "answer-fork") {
+    if (!sessionId) {
+      deps.error(
+        "answer-fork needs the session to fork: pass --session <id> or set CLAUDE_CODE_SESSION_ID.",
+      );
+      return USAGE_ERROR;
+    }
+    const outcome = await runAnswerFork(deps, target, {
+      commentId,
+      sessionId,
+      cwd: deps.cwd,
+      claudePath: options.claude,
+      timeoutMs:
+        options.timeout !== undefined ? options.timeout * 1000 : undefined,
+      onStarted: () =>
+        deps.log(
+          `[roughdraft] forking session ${sessionId} to answer ${commentId} in ${target.documentPath}`,
+        ),
+      onRetry: (reason) =>
+        deps.log(
+          `[roughdraft] the fork failed (${reason}); retrying with the session model`,
+        ),
+    });
+    switch (outcome.kind) {
+      case "answered": {
+        const details = [
+          outcome.modelAlias
+            ? `model ${outcome.modelAlias}`
+            : "the session model",
+          ...(outcome.costUsd !== undefined
+            ? [`cost $${outcome.costUsd.toFixed(2)}`]
+            : []),
+        ];
+        deps.log(
+          `[roughdraft] a headless Claude answered ${commentId} in ${target.documentPath} (${details.join(", ")})`,
+        );
+        return 0;
+      }
+      case "skipped":
+        deps.log(`[roughdraft] not forking: ${outcome.reason}`);
+        return 0;
+      case "claude-missing":
+        deps.error(
+          `claude CLI not found${options.claude ? ` at ${options.claude}` : " on PATH"}; pass --claude <path>.`,
+        );
+        return 1;
+      default:
+        deps.error(
+          `Headless fork did not answer ${commentId}: ${outcome.reason}`,
+        );
+        return 1;
+    }
+  }
+  if (command === "reply") {
+    return runReply(deps, target, {
+      commentId,
+      body,
+      status: options.status === "applied" ? "applied" : "answered",
+      json,
+    });
+  }
+  if (command === "ack") {
+    return runAck(deps, target, {
+      commentId,
+      delegated: options.delegated,
+      json,
+    });
+  }
+  return runResolve(deps, target, {
+    commentId,
+    summary: options.summary,
+    json,
+  });
 }
 
 export async function runCli(
@@ -2638,6 +3168,30 @@ export async function runCli(
       return runWatch(deps, options.positionals[0] ?? "", options, json);
     }
 
+    if (
+      command === "claim" ||
+      command === "sessions" ||
+      command === "setup" ||
+      (command === "listen" && isSessionListenArgs(rest))
+    ) {
+      return runSessionCommand(
+        command,
+        rest,
+        createSessionCommandDeps(deps),
+        parsed.global.json,
+      );
+    }
+
+    if (
+      command === "listen" ||
+      command === "reply" ||
+      command === "ack" ||
+      command === "resolve" ||
+      command === "answer-fork"
+    ) {
+      return runAgentCommand(command, rest, deps, parsed.global.json);
+    }
+
     if (command === "mcp") {
       let options: ParsedCommandOptions;
       try {
@@ -2772,6 +3326,16 @@ export async function runCli(
       } else {
         result = await ensureServerRunning(deps, { projectDir });
         baseUrl = buildPublicBaseUrl(result.server.port);
+      }
+
+      // A Claude Code session opening a file becomes its owner unless a
+      // live session already owns it (ADR 0007).
+      if (!isDirectory) {
+        await claimForCallingSession(
+          deps,
+          liveDevFrontend?.apiUrl ?? baseUrl,
+          openPath,
+        );
       }
 
       const targetUrl = buildTargetUrl(baseUrl, openPath, isDirectory);

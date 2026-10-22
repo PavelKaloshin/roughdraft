@@ -241,7 +241,8 @@ describe("CriticMarkup comments", () => {
     expect(output).toContain("suggestions:");
     expect(output).toContain("s1:");
     expect(output).toContain("s2:");
-    expect(output).toContain("at: 2026-05-24T11:00:00.000Z");
+    // New entries quote `at`, like rfm and the spec's examples.
+    expect(output).toContain('at: "2026-05-24T11:00:00.000Z"');
   });
 
   it("removes deleted comments and replies from YAML endmatter", () => {
@@ -1082,8 +1083,12 @@ const command = "{==roughdraft open==}{>>test<<}{id="c1" by="user" at="2026-04-2
 });
 
 function richTextRoundTrip(markdown: string): string {
-  const { doc, comments, frontmatter } = criticMarkdownToEditorState(markdown);
-  return editorStateToCriticMarkdown(doc, comments, { frontmatter });
+  const { doc, comments, frontmatter, headingSpacing } =
+    criticMarkdownToEditorState(markdown);
+  return editorStateToCriticMarkdown(doc, comments, {
+    frontmatter,
+    headingSpacing,
+  });
 }
 
 describe("Markdown rich-text round-trip regressions", () => {
@@ -1157,6 +1162,78 @@ describe("Markdown rich-text round-trip regressions", () => {
       "| Column | Value |",
       "| --- | --- |",
       "| Escaped | `a | b` and plain a \\| b |",
+      "",
+    ].join("\n");
+
+    expect(richTextRoundTrip(input)).toBe(input);
+  });
+});
+
+// Regressions observed in real usage: an agent-written plan file was saved
+// back mangled by an open Roughdraft tab without any user edit. Each test
+// pins one rewrite that ADR 0003 (round-trip contract) and the RFM spec
+// (raw review marker text inside code contexts is preserved) forbid for
+// untouched markdown.
+describe("Unedited markdown round-trip (agent-authored plan regressions)", () => {
+  it("keeps an anchored CriticMarkup example inside a fenced code block literal and byte-for-byte", () => {
+    const input = [
+      "Intro.",
+      "",
+      "```markdown",
+      "{==anchor==}{>>Literal example inside a fence<<}{#c3}",
+      "",
+      "---",
+      "comments:",
+      "  c3:",
+      "    by: pavel",
+      "```",
+      "",
+      "After the fence.",
+      "",
+    ].join("\n");
+
+    const { doc, comments } = criticMarkdownToEditorState(input);
+
+    expect(editorStateToCriticMarkdown(doc, comments)).toBe(input);
+  });
+
+  it("does not add generated metadata to a bare {>>comment<<} the user did not touch", () => {
+    const input = [
+      "Paragraph.",
+      "",
+      "{>>Agent note without metadata.<<}",
+      "",
+      "Next paragraph.",
+      "",
+    ].join("\n");
+
+    expect(richTextRoundTrip(input)).toBe(input);
+  });
+
+  it("keeps the blank line after a heading", () => {
+    const input = [
+      "# Title",
+      "",
+      "Intro paragraph right after a heading.",
+      "",
+      "## Goals",
+      "",
+      "Body.",
+      "",
+    ].join("\n");
+
+    expect(richTextRoundTrip(input)).toBe(input);
+  });
+
+  it("keeps tight ordered and bullet lists tight", () => {
+    const input = [
+      "1. **First** goal.",
+      "2. **Second** goal.",
+      "",
+      "Between.",
+      "",
+      "- bullet a",
+      "- bullet b",
       "",
     ].join("\n");
 

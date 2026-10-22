@@ -1,4 +1,15 @@
 import {
+  AGENT_THREAD_STATUSES,
+  type AgentSessionOwner,
+  type AgentSessionSummary,
+  type AgentStatusSnapshot,
+  type AgentThreadStatus,
+  type AgentThreadTiming,
+  type CommentEventResult,
+  type CommentEventType,
+} from "./comment-agent";
+import { getLiveConnection, type LiveConnection } from "./live-connection";
+import {
   type BackendInfo,
   type CompleteReviewOptions,
   type CompleteReviewResult,
@@ -14,9 +25,11 @@ import {
 export class ApiBackend implements StorageBackend {
   info: BackendInfo;
   canManageProjects = true;
+  private readonly live: LiveConnection;
 
-  constructor(info: BackendInfo) {
+  constructor(info: BackendInfo, live: LiveConnection = getLiveConnection()) {
     this.info = info;
+    this.live = live;
   }
 
   private updateProjectInfo(projectPath?: string): void {
@@ -112,26 +125,26 @@ export class ApiBackend implements StorageBackend {
   watchMarkdownFile(
     relativePath: string,
     onChange: (event: MarkdownFileChangeEvent) => void,
+    knownVersion?: string,
   ): () => void {
-    const source = new EventSource(
-      this.buildUrl("/api/markdown-file/events", { path: relativePath }),
+    // The newest version this subscription has seen. A reconnect re-sends
+    // it, so a write that landed while the socket was down is reported.
+    let latestVersion = knownVersion;
+    const projectPath = this.info.projectPath;
+    return this.live.subscribe(
+      "markdown-file",
+      () => ({
+        projectPath,
+        path: relativePath,
+        ...(latestVersion ? { version: latestVersion } : {}),
+      }),
+      (event, data) => {
+        if (event !== "change") return;
+        const change = data as MarkdownFileChangeEvent;
+        if (typeof change.version === "string") latestVersion = change.version;
+        onChange(change);
+      },
     );
-
-    source.addEventListener("change", (event) => {
-      try {
-        onChange(JSON.parse((event as MessageEvent<string>).data));
-      } catch (error) {
-        console.error("Failed to read markdown file change event:", error);
-      }
-    });
-
-    source.onerror = (error) => {
-      console.error("Markdown file event stream failed:", error);
-    };
-
-    return () => {
-      source.close();
-    };
   }
 
   async completeReview(
@@ -184,6 +197,74 @@ export class ApiBackend implements StorageBackend {
     };
   }
 
+  async postCommentEvent(
+    relativePath: string,
+    input: { type: CommentEventType; commentId: string },
+  ): Promise<CommentEventResult> {
+    const res = await fetch(
+      this.buildUrl("/api/review-events", { path: relativePath }),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectPath: this.info.projectPath,
+          path: relativePath,
+          type: input.type,
+          commentId: input.commentId,
+        }),
+      },
+    );
+
+    if (!res.ok) {
+      throw new Error(
+        `Failed to send ${input.type} for ${input.commentId}: ${res.status}`,
+      );
+    }
+
+    const payload = (await res.json()) as {
+      duplicate?: unknown;
+      agent?: { listening?: unknown; sessionId?: unknown };
+    };
+    const sessionId = payload.agent?.sessionId;
+    return {
+      duplicate: payload.duplicate === true,
+      agent: {
+        listening: payload.agent?.listening === true,
+        ...(typeof sessionId === "string" ? { sessionId } : {}),
+      },
+    };
+  }
+
+  async connectSession(relativePath: string, sessionId: string): Promise<void> {
+    const res = await fetch(this.buildUrl("/api/sessions/claim"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        projectPath: this.info.projectPath,
+        path: relativePath,
+        sessionId,
+        force: true,
+      }),
+    });
+    if (!res.ok) {
+      throw new Error(`Failed to connect session ${sessionId}: ${res.status}`);
+    }
+  }
+
+  watchAgentStatus(
+    relativePath: string,
+    onStatus: (status: AgentStatusSnapshot) => void,
+  ): () => void {
+    const projectPath = this.info.projectPath;
+    return this.live.subscribe(
+      "agent-status",
+      () => ({ projectPath, path: relativePath }),
+      (event, data) => {
+        if (event === "status") onStatus(parseAgentStatusSnapshot(data));
+      },
+    );
+  }
+
   async saveAsset(file: File): Promise<StoredAsset> {
     const buffer = await file.arrayBuffer();
     let binary = "";
@@ -217,4 +298,103 @@ export class ApiBackend implements StorageBackend {
   async openProject(path: string): Promise<void> {
     this.updateProjectInfo(path);
   }
+}
+
+const agentThreadStatuses = new Set<AgentThreadStatus>(AGENT_THREAD_STATUSES);
+
+export function parseAgentStatusSnapshot(value: unknown): AgentStatusSnapshot {
+  const record =
+    value && typeof value === "object"
+      ? (value as Record<string, unknown>)
+      : {};
+  const threads: Record<string, AgentThreadStatus> = {};
+  if (record.threads && typeof record.threads === "object") {
+    for (const [id, status] of Object.entries(
+      record.threads as Record<string, unknown>,
+    )) {
+      if (agentThreadStatuses.has(status as AgentThreadStatus)) {
+        threads[id] = status as AgentThreadStatus;
+      }
+    }
+  }
+  // Timing for threads with a known status; each timestamp is optional, and
+  // older servers send none at all.
+  let threadDetails: Record<string, AgentThreadTiming> | undefined;
+  if (record.threadDetails && typeof record.threadDetails === "object") {
+    threadDetails = {};
+    for (const [id, detail] of Object.entries(
+      record.threadDetails as Record<string, unknown>,
+    )) {
+      if (!threads[id] || !detail || typeof detail !== "object") continue;
+      const { since, requestedAt, delegatedTo } = detail as Record<
+        string,
+        unknown
+      >;
+      threadDetails[id] = {
+        ...(typeof since === "string" ? { since } : {}),
+        ...(typeof requestedAt === "string" ? { requestedAt } : {}),
+        ...(delegatedTo === "fork-process" ? { delegatedTo } : {}),
+      };
+    }
+  }
+  return {
+    listening: record.listening === true,
+    listenerCount:
+      typeof record.listenerCount === "number" ? record.listenerCount : 0,
+    ...(typeof record.sessionId === "string"
+      ? { sessionId: record.sessionId }
+      : {}),
+    threads,
+    ...(threadDetails ? { threadDetails } : {}),
+    ...("owner" in record ? { owner: parseSessionOwner(record.owner) } : {}),
+    ...(Array.isArray(record.sessions)
+      ? {
+          sessions: record.sessions.flatMap((entry) => {
+            const session = parseSessionSummary(entry);
+            return session ? [session] : [];
+          }),
+        }
+      : {}),
+  };
+}
+
+function optionalString<K extends string>(
+  record: Record<string, unknown>,
+  key: K,
+): Partial<Record<K, string>> {
+  const value = record[key];
+  return typeof value === "string" && value.length > 0
+    ? ({ [key]: value } as Record<K, string>)
+    : {};
+}
+
+function parseSessionOwner(value: unknown): AgentSessionOwner | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  if (typeof record.sessionId !== "string" || !record.sessionId) return null;
+  return {
+    sessionId: record.sessionId,
+    ...optionalString(record, "title"),
+    ...optionalString(record, "cwd"),
+    live: record.live === true,
+    ...optionalString(record, "lastActiveAt"),
+  };
+}
+
+function parseSessionSummary(value: unknown): AgentSessionSummary | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  if (typeof record.sessionId !== "string" || !record.sessionId) return null;
+  return {
+    sessionId: record.sessionId,
+    ...optionalString(record, "title"),
+    ...optionalString(record, "cwd"),
+    lastActiveAt:
+      typeof record.lastActiveAt === "string" ? record.lastActiveAt : "",
+    documents: Array.isArray(record.documents)
+      ? record.documents.filter(
+          (document): document is string => typeof document === "string",
+        )
+      : [],
+  };
 }

@@ -629,6 +629,57 @@ describe("PageCard editor integration", () => {
     );
   });
 
+  it("autosave after typing in one paragraph rewrites only that paragraph", async () => {
+    const source = [
+      "Setext title",
+      "============",
+      "",
+      "A hard-wrapped paragraph with __bold__",
+      "and *emphasis* that nobody touches.",
+      "",
+      "Type here.",
+      "",
+      "* star bullet",
+      "* another one",
+      "",
+      "| Name  | Status |",
+      "|-------|--------|",
+      "| Alpha | Ready  |",
+      "",
+      "***",
+      "",
+    ].join("\n");
+    const rendered = await renderPageCard({
+      page: { id: "doc-block-source", title: "Doc", content: source },
+      selected: true,
+    });
+    const editor = rendered.getEditor();
+
+    vi.useFakeTimers();
+
+    const range = findTextRange(editor, "Type here.");
+    expect(range).not.toBeNull();
+    await act(async () => {
+      editor
+        .chain()
+        .focus()
+        .setTextSelection(range?.to ?? 0)
+        .insertContent(" Typed")
+        .run();
+    });
+    await flushReact();
+
+    await act(async () => {
+      vi.advanceTimersByTime(500);
+      await Promise.resolve();
+    });
+
+    expect(rendered.onSave).toHaveBeenCalledTimes(1);
+    expect(rendered.onSave.mock.calls[0]?.[1]).toBe(
+      source.replace("Type here.\n", "Type here. Typed\n"),
+    );
+  });
+
   it("rich-text edits preserve YAML endmatter-backed review metadata on autosave", async () => {
     const content = [
       "# Review",
@@ -1373,6 +1424,85 @@ describe("PageCard editor integration", () => {
     ).toBe("true");
   });
 
+  // Real-usage regression: an agent-authored plan open in a tab was saved back
+  // (mangled) every time the agent edited it on disk, and again on Done
+  // Reviewing, although the user never edited it.
+  const agentPlanMarkdown = [
+    "# Title",
+    "",
+    "Intro paragraph right after a heading.",
+    "",
+    "- bullet a",
+    "- bullet b",
+    "",
+    "{>>Agent note without metadata.<<}",
+    "",
+    "```markdown",
+    "{==anchor==}{>>Literal example inside a fence<<}{#c3}",
+    "```",
+    "",
+  ].join("\n");
+
+  it("loading unedited agent-authored markdown does not autosave it", async () => {
+    vi.useFakeTimers();
+    const rendered = await renderPageCard({
+      page: { id: "plan", title: "Plan", content: agentPlanMarkdown },
+      selected: true,
+    });
+
+    await act(async () => {
+      vi.advanceTimersByTime(2000);
+      await Promise.resolve();
+    });
+
+    expect(rendered.onSave).not.toHaveBeenCalled();
+  });
+
+  it("an external disk change to an unedited document does not save it back", async () => {
+    // Initial content ends in a paragraph, so loading it alone does not save;
+    // the agent's on-disk edit then appends a list.
+    const initial = "# Title\n\nIntro paragraph right after a heading.\n";
+    vi.useFakeTimers();
+    const rendered = await renderPageCard({
+      page: { id: "plan", title: "Plan", content: initial },
+      selected: true,
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(2000);
+      await Promise.resolve();
+    });
+    expect(rendered.onSave).not.toHaveBeenCalled();
+
+    await rendered.rerender({
+      page: {
+        id: "plan",
+        title: "Plan",
+        content: `${initial}\n- bullet a\n- bullet b\n`,
+      },
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(2000);
+      await Promise.resolve();
+    });
+
+    expect(rendered.onSave).not.toHaveBeenCalled();
+  });
+
+  it("Done Reviewing (flushSave) on an unedited document does not write it", async () => {
+    const rendered = await renderPageCard({
+      page: { id: "plan", title: "Plan", content: agentPlanMarkdown },
+      selected: true,
+    });
+
+    let result: ManualSaveResult | undefined;
+    await act(async () => {
+      result = await rendered.getSaveController().flushSave();
+    });
+
+    expect(result).toEqual({ status: "saved" });
+    expect(rendered.onSave).not.toHaveBeenCalled();
+  });
+
   it("external page content updates replace editor content when unfocused", async () => {
     const rendered = await renderPageCard({
       page: {
@@ -1538,6 +1668,411 @@ describe("PageCard editor integration", () => {
     expect(rendered.getEditor().getText()).toContain("Start updated");
   });
 
+  describe("live reload of external changes", () => {
+    const liveDoc = (fifth = "Fifth paragraph.") =>
+      [
+        "# Live",
+        "",
+        "First {==alpha==}{>>Comment body<<}{#c1} paragraph.",
+        "",
+        "Second paragraph.",
+        "",
+        "Third paragraph.",
+        "",
+        "Fourth paragraph.",
+        "",
+        fifth,
+        "",
+        "---",
+        "comments:",
+        "  c1:",
+        "    by: Nora",
+        '    at: "2026-05-24T10:45:00.000Z"',
+        "",
+      ].join("\n");
+    const livePage = (content: string) => ({
+      id: "live-doc",
+      title: "Live",
+      content,
+    });
+
+    it("updates a clean document in place: same editor, same selection, same selected comment, no save", async () => {
+      const rendered = await renderPageCard({ page: livePage(liveDoc()) });
+      const editor = rendered.getEditor();
+      const editable = getEditable(rendered.container);
+      await selectText(editor, "alpha");
+      const selection = editor.state.selection;
+      expect(
+        queryByTestId(rendered.container, "document-comment-fallback")
+          ?.textContent,
+      ).toContain("Comment body");
+
+      vi.useFakeTimers();
+      await rendered.rerender({
+        page: livePage(liveDoc("Fifth paragraph, rewritten by the agent.")),
+      });
+
+      expect(rendered.getEditor()).toBe(editor);
+      expect(getEditable(rendered.container)).toBe(editable);
+      expect(editor.getText()).toContain("rewritten by the agent");
+      expect(editor.state.selection.from).toBe(selection.from);
+      expect(editor.state.selection.to).toBe(selection.to);
+      expect(
+        queryByTestId(rendered.container, "document-comment-fallback")
+          ?.textContent,
+      ).toContain("Comment body");
+
+      await act(async () => {
+        vi.advanceTimersByTime(2000);
+        await Promise.resolve();
+      });
+      expect(rendered.onSave).not.toHaveBeenCalled();
+    });
+
+    it("briefly highlights the changed text, then removes the highlight", async () => {
+      const rendered = await renderPageCard({ page: livePage(liveDoc()) });
+      vi.useFakeTimers();
+
+      await rendered.rerender({
+        page: livePage(liveDoc("Fifth paragraph, rewritten by the agent.")),
+      });
+
+      const highlight = queryByTestId(
+        getEditable(rendered.container),
+        "external-change-highlight",
+      );
+      expect(highlight?.textContent).toContain("rewritten by the");
+      expect(highlight?.textContent).not.toContain("First");
+
+      await act(async () => {
+        vi.advanceTimersByTime(1600);
+        await Promise.resolve();
+      });
+      expect(
+        queryByTestId(
+          getEditable(rendered.container),
+          "external-change-highlight",
+        ),
+      ).toBeNull();
+    });
+
+    it("applies an endmatter-only change to the threads without touching the body", async () => {
+      const rendered = await renderPageCard({ page: livePage(liveDoc()) });
+      const editor = rendered.getEditor();
+      await selectText(editor, "alpha");
+      const docBefore = editor.state.doc;
+      const selection = editor.state.selection;
+
+      // Only the YAML endmatter changes (thread metadata), never the body.
+      await rendered.rerender({
+        page: livePage(liveDoc().replace("by: Nora", "by: Nora Agent")),
+      });
+
+      expect(rendered.getEditor()).toBe(editor);
+      expect(editor.state.doc).toBe(docBefore);
+      expect(editor.state.selection.eq(selection)).toBe(true);
+      expect(
+        queryByTestId(rendered.container, "document-comment-fallback")
+          ?.textContent,
+      ).toContain("Nora Agent");
+    });
+
+    it("keeps an open comment draft when the agent edits another paragraph", async () => {
+      const rendered = await renderPageCard({ page: livePage(liveDoc()) });
+      await selectText(rendered.getEditor(), "Third");
+      await addCommentWithShortcut();
+      const draftId = [
+        ...rendered.container.querySelectorAll<HTMLElement>(
+          "[data-testid^='comment-banner-'][data-testid$='-editor']",
+        ),
+      ][0]?.dataset.testid;
+      expect(draftId).toBeDefined();
+
+      await rendered.rerender({
+        page: livePage(liveDoc("Fifth paragraph, rewritten by the agent.")),
+      });
+
+      expect(rendered.getEditor().getText()).toContain(
+        "rewritten by the agent",
+      );
+      expect(
+        queryByTestId(rendered.container, draftId as string),
+      ).not.toBeNull();
+      expect(rendered.getEditor().getHTML()).toMatch(
+        /data-comment-ids="[^"]*c2[^"]*"[^>]*>Third/,
+      );
+    });
+
+    async function typeIntoTextarea(
+      textarea: HTMLTextAreaElement,
+      value: string,
+    ) {
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(
+          HTMLTextAreaElement.prototype,
+          "value",
+        )?.set?.call(textarea, value);
+        textarea.dispatchEvent(new InputEvent("input", { bubbles: true }));
+      });
+    }
+
+    it("re-keys an open root draft when the agent's change claims its id", async () => {
+      const rendered = await renderPageCard({ page: livePage(liveDoc()) });
+      await selectText(rendered.getEditor(), "Third");
+      await addCommentWithShortcut();
+      await typeIntoTextarea(
+        getByTestId<HTMLTextAreaElement>(
+          rendered.container,
+          "comment-banner-c2-editor",
+        ),
+        "My unsaved draft",
+      );
+
+      // The agent adds its own comment c2 on another paragraph.
+      await rendered.rerender({
+        page: livePage(
+          liveDoc().replace(
+            "Fourth paragraph.",
+            "{==Fourth==}{>>Agent note<<}{#c2} paragraph.",
+          ) + '  c2:\n    by: AI\n    at: "2026-05-24T11:00:00.000Z"\n',
+        ),
+      });
+      await flushReact();
+      await flushAnimationFrame();
+
+      // The draft moved to a fresh id, text and anchor intact.
+      const draftEditor = queryByTestId<HTMLTextAreaElement>(
+        rendered.container,
+        "comment-banner-c3-editor",
+      );
+      expect(draftEditor?.value).toBe("My unsaved draft");
+      const html = rendered.getEditor().getHTML();
+      expect(html).toMatch(/data-comment-ids="[^"]*c3[^"]*"[^>]*>Third/);
+      expect(html).toMatch(/data-comment-ids="\[&quot;c2&quot;\]"[^>]*>Fourth/);
+
+      // Submitting saves both comments under distinct ids.
+      vi.useFakeTimers();
+      await act(async () => {
+        getByTestId(
+          rendered.container,
+          "comment-banner-c3-action-save",
+        ).dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+        await Promise.resolve();
+      });
+      const saved = rendered.onSave.mock.calls.at(-1)?.[1] as string;
+      expect(saved).toContain("{==Fourth==}{>>Agent note<<}{#c2}");
+      expect(saved).toContain("{==Third==}{>>My unsaved draft<<}{#c3}");
+    });
+
+    it("re-keys an open reply draft when the agent replies with the same id", async () => {
+      const rendered = await renderPageCard({ page: livePage(liveDoc()) });
+      await selectText(rendered.getEditor(), "alpha");
+      await act(async () => {
+        getByTestId(
+          rendered.container,
+          "comment-banner-c1-action-reply",
+        ).dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      await flushReact();
+      await typeIntoTextarea(
+        getByTestId<HTMLTextAreaElement>(
+          rendered.container,
+          "comment-banner-c2-editor",
+        ),
+        "My unsaved reply",
+      );
+
+      // The agent answers in the same thread through the endmatter only.
+      await rendered.rerender({
+        page: livePage(
+          liveDoc() +
+            '  c2:\n    body: Agent answer\n    by: AI\n    at: "2026-05-24T11:00:00.000Z"\n    re: c1\n',
+        ),
+      });
+      await flushReact();
+      await flushAnimationFrame();
+
+      expect(
+        queryByTestId(rendered.container, "comment-banner-c2-body")
+          ?.textContent,
+      ).toContain("Agent answer");
+      expect(
+        queryByTestId<HTMLTextAreaElement>(
+          rendered.container,
+          "comment-banner-c3-editor",
+        )?.value,
+      ).toBe("My unsaved reply");
+
+      vi.useFakeTimers();
+      await act(async () => {
+        getByTestId(
+          rendered.container,
+          "comment-banner-c3-action-save",
+        ).dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+        await Promise.resolve();
+      });
+      const saved = rendered.onSave.mock.calls.at(-1)?.[1] as string;
+      expect(saved).toMatch(/c2:\n\s+body: Agent answer/);
+      expect(saved).toMatch(/ {2}c3:\n( {4}.*\n)* {4}body: My unsaved reply\n/);
+      expect(saved).toMatch(/ {2}c3:\n( {4}.*\n)* {4}re: c1\n/);
+    });
+
+    it("merges a dirty draft with a non-overlapping disk change and saves the merge once", async () => {
+      const rendered = await renderPageCard({ page: livePage(liveDoc()) });
+      const editor = rendered.getEditor();
+      vi.useFakeTimers();
+      const secondEnd = (findTextRange(editor, "Second paragraph")?.to ??
+        0) as number;
+      await act(async () => {
+        editor
+          .chain()
+          .focus()
+          .setTextSelection(secondEnd)
+          .insertContent(" typed locally")
+          .run();
+      });
+      await flushReact();
+      const caret = editor.state.selection.from;
+
+      let result: unknown;
+      await act(async () => {
+        result = rendered
+          .getSaveController()
+          .mergeExternalContent(
+            liveDoc("Fifth paragraph, rewritten by the agent."),
+          );
+      });
+
+      expect(result).toEqual({ status: "merged" });
+      expect(editor.getText()).toContain("Second paragraph typed locally");
+      expect(editor.getText()).toContain("rewritten by the agent");
+      expect(editor.state.selection.from).toBe(caret);
+
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+        await Promise.resolve();
+      });
+      expect(rendered.onSave).toHaveBeenCalledTimes(1);
+      const saved = rendered.onSave.mock.calls[0]?.[1] as string;
+      expect(saved).toContain("Second paragraph typed locally.");
+      expect(saved).toContain("Fifth paragraph, rewritten by the agent.");
+    });
+
+    it("merges only real user edits when untouched parts serialize differently", async () => {
+      // Source the serializer would normalize: `*` bullets, `__bold__`,
+      // `*em*`, a setext heading, `1)` lists, `***` rules, heading spacing.
+      const source = [
+        "Paragraph one.",
+        "",
+        "* star bullet",
+        "* second",
+        "",
+        "Some __bold__ and *em* text.",
+        "",
+        "Heading",
+        "=======",
+        "",
+        "1) paren list",
+        "",
+        "***",
+        "",
+        "Paragraph five.",
+        "",
+      ].join("\n");
+      const rendered = await renderPageCard({
+        page: { id: "normalized-doc", title: "Normalized", content: source },
+      });
+      const editor = rendered.getEditor();
+      vi.useFakeTimers();
+      const firstEnd = (findTextRange(editor, "Paragraph one")?.to ??
+        0) as number;
+      await act(async () => {
+        editor
+          .chain()
+          .focus()
+          .setTextSelection(firstEnd)
+          .insertContent(", edited by the user")
+          .run();
+      });
+      await flushReact();
+
+      const theirs = source.replace(
+        "Paragraph five.",
+        "Paragraph *five*, by the agent.",
+      );
+      let result: unknown;
+      await act(async () => {
+        result = rendered.getSaveController().mergeExternalContent(theirs);
+      });
+
+      expect(result).toEqual({ status: "merged" });
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+        await Promise.resolve();
+      });
+      expect(rendered.onSave).toHaveBeenCalledTimes(1);
+      // The user's edit plus the agent's bytes; untouched parts byte-for-byte.
+      expect(rendered.onSave.mock.calls[0]?.[1]).toBe(
+        theirs.replace("Paragraph one.", "Paragraph one, edited by the user."),
+      );
+    });
+
+    it("reports a conflict for overlapping edits and leaves the draft alone", async () => {
+      const rendered = await renderPageCard({ page: livePage(liveDoc()) });
+      const editor = rendered.getEditor();
+      const fifthEnd = (findTextRange(editor, "Fifth paragraph")?.to ??
+        0) as number;
+      await act(async () => {
+        editor
+          .chain()
+          .focus()
+          .setTextSelection(fifthEnd)
+          .insertContent(" mine")
+          .run();
+      });
+      await flushReact();
+      const textBefore = editor.getText();
+
+      let result: unknown;
+      await act(async () => {
+        result = rendered
+          .getSaveController()
+          .mergeExternalContent(liveDoc("Fifth paragraph, theirs."));
+      });
+
+      expect(result).toEqual({ status: "conflict" });
+      expect(editor.getText()).toBe(textBefore);
+    });
+
+    it("updates the raw code editor in place without re-saving", async () => {
+      const rendered = await renderPageCard({
+        page: livePage(liveDoc()),
+        editorViewMode: "code",
+      });
+      const cmContent = rendered.container.querySelector(".cm-content");
+      expect(cmContent).not.toBeNull();
+
+      vi.useFakeTimers();
+      await rendered.rerender({
+        page: livePage(liveDoc("Fifth paragraph, rewritten by the agent.")),
+      });
+
+      expect(rendered.container.querySelector(".cm-content")).toBe(cmContent);
+      expect(cmContent?.textContent).toContain("rewritten by the agent");
+      await act(async () => {
+        vi.advanceTimersByTime(2000);
+        await Promise.resolve();
+      });
+      expect(rendered.onSave).not.toHaveBeenCalled();
+    });
+  });
+
   it("comment selection still updates fallback UI", async () => {
     const rendered = await renderPageCard({
       page: {
@@ -1555,6 +2090,97 @@ describe("PageCard editor integration", () => {
         ?.textContent,
     ).toContain("Comment body");
     expect(rendered.container.textContent).toContain("Me");
+  });
+
+  it("cancelling an empty comment composer on an unedited document never saves", async () => {
+    const rendered = await renderPageCard({
+      page: {
+        id: "doc-comment-cancel-1",
+        title: "Doc Comment Cancel 1",
+        content: [
+          "Setext title",
+          "============",
+          "",
+          "* star bullet with target text",
+          "",
+          "Wrapped paragraph",
+          "with __bold__.",
+          "",
+        ].join("\n"),
+      },
+      selected: true,
+    });
+
+    await selectText(rendered.getEditor(), "target");
+    await addCommentWithShortcut();
+
+    vi.useFakeTimers();
+
+    const commentEditor = getByTestId<HTMLTextAreaElement>(
+      rendered.container,
+      "comment-banner-c1-editor",
+    );
+    await act(async () => {
+      commentEditor.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Escape",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(
+      queryByTestId(rendered.container, "comment-banner-c1-editor"),
+    ).toBeNull();
+
+    await act(async () => {
+      vi.advanceTimersByTime(1500);
+      await Promise.resolve();
+    });
+
+    expect(rendered.onSave).not.toHaveBeenCalled();
+    expect(rendered.onSaveStateChange.mock.calls.at(-1)?.[0]).toBe("saved");
+  });
+
+  it("keeps an open, empty comment draft out of a save triggered by another edit", async () => {
+    const source = [
+      "* star bullet with target text",
+      "",
+      "Edit here.",
+      "",
+    ].join("\n");
+    const rendered = await renderPageCard({
+      page: { id: "doc-comment-draft-edit-1", title: "Doc", content: source },
+      selected: true,
+    });
+    const editor = rendered.getEditor();
+
+    await selectText(editor, "target");
+    await addCommentWithShortcut();
+    expect(
+      queryByTestId(rendered.container, "comment-banner-c1-editor"),
+    ).not.toBeNull();
+
+    vi.useFakeTimers();
+
+    const range = findTextRange(editor, "Edit here.");
+    await act(async () => {
+      editor
+        .chain()
+        .setTextSelection(range?.to ?? 0)
+        .insertContent(" Done.")
+        .run();
+    });
+    await flushReact();
+    await act(async () => {
+      vi.advanceTimersByTime(500);
+      await Promise.resolve();
+    });
+
+    expect(rendered.onSave).toHaveBeenCalledTimes(1);
+    expect(rendered.onSave.mock.calls[0]?.[1]).toBe(
+      source.replace("Edit here.\n", "Edit here. Done.\n"),
+    );
   });
 
   it("does not autosave a newly-created empty comment before it is submitted", async () => {

@@ -174,6 +174,40 @@
     background-color: transparent;
   }
 
+  /* Text an external edit (another editor, an agent) just changed on disk:
+     a brief tint that fades out, like a live artifact update. */
+  .tiptap .external-change-highlight,
+  .markdown-code-editor .external-change-highlight {
+    --external-change-bg: rgb(186 230 253 / 0.85);
+    border-radius: 0.2rem;
+    box-decoration-break: clone;
+    -webkit-box-decoration-break: clone;
+    animation: external-change-fade 1.5s ease-out forwards;
+  }
+
+  .dark .tiptap .external-change-highlight,
+  .dark .markdown-code-editor .external-change-highlight {
+    --external-change-bg: rgb(14 116 144 / 0.55);
+  }
+
+  @keyframes external-change-fade {
+    0%,
+    35% {
+      background-color: var(--external-change-bg);
+    }
+    100% {
+      background-color: transparent;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .tiptap .external-change-highlight,
+    .markdown-code-editor .external-change-highlight {
+      animation: none;
+      background-color: var(--external-change-bg);
+    }
+  }
+
   .tiptap .critic-change {
     box-decoration-break: clone;
     -webkit-box-decoration-break: clone;
@@ -668,6 +702,91 @@
     opacity: 0;
     transform: scale(1.6);
   }
+}
+
+/* Markdown rendered inside comment bodies (agent answers, user notes). */
+.comment-markdown {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.comment-markdown > * + * {
+  margin-top: 0.4rem;
+}
+
+.comment-markdown ul,
+.comment-markdown ol {
+  padding-left: 1.1rem;
+}
+
+.comment-markdown ul {
+  list-style: disc;
+}
+
+.comment-markdown ol {
+  list-style: decimal;
+}
+
+.comment-markdown a {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.comment-markdown code {
+  border-radius: 4px;
+  background: rgb(120 113 108 / 0.12);
+  padding: 0 0.25rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.92em;
+}
+
+.comment-markdown pre {
+  overflow-x: auto;
+  border-radius: 6px;
+  background: rgb(120 113 108 / 0.12);
+  padding: 0.4rem 0.55rem;
+}
+
+.comment-markdown pre code {
+  background: transparent;
+  padding: 0;
+}
+
+.comment-markdown blockquote {
+  border-left: 2px solid rgb(120 113 108 / 0.35);
+  padding-left: 0.5rem;
+}
+
+.comment-markdown h1,
+.comment-markdown h2,
+.comment-markdown h3,
+.comment-markdown h4 {
+  font-weight: 600;
+}
+
+/* Thread reader dialog: a readable measure and size for long answers. */
+.comment-reader-markdown {
+  max-width: 68ch;
+  font-size: 15px;
+  line-height: 1.7;
+  overflow-wrap: break-word;
+}
+
+.comment-reader-markdown > * + * {
+  margin-top: 0.75rem;
+}
+
+.comment-reader-markdown pre {
+  max-width: 100%;
+  padding: 0.6rem 0.8rem;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.comment-reader-markdown h1,
+.comment-reader-markdown h2,
+.comment-reader-markdown h3 {
+  font-size: 1.05em;
 }
 
 @keyframes review-handoff-robots-hop {

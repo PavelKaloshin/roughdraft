@@ -30,11 +30,7 @@
       "Bash(awk:*)",
       "Bash(sed -i:*)",
       "Edit(./Makefile)",
-      "Write(./Makefile)",
-      "MultiEdit(./Makefile)",
-      "Edit(./scripts/dev/verify-ui.mjs)",
-      "Write(./scripts/dev/verify-ui.mjs)",
-      "MultiEdit(./scripts/dev/verify-ui.mjs)"
+      "Edit(./scripts/dev/verify-ui.mjs)"
     ]
   }
 }

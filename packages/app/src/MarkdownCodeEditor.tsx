@@ -4,7 +4,16 @@ import { yamlFrontmatter } from "@codemirror/lang-yaml";
 import { EditorState, type Extension } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { useEffect, useRef } from "react";
+import {
+  codeExternalChangeHighlight,
+  externalChangeHighlightEffect,
+} from "./code-external-change-highlight";
 import { cn } from "./lib/utils";
+
+export interface ApplyCodeValueOptions {
+  /** Briefly tint the changed range (an external change from disk). */
+  highlight?: boolean;
+}
 
 interface MarkdownCodeEditorProps {
   value: string;
@@ -18,6 +27,63 @@ interface MarkdownCodeEditorProps {
    * re-runs the scroll, so clicking the same outline heading twice works.
    */
   scrollToLine?: { line: number; requestId: number } | null;
+  /**
+   * Receives a function that applies an external value immediately, as a
+   * minimal change, without reporting it back through `onChange`. With
+   * `highlight`, the changed range flashes like in the rich-text editor.
+   */
+  applyValueRef?: {
+    current: ((value: string, options?: ApplyCodeValueOptions) => void) | null;
+  };
+}
+
+/**
+ * The smallest single change that turns `current` into `next`: the common
+ * prefix and suffix stay, so the selection and scroll position map through an
+ * external edit instead of jumping to the end of a whole-document replace.
+ */
+export function computeMinimalTextChange(
+  current: string,
+  next: string,
+): { from: number; to: number; insert: string } | null {
+  if (current === next) return null;
+
+  let start = 0;
+  const maxStart = Math.min(current.length, next.length);
+  while (start < maxStart && current[start] === next[start]) start += 1;
+
+  let currentEnd = current.length;
+  let nextEnd = next.length;
+  while (
+    currentEnd > start &&
+    nextEnd > start &&
+    current[currentEnd - 1] === next[nextEnd - 1]
+  ) {
+    currentEnd -= 1;
+    nextEnd -= 1;
+  }
+
+  return { from: start, to: currentEnd, insert: next.slice(start, nextEnd) };
+}
+
+function applyMinimalValue(
+  view: EditorView,
+  value: string,
+  lastValueRef: { current: string },
+  options: ApplyCodeValueOptions = {},
+) {
+  lastValueRef.current = value;
+  const change = computeMinimalTextChange(view.state.doc.toString(), value);
+  if (!change) return;
+  view.dispatch({
+    changes: change,
+    effects: options.highlight
+      ? externalChangeHighlightEffect(
+          change.from,
+          change.from + change.insert.length,
+        )
+      : [],
+  });
 }
 
 export function createMarkdownCodeEditorExtensions(
@@ -29,6 +95,7 @@ export function createMarkdownCodeEditorExtensions(
     basicSetup,
     yamlFrontmatter({ content: markdown() }),
     EditorView.lineWrapping,
+    codeExternalChangeHighlight(),
     EditorState.readOnly.of(readOnly),
     EditorView.editable.of(!readOnly),
     EditorView.updateListener.of((update) => {
@@ -97,6 +164,7 @@ export function MarkdownCodeEditor({
   className,
   testId,
   scrollToLine = null,
+  applyValueRef,
 }: MarkdownCodeEditorProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const editorViewRef = useRef<EditorView | null>(null);
@@ -141,21 +209,19 @@ export function MarkdownCodeEditor({
     const view = editorViewRef.current;
     if (!view) return;
 
-    const currentValue = view.state.doc.toString();
-    if (currentValue === value) {
-      lastValueRef.current = value;
-      return;
-    }
-
-    lastValueRef.current = value;
-    view.dispatch({
-      changes: {
-        from: 0,
-        to: currentValue.length,
-        insert: value,
-      },
-    });
+    applyMinimalValue(view, value, lastValueRef);
   }, [value]);
+
+  useEffect(() => {
+    if (!applyValueRef) return;
+    applyValueRef.current = (nextValue, options) => {
+      const view = editorViewRef.current;
+      if (view) applyMinimalValue(view, nextValue, lastValueRef, options);
+    };
+    return () => {
+      applyValueRef.current = null;
+    };
+  }, [applyValueRef]);
 
   useEffect(() => {
     if (!scrollToLine) return;

@@ -7,6 +7,24 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { CommentEditorList } from "./CommentEditorList";
 import {
+  type CommentReaderTarget,
+  CommentThreadReaderDialog,
+} from "./CommentThreadReader";
+import {
+  CommentReaderContext,
+  type CommentReaderContextValue,
+  escapeAttributeValue,
+} from "./comment-reader-context";
+import { matchesOpenReaderShortcut } from "./comment-shortcuts";
+import {
+  applyCommentIdRenames,
+  buildCommentIdRenameTransaction,
+  type CommentIdRename,
+  CommentDraftRenamesContext,
+  collectMarkedCommentIds,
+  planDraftsAcrossExternalChange,
+} from "./comment-draft-renames";
+import {
   type CriticChangeAttrs,
   type CriticComment,
   createCriticChange,
@@ -20,7 +38,11 @@ import {
   type CriticChangeRailItem,
   DocumentReviewRail,
 } from "./DocumentReviewRail";
-import { getPreferredCommentId, parseCommentIds } from "./document-comments";
+import {
+  getPreferredCommentId,
+  getRootThreadIdForCommentId,
+  parseCommentIds,
+} from "./document-comments";
 import { EditorContextMenu } from "./EditorContextMenu";
 import {
   commentHighlightPluginKey,
@@ -28,8 +50,17 @@ import {
   criticChangeHighlightPluginKey,
   SUGGESTED_PARAGRAPH_SENTINEL,
 } from "./editor-extensions";
+import { addExternalChangeHighlight } from "./external-change-highlight";
+import {
+  buildExternalContentTransaction,
+  syncSelectionFromDom,
+} from "./external-content-sync";
 import { cn } from "./lib/utils";
-import { MarkdownCodeEditor } from "./MarkdownCodeEditor";
+import { mergeMarkdown } from "./markdown-merge";
+import {
+  type ApplyCodeValueOptions,
+  MarkdownCodeEditor,
+} from "./MarkdownCodeEditor";
 import {
   buildLocationForLinkedMarkdownDocument,
   joinPath,
@@ -50,9 +81,25 @@ export type ManualSaveResult =
   | { status: "blocked" }
   | { status: "error"; error: unknown };
 
+export type ExternalMergeResult = { status: "merged" } | { status: "conflict" };
+
 export interface DocumentSaveController {
   flushSave: () => Promise<ManualSaveResult>;
+  /**
+   * Three-way merges markdown that changed on disk (`theirs`) into the local
+   * draft, using the last saved/accepted markdown as the base. On success the
+   * merge is applied in place and, if it differs from disk, autosaved; on a
+   * conflict nothing changes and the caller shows the conflict banner.
+   */
+  mergeExternalContent: (theirs: string) => ExternalMergeResult;
+  /** Resolves once an in-flight autosave has settled. */
+  waitForPendingSave: () => Promise<void>;
 }
+
+type ExternalMarkdownSync = (
+  markdown: string,
+  options: { highlight: boolean },
+) => void;
 
 type EditorViewMode = "rich-text" | "code";
 export type DocumentInteractionMode = "viewing" | "suggesting" | "editing";
@@ -105,7 +152,9 @@ interface RichTextEditorSurfaceProps {
   selected: boolean;
   layout: "default" | "embedded-demo";
   focusRequestKey: string | null;
-  sourceMarkdown: string;
+  /** Read once, when the editor mounts. Later changes go through `syncRef`. */
+  readSourceMarkdown: () => string;
+  syncRef: { current: ExternalMarkdownSync | null };
   onMarkdownChange: (markdown: string) => void;
   interactionMode: DocumentInteractionMode;
   backend: StorageBackend;
@@ -120,6 +169,9 @@ interface CodeEditorSurfaceProps {
   layout: "default" | "embedded-demo";
   onMarkdownChange: (markdown: string) => void;
   outlineJumpRequest: OutlineJumpRequest | null;
+  applyValueRef: {
+    current: ((value: string, options?: ApplyCodeValueOptions) => void) | null;
+  };
 }
 
 export interface DraftSuggestionState {
@@ -295,6 +347,7 @@ function addCommentIdsToAnchor(
   editor: Editor | null,
   anchorCommentId: string,
   commentIdsToAdd: string[],
+  options: { silent?: boolean } = {},
 ): string[] | null {
   if (!editor) return null;
 
@@ -334,6 +387,10 @@ function addCommentIdsToAnchor(
 
   if (!found) return null;
 
+  if (options.silent) {
+    tr.setMeta("addToHistory", false);
+    tr.setMeta("preventUpdate", true);
+  }
   editor.view.dispatch(tr);
   return nextCommentIds;
 }
@@ -594,8 +651,10 @@ function addCommentIdsToCriticChange(
 export function shouldDismissCommentThread(target: EventTarget | null) {
   if (!(target instanceof Element)) return true;
 
+  // The thread reader dialog (and its overlay) reads the selected thread;
+  // clicking in it keeps that thread open so focus can return to it.
   return !target.closest(
-    '[data-comment-thread-container="true"], [data-suggestion-thread-container="true"], .comment-anchor[data-comment-ids], .critic-change[data-critic-change-id]',
+    '[data-comment-thread-container="true"], [data-suggestion-thread-container="true"], .comment-anchor[data-comment-ids], .critic-change[data-critic-change-id], [data-comment-reader="true"], [data-slot="dialog-overlay"]',
   );
 }
 
@@ -605,7 +664,8 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
   selected,
   layout,
   focusRequestKey,
-  sourceMarkdown,
+  readSourceMarkdown,
+  syncRef,
   onMarkdownChange,
   interactionMode,
   backend,
@@ -635,6 +695,18 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
     string | null
   >(null);
   const [newCommentDraftIds, setNewCommentDraftIds] = useState<string[]>([]);
+  const newCommentDraftIdsRef = useRef<string[]>([]);
+  newCommentDraftIdsRef.current = newCommentDraftIds;
+  const [commentDraftRenames, setCommentDraftRenames] = useState<
+    readonly CommentIdRename[]
+  >([]);
+  // Bumped when an external change rewrites part of the doc, so DOM listeners
+  // bound to rendered comment/change anchors are re-attached.
+  const [externalContentRevision, setExternalContentRevision] = useState(0);
+  const pendingExternalMarkdownRef = useRef<{
+    markdown: string;
+    highlight: boolean;
+  } | null>(null);
 
   const resolveFileUrl = useCallback(
     (path: string) => backend.resolveFileUrl(path),
@@ -650,19 +722,25 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
     [activeDocumentPath, backend],
   );
 
-  const parsedContent = useMemo(
-    () =>
-      criticMarkdownToEditorState(sourceMarkdown, {
-        resolveFileUrl,
-        resolveLinkUrl,
-      }),
-    [resolveFileUrl, resolveLinkUrl, sourceMarkdown],
+  // Parsed once per mount. External file changes are applied incrementally
+  // (see applyExternalMarkdown) instead of remounting the editor.
+  const [parsedContent] = useState(() =>
+    criticMarkdownToEditorState(
+      readSourceMarkdown(),
+      { resolveFileUrl, resolveLinkUrl },
+      { blockSource: true },
+    ),
   );
   const [comments, setComments] = useState<Map<string, CriticComment>>(
     () => parsedContent.comments,
   );
   const frontmatterRef = useRef<string | null>(parsedContent.frontmatter);
   const endmatterRef = useRef<string | null>(parsedContent.endmatter);
+  const headingSpacingRef = useRef(parsedContent.headingSpacing);
+  // Source text of the loaded blocks: untouched blocks are saved byte-for-byte.
+  // Replaced whenever new content is loaded (external change, merge); kept
+  // across the user's own saves, so undoing an edit restores the original bytes.
+  const blockSourceRef = useRef(parsedContent.blockSource);
 
   useEffect(() => {
     commentsRef.current = comments;
@@ -684,18 +762,34 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
       const currentDoc = doc ?? currentEditor?.getJSON();
       if (!currentDoc) return;
 
+      // An empty comment draft that was never submitted is UI state only: it
+      // is not written, so opening a composer never changes the file.
+      const allComments = nextComments ?? commentsRef.current;
+      const emptyDraftIds = new Set(
+        newCommentDraftIdsRef.current.filter(
+          (id) => allComments.get(id)?.content.trim() === "",
+        ),
+      );
+      const savedComments =
+        emptyDraftIds.size === 0
+          ? allComments
+          : new Map([...allComments].filter(([id]) => !emptyDraftIds.has(id)));
+
       onMarkdownChange(
         editorStateToCriticMarkdown(
-          currentDoc,
-          nextComments ?? commentsRef.current,
+          withoutCommentIds(currentDoc, emptyDraftIds),
+          savedComments,
           {
             frontmatter: frontmatterRef.current,
             endmatter: endmatterRef.current,
+            headingSpacing: headingSpacingRef.current,
+            blockSource: blockSourceRef.current,
+            markdownOptions: { resolveFileUrl, resolveLinkUrl },
           },
         ),
       );
     },
-    [onMarkdownChange],
+    [onMarkdownChange, resolveFileUrl, resolveLinkUrl],
   );
 
   const insertFiles = useCallback(
@@ -1227,11 +1321,15 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
           return true;
         },
       },
-      onUpdate: ({ editor: currentEditor }) => {
+      onUpdate: ({ editor: currentEditor, transaction }) => {
         if (suppressNextMarkdownUpdateRef.current) {
           suppressNextMarkdownUpdateRef.current = false;
           return;
         }
+        // Plugins such as TrailingNode append doc changes to meta-only
+        // transactions (highlight refreshes, setEditable). Those are not edits,
+        // and treating them as one re-saves a document nobody touched.
+        if (!transaction.docChanged) return;
 
         emitMarkdownChange(currentEditor.getJSON());
         refreshCriticChanges();
@@ -1286,27 +1384,127 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
     );
   }, [activeChangeIds]);
 
+  const applyExternalMarkdown = useCallback<ExternalMarkdownSync>(
+    (markdown, { highlight }) => {
+      const currentEditor = editorRef.current;
+      if (!currentEditor || currentEditor.isDestroyed) {
+        pendingExternalMarkdownRef.current = { markdown, highlight };
+        return;
+      }
+      pendingExternalMarkdownRef.current = null;
+
+      const parsed = criticMarkdownToEditorState(
+        markdown,
+        { resolveFileUrl, resolveLinkUrl },
+        { blockSource: true },
+      );
+      frontmatterRef.current = parsed.frontmatter;
+      endmatterRef.current = parsed.endmatter;
+      headingSpacingRef.current = parsed.headingSpacing;
+      blockSourceRef.current = parsed.blockSource;
+
+      // An open comment draft lives only in the editor until it is submitted;
+      // keep it (and its anchor) across the external change. A draft whose id
+      // the change claims (the agent added its own `c2`) moves to a fresh id.
+      const { drafts, renames } = planDraftsAcrossExternalChange(
+        newCommentDraftIdsRef.current,
+        commentsRef.current,
+        parsed.comments,
+      );
+      if (renames.length > 0) {
+        const renameTr = buildCommentIdRenameTransaction(
+          currentEditor.state,
+          renames,
+        );
+        if (renameTr) currentEditor.view.dispatch(renameTr);
+        const rename = (id: string | null) =>
+          id == null ? id : applyCommentIdRenames(id, renames);
+        newCommentDraftIdsRef.current = newCommentDraftIdsRef.current.map(
+          (id) => applyCommentIdRenames(id, renames),
+        );
+        setNewCommentDraftIds((current) =>
+          current.map((id) => applyCommentIdRenames(id, renames)),
+        );
+        setSelectedCommentId(rename);
+        setHoveredCommentId(rename);
+        setPendingFocusCommentId(rename);
+        setCommentDraftRenames((current) => [...current, ...renames]);
+      }
+      const draftIds = [...drafts.keys()];
+      const nextComments = new Map(parsed.comments);
+      for (const [id, draft] of drafts) nextComments.set(id, draft);
+      commentsRef.current = nextComments;
+      setComments(nextComments);
+
+      let change: ReturnType<typeof buildExternalContentTransaction> = null;
+      try {
+        syncSelectionFromDom(currentEditor.view);
+        change = buildExternalContentTransaction(
+          currentEditor.state,
+          currentEditor.schema.nodeFromJSON(parsed.doc),
+          { ignoredCommentIds: draftIds },
+        );
+      } catch (error) {
+        console.error("Failed to apply external change in place:", error);
+        currentEditor.commands.setContent(parsed.doc, { emitUpdate: false });
+        setExternalContentRevision((current) => current + 1);
+        refreshCriticChanges();
+        return;
+      }
+
+      if (change) {
+        const { tr, insertedFrom, insertedTo } = change;
+        if (highlight) {
+          addExternalChangeHighlight(tr, insertedFrom, insertedTo);
+        }
+        currentEditor.view.dispatch(tr);
+        setDraftSuggestion((current) =>
+          current
+            ? {
+                ...current,
+                from: tr.mapping.map(current.from),
+                to: tr.mapping.map(current.to),
+              }
+            : current,
+        );
+        setExternalContentRevision((current) => current + 1);
+      }
+
+      // A reply draft is anchored by adding its id to the thread's anchor; if
+      // the change rewrote that anchor (the agent replied too), re-attach it.
+      const markedIds = collectMarkedCommentIds(currentEditor.state.doc);
+      for (const [id, draft] of drafts) {
+        if (!draft.parentCommentId || markedIds.has(id)) continue;
+        addCommentIdsToAnchor(currentEditor, draft.parentCommentId, [id], {
+          silent: true,
+        });
+      }
+
+      refreshCriticChanges();
+    },
+    [refreshCriticChanges, resolveFileUrl, resolveLinkUrl],
+  );
+
+  useEffect(() => {
+    syncRef.current = applyExternalMarkdown;
+    return () => {
+      if (syncRef.current === applyExternalMarkdown) {
+        syncRef.current = null;
+      }
+    };
+  }, [applyExternalMarkdown, syncRef]);
+
   useEffect(() => {
     if (!editor) return;
-
-    frontmatterRef.current = parsedContent.frontmatter;
-    endmatterRef.current = parsedContent.endmatter;
-    commentsRef.current = parsedContent.comments;
-    setComments(parsedContent.comments);
-    setSelectedCommentId(null);
-    setHoveredCommentId(null);
-    setSelectedChangeId(null);
-    setHoveredChangeId(null);
-    setDraftSuggestion(null);
-    setPendingFocusCommentId(null);
-
-    const nextDoc = parsedContent.doc;
-    if (JSON.stringify(editor.getJSON()) !== JSON.stringify(nextDoc)) {
-      editor.commands.setContent(nextDoc, { emitUpdate: false });
+    const pending = pendingExternalMarkdownRef.current;
+    if (pending) {
+      applyExternalMarkdown(pending.markdown, {
+        highlight: pending.highlight,
+      });
+    } else {
+      refreshCriticChanges();
     }
-
-    refreshCriticChanges();
-  }, [editor, parsedContent, refreshCriticChanges]);
+  }, [applyExternalMarkdown, editor, refreshCriticChanges]);
 
   useEffect(() => {
     if (!editor || !selected || !focusRequestKey) return;
@@ -1357,6 +1555,7 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
     );
   }, [editor, hoveredChangeId, selectedChangeId]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: re-bind after an external change re-renders anchors
   useEffect(() => {
     if (!editor) return;
 
@@ -1410,8 +1609,9 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
         cleanup();
       }
     };
-  }, [editor]);
+  }, [editor, externalContentRevision]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: re-bind after an external change re-renders change marks
   useEffect(() => {
     if (!editor) return;
 
@@ -1453,7 +1653,7 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
         cleanup();
       }
     };
-  }, [editor]);
+  }, [editor, externalContentRevision]);
 
   const scrollToAnchor = useCallback((dom: HTMLElement, rawId: string) => {
     if (!rawId) return;
@@ -1783,6 +1983,10 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
       nextComments.set(comment.id, comment);
       commentsRef.current = nextComments;
       setComments(nextComments);
+      // Tracked like a new root draft so it survives external changes.
+      setNewCommentDraftIds((current) =>
+        current.includes(comment.id) ? current : [...current, comment.id],
+      );
       setSelectedCommentId(comment.id);
       setHoveredCommentId(null);
       setPendingFocusCommentId(comment.id);
@@ -1989,10 +2193,122 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
     );
   }, []);
 
+  // Thread reader dialog: a centered, scrollable view of one thread.
+  const [readerTarget, setReaderTarget] = useState<CommentReaderTarget | null>(
+    null,
+  );
+  const readerClosingForReplyRef = useRef(false);
+  const getReaderRootId = useCallback((commentId: string) => {
+    const rootId = getRootThreadIdForCommentId(commentId, commentsRef.current);
+    const root = rootId ? commentsRef.current.get(rootId) : undefined;
+    // Replies to a suggestion have no comment root; the reader skips them.
+    if (!root || root.parentCommentId) return null;
+    return root.id;
+  }, []);
+  const openReader = useCallback(
+    (commentId: string) => {
+      const rootId = getReaderRootId(commentId);
+      if (!rootId) return;
+      readerClosingForReplyRef.current = false;
+      setSelectedCommentId(rootId);
+      setReaderTarget({
+        rootId,
+        focusCommentId: commentId === rootId ? null : commentId,
+      });
+    },
+    [getReaderRootId],
+  );
+  const commentReader = useMemo<CommentReaderContextValue>(
+    () => ({
+      canOpen: (commentId) => getReaderRootId(commentId) !== null,
+      open: openReader,
+    }),
+    [getReaderRootId, openReader],
+  );
+  const navigateReader = useCallback((rootId: string) => {
+    // The rail follows, so closing returns focus to the thread being read.
+    setSelectedCommentId(rootId);
+    setReaderTarget({ rootId, focusCommentId: null });
+  }, []);
+  const closeReader = useCallback(() => setReaderTarget(null), []);
+  const replyFromReader = useCallback(
+    (rootId: string) => {
+      readerClosingForReplyRef.current = true;
+      setReaderTarget(null);
+      // After the dialog lets go of focus, the rail composer takes it.
+      requestAnimationFrame(() => replyToComment(rootId));
+    },
+    [replyToComment],
+  );
+  const getReaderFinalFocus = useCallback((): HTMLElement | boolean => {
+    if (readerClosingForReplyRef.current) return false;
+    const rootId = selectedCommentIdRef.current
+      ? getRootThreadIdForCommentId(
+          selectedCommentIdRef.current,
+          commentsRef.current,
+        )
+      : null;
+    if (!rootId) return true;
+    const candidates = document.querySelectorAll<HTMLElement>(
+      `[data-comment-thread-root-id="${escapeAttributeValue(rootId)}"][tabindex]`,
+    );
+    return (
+      [...candidates].find((element) => element.offsetParent !== null) ?? true
+    );
+  }, []);
+
+  useEffect(() => {
+    if (!selected) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (!matchesOpenReaderShortcut(event, navigator.platform)) return;
+      const commentId = selectedCommentIdRef.current;
+      if (!commentId || !getReaderRootId(commentId)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      openReader(commentId);
+    };
+    document.addEventListener("keydown", handleKeyDown, true);
+    return () => document.removeEventListener("keydown", handleKeyDown, true);
+  }, [getReaderRootId, openReader, selected]);
+
+  // Document order of threads and the anchor quote, read from the editor
+  // only while the reader is open.
+  const readerThreadOrder: string[] = [];
+  let readerAnchorText: string | null = null;
+  if (readerTarget && editor) {
+    const seen = new Set<string>();
+    for (const anchor of editor.view.dom.querySelectorAll<HTMLElement>(
+      ".comment-anchor[data-comment-ids]",
+    )) {
+      for (const id of parseCommentIds(anchor.dataset.commentIds)) {
+        const rootId = getRootThreadIdForCommentId(id, comments);
+        const root = rootId ? comments.get(rootId) : undefined;
+        if (!root || root.parentCommentId || seen.has(root.id)) continue;
+        seen.add(root.id);
+        readerThreadOrder.push(root.id);
+      }
+    }
+    const range = findCommentRange(editor, readerTarget.rootId);
+    readerAnchorText = range
+      ? editor.state.doc.textBetween(range.from, range.to, " ")
+      : (findCommentAnchorElement(editor, readerTarget.rootId)?.textContent ??
+        null);
+    readerAnchorText = readerAnchorText?.replaceAll("⁠", "") ?? null;
+  }
+
   const hasReviewRail = comments.size > 0 || criticChanges.length > 0;
   const documentShellRef =
     useReviewLayoutShiftAnimation<HTMLDivElement>(hasReviewRail);
-  const activeComments = activeCommentIds
+  // Endmatter-only replies (e.g. an agent's answer) are not in the anchor's
+  // mark; they belong to the thread through `parentCommentId`.
+  const activeComments = [
+    ...new Set(
+      activeCommentIds.flatMap((commentId) => [
+        commentId,
+        ...getCommentDescendantIds(commentId, comments),
+      ]),
+    ),
+  ]
     .map((commentId) => comments.get(commentId))
     .filter((comment): comment is CriticComment => Boolean(comment));
   const contentCardClass =
@@ -2026,33 +2342,132 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
   );
 
   return (
-    <div
-      className="cursor-text bg-transparent"
-      data-testid="page-card-rich-text"
-    >
-      <div
-        ref={documentShellRef}
-        data-testid="document-page-shell"
-        className={documentShellClass}
-      >
-        <div className={documentMainClass}>
-          {activeComments.length > 0 ? (
-            <CommentEditorList
-              comments={activeComments}
-              className={fallbackClass}
-              testId="document-comment-fallback"
+    <CommentDraftRenamesContext.Provider value={commentDraftRenames}>
+      <CommentReaderContext.Provider value={commentReader}>
+        <CommentThreadReaderDialog
+          target={readerTarget}
+          comments={comments}
+          threadOrder={readerThreadOrder}
+          anchorText={readerAnchorText}
+          onClose={closeReader}
+          onNavigate={navigateReader}
+          onReply={replyFromReader}
+          onUpdateComment={(commentId, nextContent, patch) => {
+            updateComment(commentId, (current) => ({
+              ...current,
+              content: nextContent,
+              ...patch,
+            }));
+          }}
+          getFinalFocus={getReaderFinalFocus}
+        />
+        <div
+          className="cursor-text bg-transparent"
+          data-testid="page-card-rich-text"
+        >
+          <div
+            ref={documentShellRef}
+            data-testid="document-page-shell"
+            className={documentShellClass}
+          >
+            <div className={documentMainClass}>
+              {activeComments.length > 0 ? (
+                <CommentEditorList
+                  comments={activeComments}
+                  className={fallbackClass}
+                  testId="document-comment-fallback"
+                  selectedCommentId={selectedCommentId}
+                  hoveredCommentId={hoveredCommentId}
+                  onDeleteComment={deleteComment}
+                  onUpdateComment={(commentId, nextContent, patch) => {
+                    updateComment(commentId, (current) => ({
+                      ...current,
+                      content: nextContent,
+                      ...patch,
+                    }));
+                  }}
+                  onReplyComment={replyToComment}
+                  onSelectComment={selectComment}
+                  onHoverComment={setHoveredCommentId}
+                  pendingFocusCommentId={pendingFocusCommentId}
+                  newCommentDraftIds={newCommentDraftIds}
+                  onAutoFocusComment={(commentId) => {
+                    setPendingFocusCommentId((current) =>
+                      current === commentId ? null : current,
+                    );
+                  }}
+                />
+              ) : null}
+              <div className={contentInsetClass}>
+                <div
+                  data-testid="document-content-card"
+                  className={cn(
+                    contentCardClass,
+                    "px-10 py-10 sm:px-14 sm:py-14",
+                  )}
+                >
+                  <EditorContextMenu
+                    editor={editor}
+                    backend={backend}
+                    resolveLinkUrl={resolveLinkUrl}
+                    onAddComment={
+                      interactionMode === "viewing"
+                        ? undefined
+                        : handleAddComment
+                    }
+                    onSuggestDeletion={
+                      interactionMode === "viewing"
+                        ? undefined
+                        : handleSuggestDeletion
+                    }
+                    onSuggestReplacement={
+                      interactionMode === "viewing"
+                        ? undefined
+                        : handleSuggestReplacement
+                    }
+                    onSuggestInsertion={
+                      interactionMode === "viewing"
+                        ? undefined
+                        : handleSuggestInsertion
+                    }
+                  >
+                    <div data-testid="rich-text-editor">
+                      <EditorContent editor={editor} />
+                    </div>
+                  </EditorContextMenu>
+                </div>
+              </div>
+            </div>
+            <DocumentReviewRail
+              className={reviewRailClass}
+              layout={layout === "embedded-demo" ? "flow" : "anchored"}
+              testId="document-review-rail"
+              commentGroups={commentGroups}
+              comments={comments}
+              suggestions={criticChanges}
               selectedCommentId={selectedCommentId}
               hoveredCommentId={hoveredCommentId}
+              selectedChangeId={selectedChangeId}
+              hoveredChangeId={hoveredChangeId}
+              contentHeight={contentHeight}
               onDeleteComment={deleteComment}
-              onUpdateComment={(commentId, nextContent) => {
+              onUpdateComment={(commentId, nextContent, patch) => {
                 updateComment(commentId, (current) => ({
                   ...current,
                   content: nextContent,
+                  ...patch,
                 }));
               }}
               onReplyComment={replyToComment}
               onSelectComment={selectComment}
+              onFocusComment={focusComment}
               onHoverComment={setHoveredCommentId}
+              onAcceptSuggestion={acceptSuggestion}
+              onRejectSuggestion={rejectSuggestion}
+              onReplySuggestion={replyToSuggestion}
+              onSelectSuggestion={selectSuggestion}
+              onFocusSuggestion={focusSuggestion}
+              onHoverSuggestion={setHoveredChangeId}
               pendingFocusCommentId={pendingFocusCommentId}
               newCommentDraftIds={newCommentDraftIds}
               onAutoFocusComment={(commentId) => {
@@ -2060,91 +2475,20 @@ const RichTextEditorSurface = memo(function RichTextEditorSurface({
                   current === commentId ? null : current,
                 );
               }}
+              draftSuggestion={draftSuggestion}
+              onDraftSuggestionTextChange={(text) => {
+                setDraftSuggestion((current) =>
+                  current ? { ...current, text } : current,
+                );
+              }}
+              onApplyDraftSuggestion={applyDraftSuggestion}
+              onCancelDraftSuggestion={() => setDraftSuggestion(null)}
+              editor={editor}
             />
-          ) : null}
-          <div className={contentInsetClass}>
-            <div
-              data-testid="document-content-card"
-              className={cn(contentCardClass, "px-10 py-10 sm:px-14 sm:py-14")}
-            >
-              <EditorContextMenu
-                editor={editor}
-                backend={backend}
-                resolveLinkUrl={resolveLinkUrl}
-                onAddComment={
-                  interactionMode === "viewing" ? undefined : handleAddComment
-                }
-                onSuggestDeletion={
-                  interactionMode === "viewing"
-                    ? undefined
-                    : handleSuggestDeletion
-                }
-                onSuggestReplacement={
-                  interactionMode === "viewing"
-                    ? undefined
-                    : handleSuggestReplacement
-                }
-                onSuggestInsertion={
-                  interactionMode === "viewing"
-                    ? undefined
-                    : handleSuggestInsertion
-                }
-              >
-                <div data-testid="rich-text-editor">
-                  <EditorContent editor={editor} />
-                </div>
-              </EditorContextMenu>
-            </div>
           </div>
         </div>
-        <DocumentReviewRail
-          className={reviewRailClass}
-          layout={layout === "embedded-demo" ? "flow" : "anchored"}
-          testId="document-review-rail"
-          commentGroups={commentGroups}
-          comments={comments}
-          suggestions={criticChanges}
-          selectedCommentId={selectedCommentId}
-          hoveredCommentId={hoveredCommentId}
-          selectedChangeId={selectedChangeId}
-          hoveredChangeId={hoveredChangeId}
-          contentHeight={contentHeight}
-          onDeleteComment={deleteComment}
-          onUpdateComment={(commentId, nextContent) => {
-            updateComment(commentId, (current) => ({
-              ...current,
-              content: nextContent,
-            }));
-          }}
-          onReplyComment={replyToComment}
-          onSelectComment={selectComment}
-          onFocusComment={focusComment}
-          onHoverComment={setHoveredCommentId}
-          onAcceptSuggestion={acceptSuggestion}
-          onRejectSuggestion={rejectSuggestion}
-          onReplySuggestion={replyToSuggestion}
-          onSelectSuggestion={selectSuggestion}
-          onFocusSuggestion={focusSuggestion}
-          onHoverSuggestion={setHoveredChangeId}
-          pendingFocusCommentId={pendingFocusCommentId}
-          newCommentDraftIds={newCommentDraftIds}
-          onAutoFocusComment={(commentId) => {
-            setPendingFocusCommentId((current) =>
-              current === commentId ? null : current,
-            );
-          }}
-          draftSuggestion={draftSuggestion}
-          onDraftSuggestionTextChange={(text) => {
-            setDraftSuggestion((current) =>
-              current ? { ...current, text } : current,
-            );
-          }}
-          onApplyDraftSuggestion={applyDraftSuggestion}
-          onCancelDraftSuggestion={() => setDraftSuggestion(null)}
-          editor={editor}
-        />
-      </div>
-    </div>
+      </CommentReaderContext.Provider>
+    </CommentDraftRenamesContext.Provider>
   );
 });
 
@@ -2155,6 +2499,7 @@ const CodeEditorSurface = memo(function CodeEditorSurface({
   layout,
   onMarkdownChange,
   outlineJumpRequest,
+  applyValueRef,
 }: CodeEditorSurfaceProps) {
   // The code editor jumps by source line, which the outline already carries.
   const scrollToLine = useMemo(
@@ -2213,6 +2558,7 @@ const CodeEditorSurface = memo(function CodeEditorSurface({
                 readOnly={interactionMode === "viewing"}
                 autoFocus
                 scrollToLine={scrollToLine}
+                applyValueRef={applyValueRef}
               />
             </div>
           </div>
@@ -2228,6 +2574,63 @@ const CodeEditorSurface = memo(function CodeEditorSurface({
     </div>
   );
 });
+
+/** The doc with the given comment ids removed from its comment marks. */
+function withoutCommentIds(
+  node: JSONContent,
+  commentIds: ReadonlySet<string>,
+): JSONContent {
+  if (commentIds.size === 0) return node;
+  const next: JSONContent = { ...node };
+  if (node.marks) {
+    next.marks = node.marks.flatMap((mark) => {
+      const ids = mark.attrs?.commentIds;
+      if (mark.type !== "commentRef" || !Array.isArray(ids)) return [mark];
+      const kept = ids.filter((id) => !commentIds.has(id));
+      if (kept.length === ids.length) return [mark];
+      return kept.length > 0
+        ? [{ ...mark, attrs: { ...mark.attrs, commentIds: kept } }]
+        : [];
+    });
+    if (next.marks.length === 0) delete next.marks;
+  }
+  if (node.content) {
+    // Text that differed only by the removed mark joins up again, as it
+    // would in a parsed doc.
+    next.content = [];
+    for (const child of node.content) {
+      const mapped = withoutCommentIds(child, commentIds);
+      const previous = next.content.at(-1);
+      if (
+        previous?.type === "text" &&
+        mapped.type === "text" &&
+        JSON.stringify(previous.marks ?? []) ===
+          JSON.stringify(mapped.marks ?? [])
+      ) {
+        next.content[next.content.length - 1] = {
+          ...previous,
+          text: `${previous.text ?? ""}${mapped.text ?? ""}`,
+        };
+      } else {
+        next.content.push(mapped);
+      }
+    }
+  }
+  return next;
+}
+
+/** What the rich-text editor writes for markdown it loaded and did not edit. */
+function normalizeRichTextMarkdown(markdown: string): string {
+  const parsed = criticMarkdownToEditorState(markdown, undefined, {
+    blockSource: true,
+  });
+  return editorStateToCriticMarkdown(parsed.doc, parsed.comments, {
+    frontmatter: parsed.frontmatter,
+    endmatter: parsed.endmatter,
+    headingSpacing: parsed.headingSpacing,
+    blockSource: parsed.blockSource,
+  });
+}
 
 const PageCardEditorSurface = memo(function PageCardEditorSurface({
   page,
@@ -2253,15 +2656,26 @@ const PageCardEditorSurface = memo(function PageCardEditorSurface({
   const inFlightSaveRef = useRef<Promise<ManualSaveResult> | null>(null);
   const pendingMarkdownRef = useRef(page.content);
   const recentMarkdownRef = useRef<Set<string>>(new Set());
-  const previousEditorViewModeRef = useRef<EditorViewMode>(editorViewMode);
   const lastAcceptedMarkdownRef = useRef(page.content);
   const localDirtyRef = useRef(false);
   const forceResetKeyRef = useRef(forceResetKey);
+  const sourcePageIdRef = useRef(page.id);
+  // Bumped by every accepted external change, so a save that was in flight
+  // when the disk changed knows its result is stale.
+  const externalGenerationRef = useRef(0);
+  const editorViewModeRef = useRef<EditorViewMode>(editorViewMode);
+  editorViewModeRef.current = editorViewMode;
+  const richTextSyncRef = useRef<ExternalMarkdownSync | null>(null);
+  const codeApplyValueRef = useRef<
+    ((value: string, options?: ApplyCodeValueOptions) => void) | null
+  >(null);
+  const performSaveRef = useRef<
+    ((nextMarkdown: string) => Promise<ManualSaveResult>) | null
+  >(null);
   const [markdown, setMarkdown] = useState(page.content);
-  const [richTextSourceMarkdown, setRichTextSourceMarkdown] = useState(
-    page.content,
-  );
-  const [richTextSourceVersion, setRichTextSourceVersion] = useState(0);
+  // Only an explicit Reload/Overwrite remounts the rich-text editor; external
+  // file changes are applied in place.
+  const [richTextResetVersion, setRichTextResetVersion] = useState(0);
 
   const reportDirtyState = useCallback(
     (isDirty: boolean) => {
@@ -2272,18 +2686,46 @@ const PageCardEditorSurface = memo(function PageCardEditorSurface({
     [onDirtyStateChange],
   );
 
+  const applyMarkdownToSurface = useCallback(
+    (nextMarkdown: string, highlight: boolean) => {
+      if (editorViewModeRef.current === "code") {
+        codeApplyValueRef.current?.(nextMarkdown, { highlight });
+      } else {
+        richTextSyncRef.current?.(nextMarkdown, { highlight });
+      }
+    },
+    [],
+  );
+
   const acceptMarkdown = useCallback(
-    (nextMarkdown: string) => {
+    (nextMarkdown: string, mode: "reset" | "external" | "silent") => {
       pendingMarkdownRef.current = nextMarkdown;
       lastAcceptedMarkdownRef.current = nextMarkdown;
+      externalGenerationRef.current += 1;
       setMarkdown(nextMarkdown);
-      setRichTextSourceMarkdown(nextMarkdown);
-      setRichTextSourceVersion((current) => current + 1);
+      if (mode === "reset") {
+        setRichTextResetVersion((current) => current + 1);
+      } else {
+        applyMarkdownToSurface(nextMarkdown, mode === "external");
+      }
       onLocalContentChange?.(nextMarkdown);
       reportDirtyState(false);
       onSaveStateChange("saved");
     },
-    [onLocalContentChange, onSaveStateChange, reportDirtyState],
+    [
+      applyMarkdownToSurface,
+      onLocalContentChange,
+      onSaveStateChange,
+      reportDirtyState,
+    ],
+  );
+
+  const readSourceMarkdown = useCallback(
+    () =>
+      sourcePageIdRef.current === page.id
+        ? pendingMarkdownRef.current
+        : page.content,
+    [page.content, page.id],
   );
 
   const rememberRecentMarkdown = useCallback((nextMarkdown: string) => {
@@ -2293,6 +2735,24 @@ const PageCardEditorSurface = memo(function PageCardEditorSurface({
       recentMarkdownRef.current.delete(iterator.next().value as string);
     }
   }, []);
+
+  // A disk change was merged while this save was in flight: the merge already
+  // moved the base forward, so save the merged draft (if it still differs).
+  const saveAfterExternalMerge =
+    useCallback(async (): Promise<ManualSaveResult> => {
+      if (saveTimer.current) {
+        clearTimeout(saveTimer.current);
+        saveTimer.current = null;
+      }
+      if (pendingMarkdownRef.current === lastAcceptedMarkdownRef.current) {
+        reportDirtyState(false);
+        onSaveStateChange("saved");
+        return { status: "saved" };
+      }
+      const save = performSaveRef.current;
+      if (!save) return { status: "blocked" };
+      return await save(pendingMarkdownRef.current);
+    }, [onSaveStateChange, reportDirtyState]);
 
   const performSave = useCallback(
     async (nextMarkdown: string): Promise<ManualSaveResult> => {
@@ -2307,9 +2767,13 @@ const PageCardEditorSurface = memo(function PageCardEditorSurface({
 
       rememberRecentMarkdown(nextMarkdown);
       onSaveStateChange("saving");
+      const generation = externalGenerationRef.current;
 
       try {
         await onSave(page.id, nextMarkdown);
+        if (generation !== externalGenerationRef.current) {
+          return await saveAfterExternalMerge();
+        }
         lastAcceptedMarkdownRef.current = nextMarkdown;
         reportDirtyState(pendingMarkdownRef.current !== nextMarkdown);
         onSaveStateChange(
@@ -2317,6 +2781,9 @@ const PageCardEditorSurface = memo(function PageCardEditorSurface({
         );
         return { status: "saved" };
       } catch (error) {
+        if (generation !== externalGenerationRef.current) {
+          return await saveAfterExternalMerge();
+        }
         console.error("Failed to save page:", error);
         onSaveStateChange("error");
         return { status: "error", error };
@@ -2328,9 +2795,11 @@ const PageCardEditorSurface = memo(function PageCardEditorSurface({
       page.id,
       rememberRecentMarkdown,
       reportDirtyState,
+      saveAfterExternalMerge,
       saveBlocked,
     ],
   );
+  performSaveRef.current = performSave;
 
   const scheduleSave = useCallback(
     (nextMarkdown: string) => {
@@ -2387,53 +2856,177 @@ const PageCardEditorSurface = memo(function PageCardEditorSurface({
     return await performSave(pendingMarkdownRef.current);
   }, [onSaveStateChange, performSave]);
 
+  const mergeExternalContent = useCallback(
+    (theirs: string): ExternalMergeResult => {
+      const mine = pendingMarkdownRef.current;
+      const result = mergeMarkdown({
+        base: lastAcceptedMarkdownRef.current,
+        mine,
+        theirs,
+        // The raw editor's draft is the user's own text; only the rich-text
+        // draft is a re-serialization.
+        normalize:
+          editorViewModeRef.current === "code"
+            ? undefined
+            : normalizeRichTextMarkdown,
+      });
+      if (result.status === "conflict") return { status: "conflict" };
+
+      const merged = result.markdown;
+      externalGenerationRef.current += 1;
+      lastAcceptedMarkdownRef.current = theirs;
+      if (merged !== mine) {
+        applyMarkdownToSurface(merged, true);
+      }
+      pendingMarkdownRef.current = merged;
+      setMarkdown(merged);
+      onLocalContentChange?.(merged);
+
+      if (merged === theirs) {
+        if (saveTimer.current) {
+          clearTimeout(saveTimer.current);
+          saveTimer.current = null;
+        }
+        reportDirtyState(false);
+        onSaveStateChange("saved");
+      } else {
+        reportDirtyState(true);
+        scheduleSave(merged);
+      }
+      return { status: "merged" };
+    },
+    [
+      applyMarkdownToSurface,
+      onLocalContentChange,
+      onSaveStateChange,
+      reportDirtyState,
+      scheduleSave,
+    ],
+  );
+
+  const waitForPendingSave = useCallback(async () => {
+    try {
+      await inFlightSaveRef.current;
+    } catch {
+      // The save reports its own failure; callers only need it settled.
+    }
+  }, []);
+
   useEffect(() => {
-    onSaveControllerChange?.({ flushSave });
+    onSaveControllerChange?.({
+      flushSave,
+      mergeExternalContent,
+      waitForPendingSave,
+    });
     return () => onSaveControllerChange?.(null);
-  }, [flushSave, onSaveControllerChange]);
+  }, [
+    flushSave,
+    mergeExternalContent,
+    onSaveControllerChange,
+    waitForPendingSave,
+  ]);
+
+  // What the rich-text editor writes for the last accepted file when nothing
+  // was edited (cached per accepted text). Usually the file itself; differs
+  // only where the serializer cannot keep the source bytes.
+  const richTextBaselineRef = useRef<{ source: string; baseline: string }>(
+    null,
+  );
+  const isAcceptedContent = useCallback((nextMarkdown: string) => {
+    const accepted = lastAcceptedMarkdownRef.current;
+    if (nextMarkdown === accepted) return true;
+    // The raw editor's text is the user's own; only the rich-text editor
+    // re-serializes.
+    if (editorViewModeRef.current === "code") return false;
+    if (richTextBaselineRef.current?.source !== accepted) {
+      let baseline = accepted;
+      try {
+        baseline = normalizeRichTextMarkdown(accepted);
+      } catch (error) {
+        console.error("Failed to serialize the accepted document:", error);
+      }
+      richTextBaselineRef.current = { source: accepted, baseline };
+    }
+    return nextMarkdown === richTextBaselineRef.current.baseline;
+  }, []);
 
   const handleMarkdownChange = useCallback(
     (nextMarkdown: string) => {
+      // Back at the loaded (or last saved) content, e.g. a comment composer
+      // opened and cancelled, or an edit undone: nothing to save. While a save
+      // is in flight the disk may be about to change, so save normally then.
+      if (!inFlightSaveRef.current && isAcceptedContent(nextMarkdown)) {
+        if (saveTimer.current) {
+          clearTimeout(saveTimer.current);
+          saveTimer.current = null;
+        }
+        const accepted = lastAcceptedMarkdownRef.current;
+        const wasPending = pendingMarkdownRef.current !== accepted;
+        pendingMarkdownRef.current = accepted;
+        setMarkdown(accepted);
+        if (wasPending) onLocalContentChange?.(accepted);
+        reportDirtyState(false);
+        onSaveStateChange("saved");
+        return;
+      }
       pendingMarkdownRef.current = nextMarkdown;
       setMarkdown(nextMarkdown);
       onLocalContentChange?.(nextMarkdown);
       reportDirtyState(nextMarkdown !== lastAcceptedMarkdownRef.current);
       scheduleSave(nextMarkdown);
     },
-    [onLocalContentChange, reportDirtyState, scheduleSave],
+    [
+      isAcceptedContent,
+      onLocalContentChange,
+      onSaveStateChange,
+      reportDirtyState,
+      scheduleSave,
+    ],
   );
 
   useEffect(() => {
     const forceResetChanged = forceResetKeyRef.current !== forceResetKey;
     forceResetKeyRef.current = forceResetKey;
+    const pageChanged = sourcePageIdRef.current !== page.id;
+    sourcePageIdRef.current = page.id;
 
     if (forceResetChanged) {
       recentMarkdownRef.current.delete(page.content);
-      acceptMarkdown(page.content);
+      acceptMarkdown(page.content, "reset");
+      return;
+    }
+
+    if (pageChanged) {
+      // The editor was remounted for the new page (its key includes the id)
+      // and already parsed `page.content`.
+      recentMarkdownRef.current.clear();
+      acceptMarkdown(page.content, "silent");
       return;
     }
 
     if (recentMarkdownRef.current.has(page.content)) {
       recentMarkdownRef.current.delete(page.content);
       lastAcceptedMarkdownRef.current = page.content;
-      pendingMarkdownRef.current = markdown;
-      reportDirtyState(markdown !== page.content);
+      reportDirtyState(pendingMarkdownRef.current !== page.content);
       return;
     }
 
-    if (localDirtyRef.current && markdown !== page.content) {
+    if (page.content === lastAcceptedMarkdownRef.current) {
       return;
     }
 
-    if (markdown === page.content) {
+    if (localDirtyRef.current && pendingMarkdownRef.current !== page.content) {
+      return;
+    }
+
+    if (pendingMarkdownRef.current === page.content) {
       lastAcceptedMarkdownRef.current = page.content;
-      pendingMarkdownRef.current = page.content;
       reportDirtyState(false);
       return;
     }
 
-    acceptMarkdown(page.content);
-  }, [acceptMarkdown, forceResetKey, markdown, page.content, reportDirtyState]);
+    acceptMarkdown(page.content, "external");
+  }, [acceptMarkdown, forceResetKey, page.content, page.id, reportDirtyState]);
 
   useEffect(() => {
     if (!saveBlocked || !saveTimer.current) return;
@@ -2446,17 +3039,16 @@ const PageCardEditorSurface = memo(function PageCardEditorSurface({
     );
   }, [onSaveStateChange, saveBlocked]);
 
+  // When saving is unblocked again (a disk change merged cleanly after a
+  // conflict), persist a draft that is still ahead of the file.
+  const previousSaveBlockedRef = useRef(saveBlocked);
   useEffect(() => {
-    const previousEditorViewMode = previousEditorViewModeRef.current;
-    previousEditorViewModeRef.current = editorViewMode;
-
-    if (previousEditorViewMode !== "code" || editorViewMode !== "rich-text") {
-      return;
-    }
-
-    setRichTextSourceMarkdown(markdown);
-    setRichTextSourceVersion((current) => current + 1);
-  }, [editorViewMode, markdown]);
+    const wasBlocked = previousSaveBlockedRef.current;
+    previousSaveBlockedRef.current = saveBlocked;
+    if (!wasBlocked || saveBlocked || saveTimer.current) return;
+    if (pendingMarkdownRef.current === lastAcceptedMarkdownRef.current) return;
+    scheduleSave(pendingMarkdownRef.current);
+  }, [saveBlocked, scheduleSave]);
 
   useEffect(() => {
     return () => {
@@ -2485,26 +3077,21 @@ const PageCardEditorSurface = memo(function PageCardEditorSurface({
         layout={layout}
         onMarkdownChange={handleMarkdownChange}
         outlineJumpRequest={outlineJumpRequest}
+        applyValueRef={codeApplyValueRef}
       />
     );
   }
 
-  const effectiveRichTextSourceMarkdown =
-    !localDirtyRef.current &&
-    !recentMarkdownRef.current.has(page.content) &&
-    markdown !== page.content
-      ? page.content
-      : richTextSourceMarkdown;
-
   return (
     <RichTextEditorSurface
-      key={`${page.id}:${richTextSourceVersion}:${effectiveRichTextSourceMarkdown}`}
+      key={`${page.id}:${richTextResetVersion}`}
       page={page}
       activeDocumentPath={activeDocumentPath}
       selected={selected}
       layout={layout}
       focusRequestKey={focusRequestKey}
-      sourceMarkdown={effectiveRichTextSourceMarkdown}
+      readSourceMarkdown={readSourceMarkdown}
+      syncRef={richTextSyncRef}
       onMarkdownChange={handleMarkdownChange}
       interactionMode={interactionMode}
       onCommentRailPresenceChange={onCommentRailPresenceChange}

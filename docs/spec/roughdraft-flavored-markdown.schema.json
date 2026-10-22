@@ -106,6 +106,10 @@
         "targetSuggestionId": {
           "$ref": "#/$defs/id"
         },
+        "intent": {
+          "enum": ["comment", "ask", "change"],
+          "description": "What a root comment asks of an agent. Omitted means comment. Ignored on replies."
+        },
         "status": {
           "enum": ["resolved"]
         },

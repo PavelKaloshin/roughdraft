@@ -37,11 +37,13 @@
     "packages/server/dist",
     "packages/server/bin",
     "packages/server/defaults.mjs",
-    "packages/server/defaults.d.mts"
+    "packages/server/defaults.d.mts",
+    "packages/claude-plugin"
   ],
   "dependencies": {
     "@roughdraft/rfm": "file:packages/rfm",
-    "express": "^5.1.0"
+    "express": "^5.1.0",
+    "ws": "^8.22.0"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.12",
